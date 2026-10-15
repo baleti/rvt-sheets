@@ -25,6 +25,22 @@ def datum_ids(d):
     return d['_datums']
 
 
+def _touching(prims, rc):
+    """ids of the prims whose element (all its prims together) overlaps the rectangle rc = (u0, v0, u1, v1)"""
+    import collections
+    box = collections.defaultdict(lambda: [1e18, 1e18, -1e18, -1e18])
+    def pts(p):
+        out = list(p.get('pts') or []) + [q for l in p.get('loops') or [] for q in l] + [q for sg in p.get('segs') or [] for q in sg]
+        if p.get('origin') is not None: out.append(p['origin'])
+        return out
+    for p in prims:
+        b = box[p.get('elem')]
+        for q in pts(p):
+            b[0] = min(b[0], q[0]); b[1] = min(b[1], q[1]); b[2] = max(b[2], q[0]); b[3] = max(b[3], q[1])
+    ok = {e for e, b in box.items() if b[0] <= rc[2] and b[2] >= rc[0] and b[1] <= rc[3] and b[3] >= rc[1] or b[0] > b[2]}
+    return {id(p) for p in prims if p.get('elem') in ok}
+
+
 def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
     sc = SheetComposer(dec, doc)
     doc = sc.doc
@@ -64,7 +80,7 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
         ox, oy = vp['offset'][0], vp['offset'][1]
         tx = lambda u, w: s.P((ox + u * f, oy + w * f))
         cr = crop_rect_uv(v)
-        clip = clip2 = ''
+        clip = clip2 = clip3 = ''
         if cr:
             a = tx(cr[0], cr[3]); b = tx(cr[2], cr[1])
             s.raw('<clipPath id="vp%d"><rect x="%.3f" y="%.3f" width="%.3f" height="%.3f"/></clipPath>' % (k, a[0], a[1], b[0] - a[0], b[1] - a[1]))
@@ -72,10 +88,28 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
             g = 70.0
             s.raw('<clipPath id="vpd%d"><rect x="%.3f" y="%.3f" width="%.3f" height="%.3f"/></clipPath>' % (k, a[0] - g, a[1] - g, b[0] - a[0] + 2 * g, b[1] - a[1] + 2 * g))
             clip = ' clip-path="url(#vp%d)"' % k; clip2 = ' clip-path="url(#vpd%d)"' % k
+            # annotations (tags, dimensions, notes, legends) are clipped to the annotation crop (crop + offsets x scale), not to the model crop
+            from .datums import Datums
+            ar = Datums.annotation_rect(v, v.get('scale') or 100)
+            if ar:
+                a2 = tx(ar[0], ar[3]); b2 = tx(ar[2], ar[1])
+                s.raw('<clipPath id="vpa%d"><rect x="%.3f" y="%.3f" width="%.3f" height="%.3f"/></clipPath>' % (k, a2[0], a2[1], b2[0] - a2[0], b2[1] - a2[1]))
+                clip3 = ' clip-path="url(#vpa%d)"' % k
         sc = v.get('scale') or 100
         s.raw('<g data-view="%s"%s>' % (v['id'], clip))
-        for e in viewsvg.body([p for p in d['prims'] if p.get('elem') not in datum_ids(d)], sc, tx): s.raw(e)
-        s.raw('</g>')
+        rest = [p for p in d['prims'] if p.get('elem') not in datum_ids(d)]
+        if clip3:
+            for e in viewsvg.body([p for p in rest if p.get('layer') in viewsvg.MODEL_LAYERS or p.get('layer') in ('room_fill', 'mask')], sc, tx): s.raw(e)
+            s.raw('</g>')
+            # annotation elements are shown whole when they touch the annotation crop region (Commercial colour legend sticks out past the crop), else dropped
+            ann = [p for p in rest if not (p.get('layer') in viewsvg.MODEL_LAYERS or p.get('layer') in ('room_fill', 'mask'))]
+            keep = _touching(ann, ar)
+            s.raw('<g data-view="%s" data-annotations="1">' % v['id'])
+            for e in viewsvg.body([p for p in ann if id(p) in keep], sc, tx): s.raw(e)
+            s.raw('</g>')
+        else:
+            for e in viewsvg.body(rest, sc, tx): s.raw(e)
+            s.raw('</g>')
         dp = [p for p in d['prims'] if p.get('elem') in datum_ids(d)]
         if dp:
             s.raw('<g data-view="%s" data-datums="1"%s>' % (v['id'], clip2))

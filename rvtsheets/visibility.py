@@ -73,7 +73,7 @@ class Visibility:
         fl = r['fields']
         # elevation arrows: flags do not decide (2026 template arrows have 0 and are listed in every architectural plan; the earlier rule
         # 'bit 1 = shown' came from structural files, explained by the discipline above). Sections: keep bit 1 (Snowdon 1/5 never listed)
-        if r['class'] == 'Section' and not (fl.get('m_viewerFlags') or 0) & 2: return False
+        pass
         # 'show in one view only' (detail sections / callouts drawn in another view): only in their parent view
         if fl.get('m_showInOneViewOnly') and f.eid(fl.get('m_parentDBViewId')) != v.get('id'): return False
         # 'hide at scales coarser than' stored on the marker as 1/N (building section 1:48: shown in 1:48 plans, not in 1:96 ones)
@@ -111,6 +111,43 @@ class Visibility:
                 if cut is not None and not (min(zs) - 1e-6 <= cut <= max(zs) + 1e-6): return False
         return True
 
+    def section_plane_line(self, eid, v):
+        """world points (top, bottom) where the section/callout eid's plane meets section view v's plane, over the marker's vertical
+        extent; None when the planes are parallel"""
+        import numpy as np
+        fl = self.dec.f.rec(eid)['fields']; bs = fl.get('m_boundedSpace') or {}
+        if not bs.get('m_basis') or not bs.get('m_boundOffset'): return None
+        o = np.asarray(bs['m_orig'], float); B = np.asarray(bs['m_basis'], float); bo = bs['m_boundOffset']
+        O = np.asarray(v['origin'], float); Z = np.asarray(v['dir'], float)
+        den = float(B[0] @ Z)
+        if abs(den) < 1e-6: return None
+        t = float((O - o) @ Z) / den
+        return [o + B[0] * t + B[1] * max(bo[1]), o + B[0] * t + B[1] * min(bo[1])], t, bo
+
+    def marker_in_section(self, eid, v):
+        """section / callout markers in section and elevation views (2020 Residential building section vs Revit's per-view list): a callout
+        (m_sectionCreationMethod 202) in its parent view only; a section shows where its plane meets this view's plane within the section's
+        own horizontal extent (m_boundOffset[0]) and this view's crop, never in its own view"""
+        import numpy as np
+        f = self.dec.f; fl = f.rec(eid)['fields']
+        if f.eid(fl.get('m_dbViewId')) == v.get('id'): return False
+        if fl.get('m_sectionCreationMethod') == 202 or fl.get('m_showInOneViewOnly'):
+            return f.eid(fl.get('m_parentDBViewId')) == v.get('id')
+        if not (fl.get('m_viewerFlags') or 0) & 2: return False
+        cs = fl.get('m_coarserScale')
+        if cs and (v.get('scale') or 0) > round(1.0 / cs) + 1e-6: return False
+        r = self.section_plane_line(eid, v)
+        if r is None: return False
+        pts, t, bo = r
+        if not (min(bo[0]) - 1e-6 <= t <= max(bo[0]) + 1e-6): return False
+        from .compose import crop_rect_uv
+        cr = crop_rect_uv(v)
+        if cr is not None:
+            O = np.asarray(v['origin'], float); X = np.asarray(v['right'], float); Y = np.asarray(v['up'], float)
+            uv = [((p - O) @ X, (p - O) @ Y) for p in pts]
+            if not (cr[0] <= uv[0][0] <= cr[2]) or max(uv[0][1], uv[1][1]) < cr[1] or min(uv[0][1], uv[1][1]) > cr[3]: return False
+        return True
+
     def _arrows(self):
         if getattr(self, '_arr', None) is None:
             self._arr = {}
@@ -127,6 +164,22 @@ class Visibility:
         if d is not None and d < p: return 'past'
         if d is not None and d == p: return 'temporary' if c == p else 'demolished'
         return 'new' if c == p else 'existing'
+
+    def _filter_hidden(self, v, eid, c):
+        """view filters (Visibility off) that match the element: Snowdon L2's 'Views - Working' / 'Views - Sheets' hide every section/callout/elevation marker"""
+        if getattr(self, '_fe', None) is None:
+            from .filters import FilterEval
+            self._fe = FilterEval(self.dec, self.doc)
+        par = (self.cats.get(c) or {}).get('parent', INVALID)
+        return not self._fe.view_filters(v, eid, c, par)[0]
+
+    def _filter_cat(self, eid, e):
+        """category filters see: the marked view's category for section/callout/elevation markers"""
+        if e['cls'] == 'Section':
+            r = self.dec.f.rec(eid)
+            return -2000537 if r and r['fields'].get('m_sectionCreationMethod') == 202 else -2000200
+        if e['cls'] == 'InteriorElev': return -2000535
+        return e['cat']
 
     def hidden_categories(self, v):
         s = set(); flags = {}
@@ -208,12 +261,19 @@ class Visibility:
             if e['cls'] in ('Grid', 'RefPlane') and v['kind'] == '3d': why[eid] = 'datum_in_3d'; continue
             if eid in hidden_el: why[eid] = 'hidden_element'; continue
             c = e['cat']
+            if v.get('filters') and (e['cls'] in ('Section', 'InteriorElev') or c != INVALID) and self._filter_hidden(v, eid, self._filter_cat(eid, e)):
+                why[eid] = 'filter_hidden'; continue
             if v['kind'] == 'plan' and e['cls'] in PLAN_MARKERS:
                 ok = self.marker_in_plan(eid, e, v)
                 if ok is not None:
                     if ok and c not in hid: out[eid] = None
                     else: why[eid] = 'marker_rule'
                     continue
+            if v['kind'] == 'section' and e['cls'] == 'Section':
+                ok = self.marker_in_section(eid, v)
+                if ok and c not in hid: out[eid] = None
+                else: why[eid] = 'marker_rule'
+                continue
             if c == INVALID: why[eid] = 'no_category'; continue
             if not (e['vflags'] or 0) & 1: why[eid] = 'view_flags'; continue
             par = (self.cats.get(c) or {}).get('parent', INVALID)

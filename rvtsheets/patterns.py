@@ -27,9 +27,16 @@ def region(loops):
     return g
 
 
+CLIP = None         # shapely geometry set by ViewDrawer.draw while drawing a cropped view: hatching stops at the crop (+5%)
+
+
 def hatch(geom, pattern, scale, view_rot=0.0):
     """pattern dict (decode.fill_patterns) -> list of segments [[u0,v0],[u1,v1]] in view coordinates"""
     if geom is None or geom.is_empty or not pattern or pattern.get('solid'): return []
+    if CLIP is not None:
+        # 2020 Commercial 1:8 detail: surface and topography hatches over whole surfaces made 30 M segments (563 of 569 s)
+        geom = geom.intersection(CLIP)
+        if geom.is_empty: return []
     k0 = scale if pattern.get('target', 0) == 0 else 1.0
     minx, miny, maxx, maxy = geom.bounds
     # a hatch region that is huge compared with the pattern spacing would emit millions of segments (topography under a detail view):

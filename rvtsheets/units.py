@@ -5,10 +5,25 @@ from fractions import Fraction
 from .reader import ob
 
 
+# Revit 2022+ stores unit ids instead of DisplayUnitType codes
+UNIT_DU = {'meters': 0, 'centimeters': 1, 'millimeters': 2, 'feet': 3, 'feetFractionalInches': 4, 'fractionalInches': 5, 'inches': 6}
+
+
+def du_of(opt):
+    """display unit code of a format-options dict (old m_displayUnits, or 2022+ m_unitTypeId)"""
+    if opt.get('m_displayUnits') is not None: return opt['m_displayUnits']
+    u = (opt.get('m_unitTypeId') or {}).get('m_typeId') or ''
+    return UNIT_DU.get(u.split(':')[-1].rsplit('-', 1)[0], 2)
+
+
 def length_format(f):
     for r in f.recs('UnitsElem'):
-        arr = (ob(r['fields'].get('m_units')) or {}).get('m_formatOptionsArr') or []
+        u = ob(r['fields'].get('m_units')) or {}
+        arr = u.get('m_formatOptionsArr') or []
         if arr: return ob(arr[0])
+        for e in u.get('m_formatOptionsMap') or []:
+            if (ob(e).get('first') or {}).get('m_typeId', '').startswith('autodesk.spec.aec:length-'):
+                d = dict(ob(ob(e).get('second'))); d['m_displayUnits'] = du_of(d); return d
     return {'m_displayUnits': 2, 'm_accuracy': 1.0}
 
 
@@ -22,7 +37,7 @@ def _round(x, acc):
 
 def fmt_length(ft, opt, project=None):
     if opt.get('m_bUseDefault') and project is not None: opt = project
-    du = opt.get('m_displayUnits', 2); acc = opt.get('m_accuracy') or 1.0
+    du = du_of(opt); acc = opt.get('m_accuracy') or 1.0
     neg = ft < 0; ft = abs(ft)
     if du == 4:                                          # feet and fractional inches; accuracy in feet
         inches = _round(ft * 12, acc * 12)

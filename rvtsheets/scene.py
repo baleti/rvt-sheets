@@ -137,6 +137,22 @@ class Walker:
             self.walk_record(sid, R @ M, R @ oo + o, depth + 1, out, g)
             self._col = self._colstack_restore(eid)
             return
+        if cls == 'GArray':
+            # repeating details (2020 Commercial parapet bricks): m_numInstances copies of the symbol, copy k placed at m_instanceInfo's
+            # transform composed with m_stepTrf applied k times (step in the symbol's own coordinates)
+            ii = ob(x.get('m_instanceInfo')) or {}
+            t = ii.get('m_Trf') or {}; st = x.get('m_stepTrf') or {}
+            sid = self.f.eid(ii.get('m_symbolId'))
+            if depth >= self.max_depth or not t or sid in (None, -1): return
+            M = np.asarray(t['m_3x3'], float); oo = np.asarray(t['m_or'], float)
+            S = np.asarray(st.get('m_3x3') or np.eye(3), float); so = np.asarray(st.get('m_or') or [0, 0, 0], float)
+            Mk = np.eye(3); ok = np.zeros(3)
+            for k in range(min(int(x.get('m_numInstances') or 0), 2000)):
+                out['instances'].append(sid)
+                self.walk_record(sid, R @ M @ Mk, R @ (oo + M @ ok) + o, depth + 1, out, g)
+                ok = ok + Mk @ so; Mk = Mk @ S
+            self._col = self._colstack_restore(eid)
+            return
         # 2D / curve leaves: reuse the generic collector on this single node
         sub = gfx.Collector(self.f); sub.handles = self._col.handles
         sub.node(n, [], g)
@@ -180,7 +196,10 @@ class Walker:
             if pl: planes[fc.get('handle')] = pl
         for ed in geo.get('m_pEdges') or []:
             eo = ob(ed) if isinstance(ed, dict) else None
-            if not isinstance(eo, dict) or not (eo.get('m_flags') or 0) & 1: continue
+            if not isinstance(eo, dict): continue
+            # 2D families (detail items, annotations): bit 0 does not decide, every boundary edge with a visible line style is drawn
+            # (2020 Commercial parapet: C channels, deck, brick with flags 6/14 drawn by Revit; masking boundaries use <Invisible lines>)
+            if not (eo.get('m_flags') or 0) & 1 and not self.is_2d(eid): continue
             gsid = self.f.eid((eo.get('m_GInfo') or {}).get('m_categoryId'))
             if gsid in (None, -1) or gsid in self.invisible_gs: continue
             refs = [r.get('ref') if isinstance(r, dict) else None for r in eo.get('m_pFace') or []]

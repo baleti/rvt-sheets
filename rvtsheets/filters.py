@@ -16,7 +16,14 @@ class FilterEval:
     def value(self, eid, rule):
         pe = (self.params().get(eid) or {}).get('params') or {}
         name = rule.get('param_name')
-        if name in pe: return pe[name]
+        if name in pe:
+            v = pe[name]
+            if name == 'Family and Type' and isinstance(v, int):
+                # stored as the type's element id: 'Family: Type' text (view types: family = the view family; Snowdon section type 'Working')
+                tp = (self.params().get(v) or {}).get('params') or {}
+                fam = tp.get('Family Name') or {'DBViewType': ''}.get((self.params().get(v) or {}).get('class'), '')
+                return '%s: %s' % (fam, tp.get('Type Name', '')) if fam else tp.get('Type Name', '')
+            return v
         # type parameters
         return None
 
@@ -28,7 +35,11 @@ class FilterEval:
             res = any(ch) if op.startswith('LogicalOr') else all(ch)
             return (not res) if r.get('inverted') else res
         cls = r.get('rule') or ''
-        if cls == 'FilterInverseRule': return not self.rule_ok(eid, r.get('inner'))
+        if cls == 'FilterInverseRule':
+            inn = r.get('inner')
+            # an element that lacks the parameter does not pass the inverse rule either (Snowdon L2: 'Walls - Concrete NOT' must not hide the core walls)
+            if inn and 'param_name' in inn and self.value(eid, inn) is None: return False
+            return not self.rule_ok(eid, inn)
         v = self.value(eid, r)
         ev = (r.get('evaluator') or '')
         if cls.startswith('HasValue') or ev.startswith('HasValue'): return v not in (None, '')

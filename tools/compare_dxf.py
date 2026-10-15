@@ -24,7 +24,7 @@ def dxf_segments(fn):
     def walk(ents):
         for e in ents:
             t = e.dxftype()
-            if t == 'INSERT':
+            if t in ('INSERT', 'DIMENSION'):                 # dimensions: their anonymous block (lines, ticks)
                 try: walk(e.virtual_entities())
                 except Exception: pass
             elif t in ('LINE', 'LWPOLYLINE', 'POLYLINE', 'ARC', 'CIRCLE', 'ELLIPSE', 'SPLINE'): emit(e, e.dxf.layer)
@@ -71,8 +71,29 @@ def our_segments(fn, vid):
     v = doc['views'][vid]
     O = np.asarray(v['origin'], float); X = np.asarray(v['right'], float); Y = np.asarray(v['up'], float)
     polys = []
-    for p in dr['prims']:
+    # same paint order as viewsvg.body: a masking fill hides the ink painted before it (Revit's export leaves hidden lines out)
+    lorder = {k: i for i, k in enumerate(('underlay', 'room_fill', 'symbolic_fill', 'cut_fill', 'surface_fill', 'projection', 'cut', 'symbolic', 'annotation_fill'))}
+    lorder['mask'] = -1
+    prims = dr['prims']
+    has_order = any('order' in p for p in prims)
+    key = (lambda p: (p.get('order', -2), lorder.get(p.get('layer'), 99))) if has_order else (lambda p: lorder.get(p.get('layer'), 99))
+    for p in sorted(prims, key=key):
         L = p.get('layer') or p['t']
+        if L == 'mask' and has_order and polys:
+            from shapely.geometry import Polygon, LineString
+            from shapely.ops import unary_union
+            try: m = unary_union([Polygon(l).buffer(0) for l in p['loops'] if len(l) > 2])
+            except Exception: continue
+            if m.is_empty: continue
+            out = []
+            for L2, P in polys:
+                ls = LineString(P) if len(P) > 1 else None
+                if ls is None or not ls.intersects(m): out.append((L2, P)); continue
+                g = ls.difference(m)
+                for gg in getattr(g, 'geoms', [g]):
+                    if gg.geom_type == 'LineString' and not gg.is_empty: out.append((L2, np.asarray(gg.coords)))
+            polys = out
+            continue
         if L in HATCH_LAYERS: continue                 # Revit's DXF holds fill patterns as HATCH entities (not compared): leave our hatch lines out too
         if p['t'] == 'line': polys.append((L, np.asarray(p['pts'], float)[:, :2]))
         elif p['t'] in ('segs',): polys += [(L, np.asarray(s, float)[:, :2]) for s in p['segs']]
@@ -104,10 +125,14 @@ def main():
     B3, lb = sample(rv, step)
     if v['kind'] == 'plan':
         B = np.stack([(B3[:, 0] - O[0]) * X[0] + (B3[:, 1] - O[1]) * X[1], (B3[:, 0] - O[0]) * Y[0] + (B3[:, 1] - O[1]) * Y[1]], 1)
-    else: B = B3
+    else:
+        # sections/elevations/details: Revit's DXF is in view-plane coordinates about the world origin, (P.right, P.up) (2020 Residential
+        # details: FFT registration found exactly O.right, O.up where it converged; on the eave detail it slid 0.04 ft along the roof)
+        B = B3 - np.array([float(O @ X), float(O @ Y)])
     off = np.zeros(2)
-    if '--register' in sys.argv and len(A) and len(B):
-        off = fft_offset(A, B, cell=max(step * 8, 0.25))
+    if '--register' in sys.argv and v['kind'] != 'plan' and '--fft' not in sys.argv: pass
+    elif '--register' in sys.argv and len(A) and len(B):
+        off = fft_offset(A, B, cell=step * 8)                     # 2 paper mm (a 0.25 ft floor misregistered 1:8 details by ~1")
         for _ in range(5):
             d, i = cKDTree(B).query(A + off); m = d < 20 * tol
             if m.sum() < 10: break

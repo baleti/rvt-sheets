@@ -133,7 +133,7 @@ class Decoder:
         if isinstance(ev, dict): rule['evaluator'] = self.f.tagname(ev.get('ptr'))
         for k in ('m_ruleValue', 'm_ruleString', 'm_epsilon', 'm_caseSensitive'):
             if k in o: rule[k[2:].lower()] = o[k] if not hasattr(o[k], 'real') or isinstance(o[k], (int, float)) else int(o[k])
-        if 'm_pInnerRule' in o or 'm_innerRule' in o: rule['inner'] = self._rule_tree(o.get('m_pInnerRule') or o.get('m_innerRule'))
+        if 'm_pInnerRule' in o or 'm_innerRule' in o or 'm_oInnerRule' in o: rule['inner'] = self._rule_tree(o.get('m_pInnerRule') or o.get('m_innerRule') or o.get('m_oInnerRule'))
         rest = {k: v for k, v in o.items() if k not in ('m_oValueProvider', 'm_oEvaluator', 'm_ruleValue', 'm_ruleString', 'm_epsilon', 'm_caseSensitive')}
         if rest: rule['other'] = {k: (v if isinstance(v, (int, float, str)) else repr(v)[:200]) for k, v in rest.items()}
         return rule

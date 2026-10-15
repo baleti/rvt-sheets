@@ -80,6 +80,55 @@ def _feature_edges(T, fid=None):
 BELOW_RANGE_CATS = {-2000032, -2000120, -2000919, -2000920, -2000180}     # floors, stairs (runs, landings), ramps
 
 
+def _clip_polyline_u(P, u0, u1):
+    """polyline (n x 2, increasing u) clipped to u0 <= u <= u1 with interpolated end points (a long profile segment has no vertex inside the crop)"""
+    out = []
+    for a, b in zip(P[:-1], P[1:]):
+        lo, hi = max(u0, min(a[0], b[0])), min(u1, max(a[0], b[0]))
+        if lo > hi or a[0] == b[0]: continue
+        f = lambda u: a + (b - a) * ((u - a[0]) / (b[0] - a[0]))
+        pa, pb = (f(lo), f(hi)) if a[0] < b[0] else (f(hi), f(lo))
+        if not out or np.linalg.norm(out[-1] - pa) > 1e-9: out.append(pa)
+        out.append(pb)
+    return np.asarray(out, float) if len(out) >= 2 else np.zeros((0, 2))
+
+
+_FONTS = {}
+
+
+def _font(name, bold):
+    k = (name, bold)
+    if k not in _FONTS:
+        f = None
+        try:
+            import subprocess
+            from PIL import ImageFont
+            path = subprocess.run(['fc-match', '-f', '%{file}', '%s:%s' % (name, 'bold' if bold else 'regular')], capture_output=True, text=True, timeout=5).stdout
+            f = ImageFont.truetype(path, 200)
+        except Exception: f = None
+        _FONTS[k] = f
+    return _FONTS[k]
+
+
+def wrap_text(txt, width, em, name, bold=False):
+    """word-wrap a text note to its width (model feet; em = rendered font size in model feet); measured with the system font of the same name
+    (Liberation Sans is metric-compatible with Arial), 0.5 em per character when no font is found"""
+    f = _font(name, bold)
+    wd = (lambda t: f.getlength(t) / 200.0 * em) if f else (lambda t: len(t) * 0.5 * em)
+    out = []
+    for para in txt.split('\n'):
+        line = ''
+        for w in para.split(' '):
+            t = (line + ' ' + w) if line else w
+            if line and wd(t) > width: out.append(line); line = w
+            else: line = t
+        out.append(line)
+    return '\n'.join(out)
+
+
+ANNO_FILTER_CLASSES = ('Section', 'LinearDimString', 'SpotElevation', 'InteriorElev', 'IndependentTag', 'RoomTag', 'SpaceTag', 'AreaTag')
+
+
 class ViewDrawer:
     def __init__(self, dec, doc, vis=None):
         self.dec = dec; self.doc = doc; self.f = dec.f
@@ -111,7 +160,18 @@ class ViewDrawer:
             return wc, wf, Z
         return None, -1e9, Z
 
-    def draw(self, vid, px_mm=0.25, max_elems=None, skip_classes=(), skip_cats=()):
+    def draw(self, vid, *a, **k):
+        v = self.doc['views'].get(vid) or self.doc['views'].get(str(vid))
+        from .compose import crop_rect_uv
+        cr = crop_rect_uv(v) if v else None
+        if cr is not None:
+            from shapely.geometry import box
+            m = 0.05 * max(cr[2] - cr[0], cr[3] - cr[1])
+            patterns.CLIP = box(cr[0] - m, cr[1] - m, cr[2] + m, cr[3] + m)
+        try: return self._draw(vid, *a, **k)
+        finally: patterns.CLIP = None
+
+    def _draw(self, vid, px_mm=0.25, max_elems=None, skip_classes=(), skip_cats=()):
         t0 = time.time()
         v = self.doc['views'].get(vid) or self.doc['views'].get(str(vid))
         ev = self.vis.effective(v)
@@ -136,7 +196,7 @@ class ViewDrawer:
             c = self.vis.info.info.get(e, {}).get('cat')
             return CAT_TYPES.get(c) == 'Annotation' or CAT_TYPES.get((self.doc['categories'].get(c) or {}).get('parent')) == 'Annotation'
         W.is_annotation = _is_anno
-        W.invisible_gs = {g for g, st in self.doc['gstyles'].items() if 'nvisible' in str((self.doc['categories'].get(st.get('cat')) or {}).get('name'))}
+        W.invisible_gs = {g for g, st in self.doc['gstyles'].items() if st.get('cat') == -2000064 or 'nvisible' in str((self.doc['categories'].get(st.get('cat')) or {}).get('name'))}     # -2000064: invisible lines (unnamed in 2020 Commercial)
         W.is_2d = lambda e: v['kind'] == 'drafting' or _is_anno(e) or self.vis.info.info.get(e, {}).get('cat') == -2002000     # detail items
         res = Resolver(self.doc, ev, scale)
         rcp_under = self.underlay_range(v, O, Z) if is_rcp else None
@@ -149,18 +209,52 @@ class ViewDrawer:
             if max_elems and k >= max_elems: break
             info = self.vis.info.info[eid]
             if info['cls'] in skip_classes or info['cat'] in skip_cats: continue
+            if ev.get('filters') and info['cls'] in ANNO_FILTER_CLASSES and info['cat'] != INVALID:
+                # view filters hide annotation elements too (Snowdon L2: 'Views - Sheets' = NOT Family and Type contains '_Working' hides every section marker)
+                fcat = info['cat']
+                if info['cls'] == 'Section':      # filters see the marked view's category (Sections / Callouts), not the Viewers category of the marker
+                    fcat = -2000537 if (self.f.rec(eid) or {}).get('fields', {}).get('m_sectionCreationMethod') == 202 else -2000200
+                elif info['cls'] == 'InteriorElev': fcat = -2000535
+                if not self.fe.view_filters(ev, eid, fcat, (self.doc['categories'].get(fcat) or {}).get('parent', INVALID))[0]:
+                    self.stats['hidden_by_filter'] += 1; continue
+            if v['kind'] == 'plan' and v.get('discipline') == 2 and info['cat'] == -2001320 and (v.get('range') or {}).get('cut') is not None:
+                # structural plans: framing wholly above the cut plane is not drawn (Snowdon L2: beam 640539 z 13.7..18.3 vs cut 10.1, absent in Revit's sheet)
+                bb_ = self.vis.info.bbox(eid)
+                if bb_ is not None and bb_[0][2] > v['range']['cut'] + 0.01: self.stats['above_cut_hidden'] += 1; continue
             if info['cls'] in ('Grid', 'Level'): datum_ids.append(eid); continue
             if info['cls'] == 'LinearDimString':
                 try: prims += self.ann.dimension(eid, O, Mv, scale, res); self.stats['dimensions'] += 1
                 except Exception as ex: self.stats['dimension_error'] += 1
+                continue
+            if info['cls'] == 'SpotElevation':
+                try:
+                    sp = self.ann.spot_slope(eid, O, Mv, scale, res)
+                    if sp: self.stats['spot_slopes'] += 1
+                    else: sp = self.ann.spot_elevation(eid, O, Mv, scale, res); self.stats['spot_elevations'] += bool(sp)
+                    prims += sp
+                except Exception: self.stats['spot_error'] += 1
                 continue
             if info['cls'] == 'InteriorElev':
                 try: prims += self.markers.elevation(eid, O, Mv, scale, res); self.stats['elevation_markers'] += 1
                 except Exception as ex: self.stats['marker_error'] += 1
                 continue
             if info['cls'] == 'InteriorElevArrow': continue
+            if info['cls'] == 'ColorFillLegend':
+                try: prims += self.color_legend(eid, v, O, Mv, scale); self.stats['legends'] += 1
+                except Exception: self.stats['legend_error'] += 1
+                continue
             if info['cls'] == 'Section':
-                if v.get('kind') == 'plan':
+                if (self.f.rec(eid) or {}).get('fields', {}).get('m_sectionCreationMethod') == 202:
+                    from .annot import callout
+                    try: prims += callout(self, eid, O, Mv, scale, res, vid); self.stats['callouts'] += 1
+                    except Exception: self.stats['marker_error'] += 1
+                elif v.get('kind') == 'section':
+                    from .annot import section_marker
+                    try:
+                        sp_ = self.vis.section_plane_line(eid, v)
+                        if sp_: prims += section_marker(self, eid, O, Mv, scale, res, vid, pts=sp_[0]); self.stats['section_markers'] += 1
+                    except Exception: self.stats['marker_error'] += 1
+                elif v.get('kind') == 'plan':
                     from .annot import section_marker
                     try: prims += section_marker(self, eid, O, Mv, scale, res, vid); self.stats['section_markers'] += 1
                     except Exception: self.stats['marker_error'] += 1
@@ -176,6 +270,11 @@ class ViewDrawer:
             if info['cls'] == 'RoomElem' and v['kind'] == 'plan':
                 try: prims += self.room_fill(eid, v, O, Mv, wc)
                 except Exception: self.stats['room_fill_error'] += 1
+            if info['cls'] == 'CurveElem' and info['cat'] == -2000077:
+                try:
+                    ip = self.insulation(eid, O, Mv, res)
+                    if ip is not None: prims += ip; self.stats['insulation'] += 1; continue
+                except Exception: self.stats['insulation_error'] += 1
             if info['cls'] in NO_SOLID_CLASSES: self.stats['spatial_skipped'] += 1; continue     # rooms/spaces/areas: drawn through their sub-categories (interior fill, reference), stage 5
             try: pieces = W.walk_record(eid)
             except Exception as ex: self.stats['walk_error'] += 1; continue
@@ -196,8 +295,14 @@ class ViewDrawer:
             for tx_ in pieces['texts']:
                 q = dict(tx_); q['origin'] = ((np.asarray(q['origin'], float) - O) @ Mv.T)[:2].tolist(); q['layer'] = 'text'
                 prims.append(q)
+            under_occ = None
+            if v['kind'] == 'plan' and v.get('range') and info['owner'] == INVALID and not is_rcp:
+                rg = v['range']; zlo_ = min(x for x in (rg.get('depth'), rg.get('bottom')) if x is not None); bb_ = self.vis.info.bbox(eid)
+                if bb_ is not None and rg.get('top') is not None and bb_[1][2] < zlo_ - 1e-6 and not anno:
+                    under_occ = self._underlay_occluder(v, O, Mv, elems, bb_[1][2])
             for c in pieces['curves']:
                 if not self.drawable_gs(c.get('gs')): continue
+                if self._gs_hidden(ev, c.get('gs')): self.stats['hidden_subcategory_lines'] += 1; continue
                 if info['cls'] in ('SiteSurface', 'TopographySurface') and v['kind'] in ('section', '3d'): continue   # contour/surface curves are not drawn in elevations (the ground profile comes from the mesh)
                 pts = (np.asarray(c['pts'], float) - O) @ Mv.T
                 if cut_w is not None and not is_section and (pts[:, 2] > cut_w + 1e-6).all() and False: continue
@@ -209,6 +314,16 @@ class ViewDrawer:
                     if zc.max() < rcp_under[0] - 1e-6 or zc.min() > rcp_under[1] + 1e-6: continue
                     lay = 'underlay'
                 st = res.line(c.get('gs'), cid, 'proj', eid, ov=dict(ov, halftone=True) if lay == 'underlay' else ov, annotation=anno)
+                if under_occ is not None and len(pts) > 1:
+                    # plan symbols of elements in the underlay range are hidden by floors/roofs/ceilings between them and the view (looking down)
+                    from shapely.geometry import LineString
+                    try: diff = LineString(pts[:, :2]).difference(under_occ)
+                    except Exception: diff = LineString(pts[:, :2])
+                    if diff.is_empty: self.stats['underlay_occluded_lines'] += 1; continue
+                    for part in getattr(diff, 'geoms', [diff]):
+                        if part.geom_type == 'LineString' and len(part.coords) > 1:
+                            prims.append({'t': 'line', 'pts': [list(q) for q in part.coords], 'style': st, 'elem': eid, 'layer': lay})
+                    continue
                 pr = {'t': 'line', 'pts': pts[:, :2].tolist(), 'style': st, 'elem': eid, 'layer': lay}
                 if is_section and not anno and len(pts) > 1: pr['_w'] = pts             # depth-tested below (elevations/sections)
                 prims.append(pr)
@@ -235,6 +350,7 @@ class ViewDrawer:
                 else:
                     prims.append({'t': 'fill', 'loops': loops, 'color': col if 'placer' in fl else fl.get('color'), 'pattern': pid, 'elem': eid, 'layer': 'symbolic_fill'})
             for s in pieces['solids']:
+                if self._gs_hidden(ev, s.get('gs')): self.stats['hidden_subcategory_solids'] += 1; continue
                 if not self.drawable_gs(s.get('gs')):
                     # internal-category bodies (2020 Residential wall bodies, cat -2000896): their edges are not drawn but they hide
                     # what lies behind them (elevations otherwise show every interior object through the walls)
@@ -294,7 +410,14 @@ class ViewDrawer:
             return {'prims': prims, 'stats': dict(self.stats)}
         P = np.concatenate(allp)
         px = px_mm / 304.8 * scale                                    # pixel size in model feet
-        db = DepthBuffer(P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max(), px)
+        bx = [P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max()]
+        from .compose import crop_rect_uv
+        cr = crop_rect_uv(v)
+        if cr is not None:      # only the crop region is shown: a whole topography surface in a 1:8 detail made a 64 Mpx coarse buffer (357 s)
+            mg = 0.05 * max(cr[2] - cr[0], cr[3] - cr[1]) + 2 * px
+            bx = [max(bx[0], cr[0] - mg), max(bx[1], cr[1] - mg), min(bx[2], cr[2] + mg), min(bx[3], cr[3] + mg)]
+            if bx[0] >= bx[2] or bx[1] >= bx[3]: bx = [P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max()]
+        db = DepthBuffer(bx[0], bx[1], bx[2], bx[3], px)
         for c in clipped: db.add(c[2])
         for T in occluders:
             if cut_w is not None: T = _clip_tris_halfspace(T, np.array([0, 0, 1.0]), cut_w)
@@ -309,6 +432,12 @@ class ViewDrawer:
                 st = res.line(gs, cid, 'cut', eid, ov=ov)
                 loops = self._loops(segs)
                 loops2 = [[p[:2] for p in l] for l in loops]
+                for l in loops2:
+                    # a cut of a solid is closed: an open chain whose ends are close relative to its length lost a face of the mesh (2020
+                    # Residential eave detail: wall 206435 without its bottom face) -> close it with a straight edge
+                    if len(l) > 3 and not np.allclose(l[0], l[-1], atol=1e-6):
+                        Lp = np.asarray(l, float)[:, :2]; per = float(np.linalg.norm(np.diff(Lp, axis=0), axis=1).sum())
+                        if np.linalg.norm(Lp[0] - Lp[-1]) < 0.2 * per: l.append(list(l[0]))
                 closed2 = [l for l in loops2 if len(l) > 3 and np.allclose(l[0], l[-1], atol=1e-6)]
                 if closed2:                     # open fragments next to closed loops come from faces touching the plane: drop them
                     loops2 = closed2
@@ -325,12 +454,12 @@ class ViewDrawer:
                     if reg is not None and pat:
                         if pat.get('solid'): prim['fill'] = fill['color']
                         else: prims.append({'t': 'segs', 'segs': patterns.hatch(reg, pat, scale), 'style': {'w': 0.1, 'rgb': fill['color'], 'dash': None}, 'elem': eid, 'layer': 'cut_fill'})
-                if cid == -2000011 and closed2 and (ov.get('cut_fg_visible') is not False) and (ev.get('detail_level') or 2) != 1:
-                    try: self.wall_layers(eid, closed2, Mv, scale, res, ov, prims, st)
+                if cid in (-2000011, -2000032, -2000035) and closed2 and (ov.get('cut_fg_visible') is not False) and (ev.get('detail_level') or 2) != 1:
+                    try: self.wall_layers(eid, closed2, Mv, scale, res, ov, prims, st, cid)
                     except Exception: self.stats['layer_error'] += 1
                 prims.append(prim)
                 self.stats['cut_elements'] += 1
-        if cut_w is not None and topo and is_section:
+        if cut_w is not None and topo and v["kind"] == "section":
             for eid, cid, ov in topo:
                 try:
                     from .compose import crop_rect_uv
@@ -370,11 +499,17 @@ class ViewDrawer:
                     if ov.get('_frs') is not None: self.surface_hatch(eid, cid, uvw, ov['_frs'], db, eps, scale, prims, ov)
             except Exception: self.stats['surface_error'] += 1
         dord = v.get('draw_order') or []
+        unlisted = -1
+        if not dord:
+            # no draw order stored (every 2020 Commercial view): view-specific elements still paint over the model in creation (id) order,
+            # so their masking regions hide model lines (parapet detail: wall/insulation below the break line); other elements stay model
+            owned = sorted({p.get('elem') for p in prims if p.get('elem') is not None and self.vis.info.info.get(p.get('elem'), {}).get('owner') == vid})
+            if any(p.get('layer') == 'mask' and p.get('elem') in set(owned) for p in prims): dord = owned; unlisted = -2
         if dord:
             rank = {e: i for i, e in enumerate(dord)}; top = len(dord)
             for p in prims:
                 if p.get('layer') in ('cut', 'cut_fill', 'projection'): continue        # model content stays below detail items
-                p['order'] = rank.get(p.get('elem'), top if p.get('layer') in ('text', 'annotation', 'annotation_fill', 'datum') else -1)
+                p['order'] = rank.get(p.get('elem'), top if p.get('layer') in ('text', 'annotation', 'annotation_fill', 'datum') else unlisted)
         # family symbolic lines in sections/elevations (door swings, window and furniture elevation symbols) are hidden by what is in
         # front of them like model edges (2020 Residential elevations showed every interior door through the walls); tolerance 3"
         eps_s = max(eps, 0.25)
@@ -388,6 +523,57 @@ class ViewDrawer:
         prims = out
         self.stats['seconds'] = round(time.time() - t0, 1)
         return {'prims': prims, 'stats': dict(self.stats), 'conds_unknown': {str(k): v for k, v in W.unknown_conds.items()}}
+
+    def insulation(self, eid, O, Mv, res):
+        """batt insulation (CurveElem, 'Insulation Batting Lines', m_data.m_oUserData: m_width W, m_scale = bulge ratio): Revit's export
+        (2020 Residential 'typ. wall' DXF splines) = one chain of cubic S-curves zigzagging between the lines +-W/(2 ratio), step q = W/4 along
+        the curve, joined on each side by half loops spanning 2q that reach +-W/2. Straight curves only (None otherwise)."""
+        fl = self.f.rec(eid)['fields']
+        ud = ((fl.get('m_data') or {}).get('m_oUserData') or {}).get('obj') or {}
+        W = ud.get('m_width'); ratio = ud.get('m_scale') or 2.0
+        c = ((fl.get('m_pCurveDriver') or {}).get('obj') or {}).get('m_pCrv') or {}
+        if not W or self.f.tagname(c.get('ptr')) != 'GLine': return None
+        o = c['obj']; t0, t1 = o['m_endParams']
+        A = (np.asarray(o['m_origin'], float) + np.asarray(o['m_dirVec'], float) * t0 - O) @ Mv.T
+        Bp = (np.asarray(o['m_origin'], float) + np.asarray(o['m_dirVec'], float) * t1 - O) @ Mv.T
+        d = (Bp - A)[:2]; L = float(np.linalg.norm(d))
+        if L < 1e-9: return None
+        d /= L; n = np.array([-d[1], d[0]])
+        if ud.get('m_mirrored'): n = -n
+        q = W / 4; D = W / ratio                 # step along, span of the zigzag across (2020 Residential: W 5.5", ratio 1.5)
+        k = max(2, int(round(L / q))); q = L / k
+        sL = -D / 2; sR = D / 2                  # zigzag between these lines; scallops join every second point on each side, bulging outwards
+        P = lambda t, s_: (A[:2] + d * t + n * s_).tolist()
+        def bez(c, m=10):
+            u = np.linspace(0, 1, m)[:, None]; c = np.asarray(c, float)
+            return ((1 - u) ** 3 * c[0] + 3 * (1 - u) ** 2 * u * c[1] + 3 * (1 - u) * u ** 2 * c[2] + u ** 3 * c[3]).tolist()
+        def bsp(c, m=16):                        # clamped cubic B-spline, 5 control points, knots 0 0 0 0 1 2 2 2 2
+            from scipy.interpolate import BSpline
+            return BSpline(np.array([0, 0, 0, 0, 1, 2, 2, 2, 2.0]), np.asarray(c, float), 3)(np.linspace(0, 2, m)).tolist()
+        loc = lambda pts: [P(t, s_) for t, s_ in pts]
+        # phase: the pattern starts on the -n side at the lower end of the curve (2020 Residential wall run downwards: its end; 2020
+        # Commercial parapet runs upwards: its start; both vs Revit's DXF splines); horizontal runs: the left end (?)
+        lower_end = (Bp[1] < A[1] - 1e-9) or (abs(Bp[1] - A[1]) <= 1e-9 and Bp[0] < A[0])
+        ph = k if lower_end else 0
+        curves = []
+        # points: cusp side at t = L - 2jq, scallop side at t = L - q - 2jq (anchored at the curve end as in Revit's export)
+        for i in range(k):                       # segment between t_i = i q and t_i+1
+            ta, tb = i * q, (i + 1) * q
+            a_cusp = (ph - i) % 2 == 0          # point at ta on the -n side
+            sa, sb = (sL, sR) if a_cusp else (sR, sL)
+            c = (sb - sa) * 0.343
+            curves.append(loc(bez([(ta, sa), (ta, sa + c), (tb, sb - c), (tb, sb)])))
+        e1, e2 = 0.0786 * W, 0.2553 * W
+        for side, sv in ((1, sR), (-1, sL)):
+            pts = [i * q for i in range(k + 1) if ((ph - i) % 2 == 1) == (side == 1)]
+            for ta, tb in zip(pts, pts[1:]):
+                curves.append(loc(bsp([(ta, sv), (ta, sv + side * e1), ((ta + tb) / 2, sv + side * e2), (tb, sv + side * e1), (tb, sv)])))
+            for t_r, t_end in ((pts[0], 0.0), (pts[-1], L)) if pts else ():
+                if abs(t_r - t_end) < 1e-9: continue
+                g = 1 if t_end > t_r else -1
+                curves.append(loc(bez([(t_r, sv), (t_r, sv + side * e1), (t_r + g * 0.53 * q, sv + side * 0.166 * W), (t_end, sv + side * 0.166 * W)])))
+        st = res.line(None, -2000077, 'proj', eid, annotation=False)
+        return [{'t': 'line', 'pts': cv, 'style': st, 'elem': eid, 'layer': 'symbolic'} for cv in curves]
 
     def underlay_range(self, v, O, Z):
         r = v.get('range') or {}
@@ -445,12 +631,46 @@ class ViewDrawer:
             keep.append({'t': 'cut', 'loops': loops, 'segs': segs, 'style': ps[0]['style'], 'elem': ps[0]['elem'], 'elems': [p['elem'] for p in ps], 'cat': k[0], 'layer': 'cut'})
         return keep
 
+    def _underlay_occluder(self, v, O, Mv, elems, ztop):
+        """plan-space union of the floors/roofs/ceilings of the view lying above z = ztop (shapely geometry or None), cached per (view, z band)"""
+        cache = self.__dict__.setdefault('_uocc', {})
+        key = (v['id'], round(ztop, 1))
+        if key in cache: return cache[key]
+        import rvt_elemmesh as E
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        polys = []
+        for e in elems:
+            inf = self.vis.info.info.get(e) or {}
+            if inf.get('cat') not in (-2000032, -2000035, -2000038): continue          # floors, roofs, ceilings
+            bb = self.vis.info.bbox(e)
+            if bb is None or bb[0][2] < ztop - 1e-6 or bb[0][2] > (v['range'].get('top') or 1e9): continue
+            try: T = np.asarray(E.element_mesh(self.f.g, e).get('tris') or [], float).reshape(-1, 3, 3)
+            except Exception: continue
+            for t in ((T - O) @ Mv.T)[:, :, :2]:
+                pg = Polygon(t)
+                if pg.is_valid and pg.area > 1e-6: polys.append(pg)
+        cache[key] = unary_union(polys).buffer(0.01) if polys else None
+        return cache[key]
+
+    def _gs_hidden(self, ev, gs):
+        """graphics style whose (sub)category is hidden in the view's V/G (Snowdon L2: structural framing 'Location Lines')"""
+        if gs in (None, -1): return False
+        hc = self.__dict__.get('_hid_cache')
+        if hc is None or hc[0] is not ev:
+            hc = (ev, self.vis.hidden_categories(self.vis.effective(ev))[0]); self._hid_cache = hc
+        st = self.doc['gstyles'].get(gs)
+        if not st: return False
+        c = st.get('cat')
+        return c in hc[1]
+
     def drawable_gs(self, gs):
         """geometry styled with an internal (non-API) category - wall layer/reference planes, location lines - is never drawn"""
         if gs in (None, -1): return True
         st = self.doc['gstyles'].get(gs)
         if not st: return True
         c = st.get('cat')
+        if c == -2000083: return False          # family reference lines (green dashed, unnamed in projects: 2020 Residential elevation tag)
         return c is None or c >= 0 or c in CAT_TYPES or str(c) in self.dec.cat_names
 
     def text_note(self, eid, O, Mv, scale):
@@ -470,6 +690,8 @@ class ViewDrawer:
         org = ((np.asarray(fl['m_orig'], float) - O) @ Mv.T)[:2].tolist()
         x = (Mv @ np.asarray(fl.get('m_baseVec') or [1, 0, 0], float))[:2].tolist()
         from .sheet import SheetComposer
+        wid = (fl.get('m_lineWidth') or 0) * scale
+        if wid and txt and not fl.get('m_bNoWrapping'): txt = wrap_text(txt, wid, size * scale / 0.72, font.get('name') or 'Arial', bool(tt.get('bold')))
         return {'t': 'text', 'text': txt, 'origin': org, 'x': x, 'size': size * scale, 'font': font.get('name') or 'Arial',
                 'bold': tt.get('bold'), 'italic': tt.get('italic'), 'halign': SheetComposer._halign(fl_), 'valign': SheetComposer._valign(fl_), 'anchor': True,
                 'elem': eid, 'layer': 'text', 'width': (fl.get('m_lineWidth') or 0) * scale}
@@ -531,7 +753,7 @@ class ViewDrawer:
             if P[0, 0] > P[-1, 0]: P = P[::-1]
             base = P[:, 1].min() - 30.0
             if crop is not None:                                    # poche stops at the crop region (also bounds hatch size on big surfaces)
-                P = P[(P[:, 0] >= crop[0] - 1) & (P[:, 0] <= crop[2] + 1)] if len(P) > 2 else P
+                P = _clip_polyline_u(P, crop[0] - 1, crop[2] + 1) if len(P) > 2 else P
                 if len(P) < 2: continue
                 base = max(base, crop[1] - 1)
             loop = P.tolist() + [[P[-1, 0], base], [P[0, 0], base], P[0].tolist()]
@@ -566,6 +788,51 @@ class ViewDrawer:
                 out[key] = ([col & 255, (col >> 8) & 255, (col >> 16) & 255], self.f.eid(it.get('m_fillPatternId')))
             return {'param': pid, 'entries': out}
         return None
+
+    def color_legend(self, eid, v, O, Mv, scale):
+        """colour scheme legend (ColorFillLegend): title above the origin (top-left of the first row), one row per scheme entry in alphabetical order:
+        3/8\" swatch + text 1/10\" right of it, rows 1/8\" apart (2020 Commercial plan 32 DXF G-ANNO-LEGN: swatch 36 in, pitch 48 in at 1:96)"""
+        r = self.f.rec(eid, 'ColorFillLegend')
+        sch = None
+        for e in (ob_((self.f.rec(v['id']) or {'fields': {}})['fields'].get('m_pColorFillSchemaSetting')) or {}).get('m_categoryToSchema') or []:
+            sch = self.f.rec(self.f.eid(e.get('second')))
+            cat = e.get('first'); cat = cat - 2 ** 32 if isinstance(cat, int) and cat >= 2 ** 31 else cat
+            if self.f.eid(r['fields'].get('m_idSchemeCategory')) in (cat, cat + 2 ** 32): break
+        if not sch: return []
+        sym = self.f.rec(self.f.eid(r['fields'].get('m_symbolId')))
+        sf = sym['fields'] if sym else {}
+        la = ob_(sf.get('m_oLineAndTextAttr')) or {}; tla = ob_(sf.get('m_oTitleLineAndTextAttr')) or {}
+        font = self.doc['fonts'].get(self.f.eid(la.get('m_fontId'))) or {}; tfont = self.doc['fonts'].get(self.f.eid(tla.get('m_fontId'))) or {}
+        size = (font.get('size') or 3 / 16 / 12) * scale; tsize = (tfont.get('size') or size / scale * 1.5) * scale
+        sw = 3 / 8 / 12 * scale; gap = 1 / 8 / 12 * scale; tx = 0.1 / 12 * scale
+        o = ((np.asarray(r['fields']['m_origin'], float) - O) @ Mv.T)[:2]
+        wid = (ob_(r['fields'].get('m_oLayout')) or {}).get('m_columnWidths', [2 / 12])[0] * scale
+        from .annot import Tags
+        ents = []
+        for it in sch['fields'].get('m_colorFillArr') or []:
+            if it.get('m_bHidden') or not it.get('m_bInUse', 1) or it.get('m_isPlaceholder'): continue
+            ps = it.get('m_paramStorage') or {}
+            key = ps.get('m_str')
+            if isinstance(key, dict): key = (ob_(key) or key).get('m_str') if 'obj' in key else key.get('m_str')
+            name = it.get('m_caption') if not it.get('m_bDefaultCaption', 1) and it.get('m_caption') else key
+            col = it.get('m_color') or 0
+            if name: ents.append((str(name), [col & 255, (col >> 8) & 255, (col >> 16) & 255]))
+        ents.sort(key=lambda x: x[0].lower())
+        cid = self.f.eid(r['fields'].get('m_idSchemeCategory')); cid = cid - 2 ** 32 if cid >= 2 ** 31 else cid
+        out = [{'t': 'text', 'text': {-2000160: 'Room Legend', -2003600: 'Space Legend'}.get(cid, 'Legend'),
+                'origin': [o[0], o[1] + 0.0489 * scale], 'x': [1.0, 0.0], 'size': tsize, 'font': tfont.get('name') or 'Arial', 'halign': 0, 'valign': 0, 'anchor': True, 'elem': eid, 'layer': 'text'}]
+        top = o[1]; line = {'w': 0.0762, 'rgb': [0, 0, 0], 'dash': None, 'pen': 1, 'halftone': False}
+        for name, rgb in ents:
+            txt = wrap_text(name, max(wid - sw - 2 * tx, 0.01), size / 0.72, font.get('name') or 'Arial')
+            n = txt.count('\n') + 1
+            rh = max(sw, n * size / 0.72 * 1.24)
+            sq = [[o[0], top], [o[0] + sw, top], [o[0] + sw, top - sw], [o[0], top - sw], [o[0], top]]
+            out.append({'t': 'fill', 'loops': [sq], 'color': rgb, 'elem': eid, 'layer': 'annotation_fill'})
+            out.append({'t': 'line', 'pts': sq, 'style': line, 'elem': eid, 'layer': 'annotation'})
+            out.append({'t': 'text', 'text': txt, 'origin': [o[0] + sw + tx, top - rh / 2 if n > 1 else top - sw / 2], 'x': [1.0, 0.0], 'size': size, 'font': font.get('name') or 'Arial',
+                        'halign': 0, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'})
+            top -= rh + gap
+        return out
 
     def room_fill(self, eid, v, O, Mv, wc):
         """room colour fill: the room's floor outline (lowest planar face of its volume) in the colour scheme's colour for its parameter value"""
@@ -602,21 +869,26 @@ class ViewDrawer:
             self._tg = Tags(self)
         return self._tg
 
-    def wall_layers(self, eid, loops, Mv, scale, res, ov, prims, st):
+    def wall_layers(self, eid, loops, Mv, scale, res, ov, prims, st, cid=-2000011):
         """compound wall cut: strips of the cut region along the wall normal, one per layer of the wall type
         (CompoundStructure m_layers: width, material; exterior first = the side the wall's orientation points to, m_isFlipped swaps it),
         hatched with the layer material's cut pattern and separated by thin lines. Only straight cut regions (rectangular loops)."""
         r = self.f.rec(eid)
         if not r: return
-        t = self.f.rec(self.f.eid(r['fields'].get('m_WallAttributesId')))
+        slab = cid != -2000011           # floors and roofs: layers listed from the top (exterior) down
+        t = self.f.rec(self.f.eid(r['fields'].get('m_WallAttributesId' if not slab else 'm_roofAttributesId' if cid == -2000035 else 'm_floorAttributesId')))
         cs = ob_(t['fields'].get('m_pCompoundStructure')) if t else None
         layers = [ob_(x) for x in (cs or {}).get('m_layers') or []]
         layers = [l for l in layers if (l.get('m_layerWidth') or 0) > 1e-6]
         if len(layers) < 2: return
         P = np.asarray([q[:2] for l in loops for q in l[:-1]], float)
         if len(P) < 4: return
-        c = P.mean(0); u, sv, vt = np.linalg.svd(P - c, full_matrices=False)
-        ax = vt[0]; nr = np.array([-ax[1], ax[0]])                       # long axis, wall normal (view coordinates)
+        c = P.mean(0)
+        # long axis = the edge direction carrying the most length (mod 180 deg): robust to notches and sloped tops, which tilt an SVD axis
+        E = np.concatenate([np.diff(np.asarray([q[:2] for q in l], float), axis=0) for l in loops])
+        Ln = np.linalg.norm(E, axis=1); ang = np.round(np.degrees(np.arctan2(E[:, 1], E[:, 0])) % 180.0, 1) % 180.0
+        best = max(set(ang.tolist()), key=lambda a_: Ln[ang == a_].sum())
+        ax = np.array([math.cos(math.radians(best)), math.sin(math.radians(best))]); nr = np.array([-ax[1], ax[0]])   # long axis, wall normal
         tot = sum(l['m_layerWidth'] for l in layers)
         d = (P - c) @ nr; lo, hi = d.min(), d.max()
         if abs((hi - lo) - tot) > 0.15 * tot + 0.02: return             # not a plain straight cut of this wall type
@@ -624,6 +896,9 @@ class ViewDrawer:
         # layer 0 (exterior) on the side away from the building = the side with lower |view-depth| of the wall centre... fall back: +nr
         flip = bool(r['fields'].get('m_isFlipped'))
         order = layers if not flip else layers[::-1]
+        if slab:
+            if nr[1] < 0: nr = -nr; d = (P - c) @ nr; lo, hi = d.min(), d.max()
+            order = layers[::-1]                  # edges run from the bottom (lo) up, so the bottom layer first
         edges = [lo]
         for l in order: edges.append(edges[-1] + l['m_layerWidth'] * (hi - lo) / tot)
         mats = self.materials(); reg = patterns.region([l for l in loops if len(l) > 3])

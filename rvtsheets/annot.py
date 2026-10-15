@@ -16,6 +16,87 @@ class Annotations:
         self.d = drawer; self.f = drawer.f; self.doc = drawer.doc
         self.proj_len = units.length_format(self.f)
 
+    def spot_slope(self, eid, O, Mv, scale, res):
+        """spot slope shown as a triangle (SpotElevation with m_oTypeState.m_slopeRep 1; 2020 Residential south elevation vs Revit's DXF):
+        hypotenuse = m_horizLeaderLength of paper starting at the reference point + m_bendOrPosPtOffset (model) and running downhill along the
+        slope, horizontal leg from that point, vertical leg at its far end; rise text (12" run) outside the vertical leg, run text '1'-0"'
+        centred above the horizontal leg"""
+        r = self.f.rec(eid, 'SpotElevation')
+        if not r: return []
+        fl = r['fields']; ts = ob(fl.get('m_oTypeState')) or {}
+        if ts.get('m_slopeRep') != 1 or not fl.get('m_refPnts') or not ts.get('m_slopeDir'): return []
+        A = np.asarray(fl['m_refPnts'][0], float) + np.asarray(fl.get('m_bendOrPosPtOffset') or [0, 0, 0], float)
+        a = ((A - O) @ Mv.T)[:2]; sd = (Mv @ np.asarray(ts['m_slopeDir'], float))[:2]
+        if abs(sd[0]) < 1e-9: return []
+        k = abs(sd[1] / sd[0]); H = float(fl.get('m_horizLeaderLength') or 1 / 12) * scale
+        run = H / math.sqrt(1 + k * k); rise = run * k; dx = -1.0 if sd[0] > 0 else 1.0       # the triangle lies downhill of the anchor
+        b = a + [dx * run, 0.0]; c = b + [0.0, -rise]
+        line = res.line(None, -2000260, 'proj', eid, annotation=True)
+        out = [{'t': 'line', 'pts': [a.tolist(), b.tolist(), c.tolist(), a.tolist()], 'style': line, 'elem': eid, 'layer': 'annotation'}]
+        typ = self.f.rec(self.f.eid(fl.get('m_styleSymbolId')))
+        tf = typ['fields'] if typ else {}
+        la = ob(tf.get('m_pLineAndTextAttr')) or {}
+        font = self.doc['fonts'].get(self.f.eid(la.get('m_fontId'))) or {}
+        size = (font.get('size') or 3 / 32 * IN) * scale
+        opt = dict(ob(tf.get('m_oLinFormatOptions')) or {}, m_bSuppressSpaces=1)      # Revit's export: '1'-0"'
+        rtxt = units.fmt_length(k, opt, self.proj_len); ctxt = units.fmt_length(1.0, opt, self.proj_len)
+        gap = 1 / 16 * IN * scale
+        out.append({'t': 'text', 'text': rtxt, 'origin': [b[0] + dx * gap, (b[1] + c[1]) / 2], 'x': [1.0, 0.0], 'size': size, 'font': font.get('name') or 'Arial',
+                    'halign': 0 if dx > 0 else 2, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'})
+        out.append({'t': 'text', 'text': ctxt, 'origin': [(a[0] + b[0]) / 2, a[1] + 1.5 * gap], 'x': [1.0, 0.0], 'size': size, 'font': font.get('name') or 'Arial',
+                    'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
+        return out
+
+    def spot_elevation(self, eid, O, Mv, scale, res):
+        """spot elevation in plans/sections (draft, no Revit reference yet): target symbol (circle + cross) at the reference point, leader to
+        the bend point (m_bendOrPosPtOffset, model units), shoulder (style m_leaderShoulderLength, paper) and the elevation text (reference z
+        formatted with the style's length options) beside the shoulder end"""
+        r = self.f.rec(eid, 'SpotElevation')
+        if not r: return []
+        fl = r['fields']; ts = ob(fl.get('m_oTypeState')) or {}
+        if ts.get('m_slopeRep') == 1 or not fl.get('m_refPnts') or not fl.get('m_displayElevation'): return []
+        P = np.asarray(fl['m_refPnts'][0], float)
+        a = ((P - O) @ Mv.T)[:2]
+        typ = self.f.rec(self.f.eid(fl.get('m_styleSymbolId')))
+        tf = typ['fields'] if typ else {}
+        la = ob(tf.get('m_pLineAndTextAttr')) or {}
+        font = self.doc['fonts'].get(self.f.eid(la.get('m_fontId'))) or {}
+        size = (font.get('size') or 3 / 32 * IN) * scale
+        seg = ob((fl.get('m_ArrSegInfo') or [None])[0]) or {}
+        if not fl.get('m_leader') and seg.get('m_offset') is not None:
+            # no leader (Snowdon 'Beam Elevation (Project)'): Revit draws the bare text at the dimension origin + the segment's text offset, parallel to
+            # the picked beam (rotated 90 degrees on beams running along the view's y axis); no target symbol
+            off = np.asarray(seg['m_offset'] + [0.0] * (3 - len(seg['m_offset'])), float)
+            b = a + (Mv @ off)[:2]
+            ang = 0.0
+            pk = ((ob(fl.get('m_pPick')) or {}).get('m_elemPicks') or [None])[0]
+            bb = self.d.vis.info.bbox(self.f.eid((ob(pk) or {}).get('m_elemId'))) if pk else None
+            if bb is not None:
+                ext = np.abs((Mv @ (np.asarray(bb[1], float) - np.asarray(bb[0], float)))[:2])
+                if ext[1] > ext[0] * 1.5: ang = math.pi / 2
+            opt = ob(tf.get('m_oLinFormatOptions')) or {}
+            txt = units.fmt_length(float(P[2]), opt, self.proj_len)
+            return [{'t': 'text', 'text': txt, 'origin': b.tolist(), 'x': [math.cos(ang), math.sin(ang)], 'size': size, 'font': font.get('name') or 'Arial',
+                     'halign': 1, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'}]
+        off = np.asarray(fl.get('m_bendOrPosPtOffset') or [0, 0, 0], float)
+        b = a + (Mv @ off)[:2] if fl.get('m_leaderLine') else a
+        sh = float(tf.get('m_leaderShoulderLength') or 0) * (scale if scale else 1)
+        dx = 1.0 if (b[0] >= a[0]) else -1.0
+        c = b + [dx * sh, 0.0]
+        line = res.line(None, -2000260, 'proj', eid, annotation=True)
+        rad = 1.0 / 304.8 * scale * 1.5            # 1.5 paper mm
+        t = np.linspace(0, 2 * np.pi, 25)
+        out = [{'t': 'line', 'pts': (a + rad * np.stack([np.cos(t), np.sin(t)], 1)).tolist(), 'style': line, 'elem': eid, 'layer': 'annotation'},
+               {'t': 'line', 'pts': [(a - [rad, 0]).tolist(), (a + [rad, 0]).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation'},
+               {'t': 'line', 'pts': [(a - [0, rad]).tolist(), (a + [0, rad]).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation'}]
+        if fl.get('m_leaderLine'): out.append({'t': 'line', 'pts': [a.tolist(), b.tolist(), c.tolist()], 'style': line, 'elem': eid, 'layer': 'annotation'})
+        opt = ob(tf.get('m_oLinFormatOptions')) or {}
+        txt = units.fmt_length(float(P[2]), opt, self.proj_len)
+        gap = 1 / 16 * IN * scale
+        out.append({'t': 'text', 'text': txt, 'origin': [c[0] + dx * gap, c[1]], 'x': [1.0, 0.0], 'size': size, 'font': font.get('name') or 'Arial',
+                    'halign': 0 if dx > 0 else 2, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'})
+        return out
+
     def dimension(self, eid, O, Mv, scale, res):
         r = self.f.rec(eid, 'LinearDimString')
         if not r: return []
@@ -98,6 +179,11 @@ class Tags:
         if sym in c: return c[sym]
         out = self.raw_params(sym)
         r = self.f.rec(sym)
+        if r:
+            # built-in type parameters stored as family parameters under the unsigned 32-bit id (door Width -1001301 = 4293965995, Height -1001300)
+            for k, v in self.fam_values(r).items():
+                k = int(k)
+                if k >= 2 ** 31 and isinstance(v, (int, float, str)) and v != '': out.setdefault(k - 2 ** 32, v)
         mid = self.f.eid(r['fields'].get('m_masterId')) if r else None
         if mid not in (None, INVALID, sym) and depth < 3:
             for k, v in self.symbol_params(mid, depth + 1).items(): out.setdefault(k, v)
@@ -166,6 +252,14 @@ class Tags:
                         'valign': SheetComposer._valign(lab['flags'] or 0), 'anchor': True, 'elem': eid, 'layer': 'text'})
         return out
 
+    def type_name(self, sym, depth=0):
+        r = self.f.rec(sym)
+        if not r: return ''
+        n = (ob(r['fields'].get('m_symbolInfo')) or {}).get('m_name') or ''
+        if n or depth > 3: return n
+        mid = self.f.eid(r['fields'].get('m_masterId'))
+        return self.type_name(mid, depth + 1) if mid not in (None, INVALID, sym) else ''
+
     def raw_params(self, eid):
         """{built-in param id (negative int): value} straight from the element's m_pParamValueSet* (the named reader params
         mislabel some ids, e.g. room Name/Number/Comments; reported in NEEDS-FROM-READER.md)"""
@@ -190,6 +284,18 @@ class Tags:
         sid = self.f.eid(fl.get('m_symbolId'))
         if r['class'] == 'IndependentTag':
             pos = fl.get('m_absHeadPos'); tagged = self.f.eid(path(fl, 'm_taggedElementId', 'm_linkInstOrHostId'))
+            if pos is None:
+                # 2026 layout (writer test file): head in m_oTagOrientationCell, tagged element in the first reference of the cell list
+                pos = (ob(fl.get('m_oTagOrientationCell')) or {}).get('m_headLocation')
+                for c in (ob(fl.get('m_cellList')) or {}).get('m_cells') or []:
+                    refs = (ob(c) or {}).get('m_references') or []
+                    if refs:
+                        tagged = self.f.eid(path(ob(refs[0]) or {}, 'm_referenceIdKey', 'm_hostOrLinkElemId', 'm_linkInstOrHostId')); break
+            if tagged in (None, INVALID, -1):
+                # 2024 layout (Snowdon): tagged entities cell
+                for te in (ob(fl.get('m_taggedEntitiesCell')) or {}).get('m_taggedEntities') or []:
+                    t_ = self.f.eid(path(ob(te) or {}, 'm_taggedId', 'm_linkInstOrHostId'))
+                    if t_ not in (None, INVALID, -1): tagged = t_; break
         else:
             pos = fl.get('m_point'); tagged = self.f.eid(path(fl, 'm_taggedRoomElemId', 'm_linkInstOrHostId'))
             off = fl.get('m_tagOffset')
@@ -197,26 +303,54 @@ class Tags:
         if pos is None: return []
         vals = dict(self.params_of(tagged)); raw = self.raw_params(tagged)
         # type parameters of the tagged element (Type Mark, Type Name...)
-        tr = self.f.rec(tagged)
+        tr = self.f.rec(tagged); tsym = None
         if tr:
             ii = ob(tr['fields'].get('m_pInstanceInfo')) or {}
             sym = self.f.eid(ii.get('m_symbolId')) if ii else None
+            tsym = sym
             if sym not in (None, INVALID):
                 for k, v in self.params_of(sym).items(): vals.setdefault(k, v)
                 for k, v in self.symbol_params(sym).items(): raw.setdefault(k, v)
         o = ((np.asarray(pos, float) - O) @ Mv.T)
-        R = np.eye(3) * scale; R = Mv @ R                                   # symbol x/y (paper) -> view axes (plan: identity)
         R = np.eye(3) * scale
+        ang = 0.0
+        if r['class'] == 'IndependentTag':
+            oc = ob(fl.get('m_oTagOrientationCell')) or {'m_orientation': fl.get('m_orientation'), 'm_rotationAngle': fl.get('m_rotationAngle')}      # 2020 layout: orientation on the element
+            # tag orientation: 0 horizontal, 1 vertical, 2 model (rotation angle): Snowdon L2 column tags at 45 deg, beam tags at 90 deg
+            if oc.get('m_orientation') == 1: ang = math.pi / 2
+            elif oc.get('m_orientation') == 2: ang = float(oc.get('m_rotationAngle') or 0.0)
+            if ang:
+                ca, sa = math.cos(ang), math.sin(ang)
+                R = np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1]]) * scale
         out = []
         g = self.f.graphics(sid)
         if g and g.get('class') == 'GElement':
             col = gfx.Collector(self.f)
-            for p in col.collect(g):
-                if p['t'] == 'line':
+            coll = col.collect(g)
+            lines_ = [p for p in coll if p['t'] == 'line']
+            sp_ = self.params_of(sid)
+            frame = False
+            if len(lines_) == 4 and len(coll) == 4 and any(sp_.get(k) for k in ('Left', 'Right', 'Top', 'Bottom')):
+                # 'Structural Framing Tag' (Left/Right/Top/Bottom text margins): its only geometry is the label frame rectangle; Revit's sheets show the bare text
+                xs = sorted({round(q[0], 5) for p in lines_ for q in p['pts']}); ys = sorted({round(q[1], 5) for p in lines_ for q in p['pts']})
+                frame = len(xs) == 2 and len(ys) == 2
+            for p in coll:
+                if p['t'] == 'line' and not frame:
                     pts = gfx.transform_pts(p['pts'], R, o)
                     out.append({'t': 'line', 'pts': [q[:2] for q in pts], 'style': res.line(p.get('gs'), None, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation'})
                 elif p['t'] == 'fill' and p.get('loops'):
                     out.append({'t': 'fill', 'loops': [[q[:2] for q in gfx.transform_pts(l, R, o)] for l in p['loops']], 'color': p.get('color'), 'elem': eid, 'layer': 'symbolic_fill'})
+                elif p['t'] == 'text' and p.get('text') and p.get('origin') is not None:
+                    # static family text (door tag 'x' between width and height): paper size x scale, rotated with the tag
+                    q = dict(p); q['origin'] = gfx.transform_pts([p['origin']], R, o)[0][:2]
+                    M_ = np.asarray(R, float) / scale
+                    q['x'] = (M_ @ np.asarray(p['x'] or [1, 0, 0], float))[:2].tolist()
+                    q['y'] = (M_ @ np.asarray(p['y'] or [0, 1, 0], float))[:2].tolist() if p.get('y') else None
+                    q['size'] = (p.get('size') or 0.0078) * scale
+                    for k_ in ('box', 'text_box', 'text_off'):
+                        if q.get(k_): q[k_] = [a_ * scale for a_ in q[k_]]
+                    q.update(elem=eid, layer='text')
+                    out.append(q)
         sym = self.d.dec.titleblock_symbol(sid)
         for lab in (sym or {}).get('labels', []):
             parts = []
@@ -224,6 +358,7 @@ class Tags:
                 nm = prm.get('name') or ''
                 v = raw.get(prm.get('param')) if isinstance(prm.get('param'), int) and prm.get('param') < 0 else None
                 if v is None: v = vals.get(nm)
+                if prm.get('param') == -1002001 and not v and tsym not in (None, INVALID): v = self.type_name(tsym)       # Type Name: the (master) symbol's own name
                 if v is None: v = ''                                   # Revit shows an empty label when the value is missing (sample text only in the family editor)
                 if isinstance(v, float):
                     if any(w in nm for w in ('Length', 'Width', 'Height', 'Elevation', 'Offset', 'Thickness', 'Depth', 'Perimeter')): v = units.fmt_length(v, {'m_bUseDefault': 1}, units.length_format(self.f))
@@ -233,7 +368,7 @@ class Tags:
             tt = self.doc['text_types'].get(lab['type']) or {}
             font = self.doc['fonts'].get(tt.get('font')) or {}
             org = gfx.transform_pts([lab['origin']], R, o)[0]
-            out.append({'t': 'text', 'text': ' '.join(parts), 'origin': org[:2], 'x': [1.0, 0.0], 'size': (font.get('size') or 0.0078) * scale,
+            out.append({'t': 'text', 'text': ' '.join(parts), 'origin': org[:2], 'x': [math.cos(ang), math.sin(ang)], 'size': (font.get('size') or 0.0078) * scale,
                         'font': font.get('name') or 'Arial', 'bold': tt.get('bold'), 'halign': SheetComposer._halign(lab['flags'] or 0), 'valign': SheetComposer._valign(lab['flags'] or 0),
                         'anchor': True, 'elem': eid, 'layer': 'text'})
         return out
@@ -262,7 +397,7 @@ class Markers:
         R = np.eye(3) * scale
         if g and g.get('class') == 'GElement':
             for p in gfx.Collector(self.f).collect(g):
-                if p['t'] == 'line' and p.get('gs') not in (None, -1): out.append({'t': 'line', 'pts': [q[:2] for q in gfx.transform_pts(p['pts'], R, c)], 'style': res.line(p.get('gs'), -2000535, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation'})
+                if p['t'] == 'line' and p.get('gs') not in (None, -1) and self.d.drawable_gs(p['gs']): out.append({'t': 'line', 'pts': [q[:2] for q in gfx.transform_pts(p['pts'], R, c)], 'style': res.line(p.get('gs'), -2000535, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation'})
         rad = (af.get('m_width') or 0.041) / 2 * scale; half = af.get('m_ahAngleDouble') or math.pi / 4
         if not out:
             out.append({'t': 'line', 'pts': [(c[:2] + rad * np.array([math.cos(t), math.sin(t)])).tolist() for t in np.linspace(0, 2 * math.pi, 49)], 'style': st, 'elem': eid, 'layer': 'annotation'})
@@ -273,15 +408,50 @@ class Markers:
             if not bs.get('m_basis'): continue
             d = (Mv @ np.asarray(bs['m_basis'][2], float))[:2]
             if np.linalg.norm(d) < 1e-9: continue
-            d /= np.linalg.norm(d); tip = c[:2] + d * rad / math.cos(half)
-            ang = math.atan2(d[1], d[0])
-            arc = [(c[:2] + rad * np.array([math.cos(t), math.sin(t)])).tolist() for t in np.linspace(ang - (math.pi / 2 - half), ang + (math.pi / 2 - half), 9)]
-            loop = [tip.tolist()] + arc[::-1] + [tip.tolist()]
-            out.append({'t': 'fill', 'loops': [loop], 'color': [0, 0, 0], 'elem': eid, 'layer': 'annotation_fill'})
+            d /= np.linalg.norm(d)
+            if af.get('m_shape') == 0:
+                # square body (2020 Residential '1/2" Square'): triangle on the side the arrow looks to, base = that side, apex angle 2 x half
+                n = np.array([-d[1], d[0]]); tip = c[:2] + d * (rad + rad / math.tan(half))
+                loop = [tip.tolist(), (c[:2] + d * rad + n * rad).tolist(), (c[:2] + d * rad - n * rad).tolist(), tip.tolist()]
+            else:
+                tip = c[:2] + d * rad / math.cos(half)
+                ang = math.atan2(d[1], d[0])
+                arc = [(c[:2] + rad * np.array([math.cos(t), math.sin(t)])).tolist() for t in np.linspace(ang - (math.pi / 2 - half), ang + (math.pi / 2 - half), 9)]
+                loop = [tip.tolist()] + arc[::-1] + [tip.tolist()]
+            if af.get('m_ahFilled', 1): out.append({'t': 'fill', 'loops': [loop], 'color': [0, 0, 0], 'elem': eid, 'layer': 'annotation_fill'})
+            else: out.append({'t': 'line', 'pts': loop, 'style': st, 'elem': eid, 'layer': 'annotation'})
+            out += self.arrow_labels(eid, a, d, c, rad, af, sym, scale)
+        return out
+
+    def arrow_labels(self, eid, a, d, c, rad, af, sym, scale):
+        """detail number (viewport) beside the arrow, sheet number (symbol label) at the body centre: 2020 Residential plan 32 DXF G-ANNO-SYMB
+        (number centre = marker + arrow direction x 1.4 x body radius, 0.33 ft above at 1:48; text 3/32\" high)"""
+        vid = self.f.eid(a['fields'].get('m_dbViewId'))
+        ref = self.d.dec.__dict__.setdefault('_vp_of_view', None)
+        if ref is None:
+            ref = {}
+            for sh in self.doc['views'].values():
+                if sh.get('kind') == 'sheet':
+                    for vp in sh.get('viewports') or []: ref[vp['view']] = (vp.get('detail_number'), sh.get('sheetNumber'))
+            self.d.dec.__dict__['_vp_of_view'] = ref
+        if vid not in ref: return []
+        dn, sn = ref[vid]
+        from .sheet import SheetComposer
+        out = []
+        font = self.doc['fonts'].get(self.f.eid(ob(af.get('m_lineAndTextAttr')).get('m_fontId'))) if af.get('m_lineAndTextAttr') else None
+        size = ((font or {}).get('size') or 3 / 32 * IN) * scale; name = (font or {}).get('name') or 'Arial'
+        if dn:
+            p0 = c[:2] + d * 1.4 * rad + np.array([0.0, 0.33 / 48 * scale])
+            out.append({'t': 'text', 'text': str(dn), 'origin': p0.tolist(), 'x': [1.0, 0.0], 'size': size, 'font': name, 'halign': 1, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'})
+        if sn and sym not in (None, INVALID):
+            for lab in (self.d.dec.titleblock_symbol(sym) or {}).get('labels', []):
+                if any(prm.get('name') == 'Sheet Number' for prm in lab.get('params') or []):
+                    org = np.asarray(lab['origin'], float)[:2] * scale + c[:2]
+                    out.append({'t': 'text', 'text': str(sn), 'origin': org.tolist(), 'x': [1.0, 0.0], 'size': size, 'font': name, 'halign': 1, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'})
         return out
 
 
-def section_marker(drawer, eid, O, Mv, scale, res, vid):
+def section_marker(drawer, eid, O, Mv, scale, res, vid, pts=None):
     """section marker in a plan: the section line (Section.m_frontCut polyline, jogs included), the type's head symbol at the first point and
     tail symbol at the last (SectionAttributes.m_sectionHeadFamilyTagId / m_sectionTailFamilyTagId), labels = detail / sheet number of the
     section view's viewport. Symbol frame: local -x outward along the line (labels sit at x < 0), local y = the section's looking direction (?)."""
@@ -290,7 +460,7 @@ def section_marker(drawer, eid, O, Mv, scale, res, vid):
     f = drawer.f; doc = drawer.doc
     r = f.rec(eid, 'Section')
     if not r: return []
-    fl = r['fields']; pts = fl.get('m_frontCut') or []
+    fl = r['fields']; pts = pts if pts is not None else (fl.get('m_frontCut') or [])
     if len(pts) < 2: return []
     tv = f.eid(fl.get('m_dbViewId')); vrec = f.rec(tv)
     vt = f.rec(f.eid(vrec['fields'].get('m_dbViewTypeId'))) if vrec else None
@@ -352,4 +522,60 @@ def symbol_prims(drawer, sid, R, o, eid, res, cat):
         pat = drawer.doc['fill_patterns'].get(p.get('pattern'))
         if p.get('loops') and (pat is None or pat.get('solid')) and not ((p.get('fill_flags') or 0) & 4 and False):
             out.append({'t': 'fill', 'loops': [[q[:2] for q in l] for l in p['loops']], 'color': [0, 0, 0], 'elem': eid, 'layer': 'annotation_fill'})
+    return out
+
+
+def callout(drawer, eid, O, Mv, scale, res, vid):
+    """callout (Section record, m_sectionCreationMethod 202) in its parent view: the callout view's crop box (m_boundedSpace, basis rows 0/1,
+    m_boundOffset [hi, lo]) as a rectangle with rounded corners (CalloutTag.m_cornerRadius, paper), a straight leader to the head point
+    (m_viewDataMapForCallout[parent].m_headPoint) and the head symbol (CalloutTag.m_familyTagId) upright at the head point with the callout
+    view's detail / sheet number (2020 Residential 'typ. wall' callouts, vs Revit's DXF)"""
+    from . import gfx
+    from .sheet import SheetComposer
+    f = drawer.f; doc = drawer.doc
+    r = f.rec(eid, 'Section')
+    if not r: return []
+    fl = r['fields']; bs = fl.get('m_boundedSpace') or {}
+    if not bs.get('m_basis') or not bs.get('m_boundOffset'): return []
+    tv = f.eid(fl.get('m_dbViewId')); vrec = f.rec(tv)
+    vt = f.rec(f.eid(vrec['fields'].get('m_dbViewTypeId'))) if vrec else None
+    at = f.rec(f.eid(vt['fields'].get('m_calloutAttrId'))) if vt else None
+    af = at['fields'] if at else {}
+    o = np.asarray(bs['m_orig'], float); B = np.asarray(bs['m_basis'], float); bo = bs['m_boundOffset']
+    corners = [o + B[0] * u + B[1] * w for u, w in ((bo[0][1], bo[1][1]), (bo[0][0], bo[1][1]), (bo[0][0], bo[1][0]), (bo[0][1], bo[1][0]))]
+    C2 = np.asarray([((p - O) @ Mv.T)[:2] for p in corners])
+    st = res.line(None, -2000278, 'proj', eid, annotation=True)
+    out = []
+    from shapely.geometry import Polygon, Point
+    poly = Polygon(C2)
+    if poly.area <= 1e-9: return []
+    rad = float(af.get('m_cornerRadius') or 0) * scale
+    if rad > 0 and rad * 2 < min(np.ptp(C2[:, 0]), np.ptp(C2[:, 1])):
+        poly = poly.buffer(-rad, join_style=2).buffer(rad, resolution=8)
+    out.append({'t': 'line', 'pts': [list(q) for q in poly.exterior.coords], 'style': st, 'elem': eid, 'layer': 'annotation'})
+    vd = next((x['second'] for x in fl.get('m_viewDataMapForCallout') or [] if f.eid(x.get('first')) == vid), None)
+    sid = f.eid(af.get('m_familyTagId'))
+    if not vd or vd.get('m_headPoint') is None or sid in (None, INVALID): return out
+    h = ((np.asarray(vd['m_headPoint'], float) - O) @ Mv.T)[:2]
+    R = np.eye(3) * scale; ho = np.array([h[0], h[1], 0.0])
+    sp = symbol_prims(drawer, sid, R, ho, eid, res, -2000278)
+    out += sp
+    # leader: straight, from the box outline towards the head, stopping at the head symbol's extent
+    P = np.asarray([q for p in sp for q in (p.get('pts') or [])], float) if sp else np.zeros((0, 2))
+    hr = float(np.max(np.hypot(P[:, 0] - h[0], P[:, 1] - h[1]))) if len(P) else 0.0
+    from shapely.ops import nearest_points
+    a = np.asarray(nearest_points(poly.exterior, Point(h))[0].coords[0])
+    dv = h - a; L = np.linalg.norm(dv)
+    if L > hr + 1e-6: out.append({'t': 'line', 'pts': [a.tolist(), (h - dv / L * hr).tolist()], 'style': st, 'elem': eid, 'layer': 'annotation'})
+    vp = next((x for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
+    sheet = next((s for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
+    vals = {'Detail Number': (vp or {}).get('detail_number') or '', 'Sheet Number': (sheet or {}).get('sheetNumber') or '', 'Reference Label': ''}
+    for lab in (drawer.dec.titleblock_symbol(sid) or {}).get('labels', []):
+        txt = ' '.join(str(vals.get(prm.get('name'), '')) for prm in lab.get('params') or []).strip()
+        if not txt: continue
+        tt = doc['text_types'].get(lab['type']) or {}
+        font = doc['fonts'].get(tt.get('font')) or {}
+        org = [h[0] + lab['origin'][0] * scale, h[1] + lab['origin'][1] * scale]
+        out.append({'t': 'text', 'text': txt, 'origin': org, 'x': [1.0, 0.0], 'size': (font.get('size') or 0.0078) * scale, 'font': font.get('name') or 'Arial',
+                    'halign': SheetComposer._halign(lab['flags'] or 0), 'valign': SheetComposer._valign(lab['flags'] or 0), 'anchor': True, 'elem': eid, 'layer': 'text'})
     return out
