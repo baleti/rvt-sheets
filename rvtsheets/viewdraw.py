@@ -3,9 +3,10 @@
 Pipeline per element: visibility -> saved graphics walked for this view (scene.Walker) -> solids tessellated (reader rvt_mesh) ->
 clipped to the view depth range -> cut regions at the cut plane + projected feature edges with hidden-line removal (hlr.DepthBuffer)
 -> symbolic 2D curves projected -> styles resolved (style.Resolver)."""
-import math, collections, time
+import math, collections, time, os, sys
 import numpy as np
-from .reader import INVALID, ob as ob_
+from .reader import INVALID, ob as ob_, path
+IN = 1 / 12.0
 from .scene import Walker, ViewCtx
 from .hlr import DepthBuffer
 from .style import Resolver
@@ -91,6 +92,24 @@ def _clip_polyline_u(P, u0, u1):
         if not out or np.linalg.norm(out[-1] - pa) > 1e-9: out.append(pa)
         out.append(pb)
     return np.asarray(out, float) if len(out) >= 2 else np.zeros((0, 2))
+
+
+_TESS = None
+
+
+def _tess_fn():
+    """Rust tessellator (rvt_fast, bit-identical to rvt_mesh, 13-41x; falls back to the reference inside the adapter), else the reference function"""
+    global _TESS
+    if _TESS is None:
+        try:
+            p = os.path.expanduser('~/src/rvt-core/python')
+            if os.path.isdir(p) and p not in sys.path: sys.path.append(p)
+            import rvt_fast
+            _TESS = rvt_fast.tessellate_geometry
+        except Exception:
+            import rvt_mesh
+            _TESS = rvt_mesh.tessellate_geometry
+    return _TESS
 
 
 _FONTS = {}
@@ -235,10 +254,18 @@ class ViewDrawer:
                 except Exception: self.stats['spot_error'] += 1
                 continue
             if info['cls'] == 'InteriorElev':
-                try: prims += self.markers.elevation(eid, O, Mv, scale, res); self.stats['elevation_markers'] += 1
+                try: prims += _hang(self.markers.elevation(eid, O, Mv, scale, res)); self.stats['elevation_markers'] += 1
                 except Exception as ex: self.stats['marker_error'] += 1
                 continue
             if info['cls'] == 'InteriorElevArrow': continue
+            if info['cls'] == 'StairsPathElement':
+                try: prims += self.stairs_path_text(eid, O, Mv, scale, v)
+                except Exception: self.stats['stairs_path_error'] += 1
+                continue
+            if info['cls'] == 'PropertyLineSegment':
+                try: prims += self.property_line(eid, O, Mv, res, v)
+                except Exception: self.stats['property_line_error'] += 1
+                continue
             if info['cls'] == 'ColorFillLegend':
                 try: prims += self.color_legend(eid, v, O, Mv, scale); self.stats['legends'] += 1
                 except Exception: self.stats['legend_error'] += 1
@@ -246,17 +273,17 @@ class ViewDrawer:
             if info['cls'] == 'Section':
                 if (self.f.rec(eid) or {}).get('fields', {}).get('m_sectionCreationMethod') == 202:
                     from .annot import callout
-                    try: prims += callout(self, eid, O, Mv, scale, res, vid); self.stats['callouts'] += 1
+                    try: prims += _hang(callout(self, eid, O, Mv, scale, res, vid)); self.stats['callouts'] += 1
                     except Exception: self.stats['marker_error'] += 1
                 elif v.get('kind') == 'section':
                     from .annot import section_marker
                     try:
                         sp_ = self.vis.section_plane_line(eid, v)
-                        if sp_: prims += section_marker(self, eid, O, Mv, scale, res, vid, pts=sp_[0]); self.stats['section_markers'] += 1
+                        if sp_: prims += _hang(section_marker(self, eid, O, Mv, scale, res, vid, pts=sp_[0])); self.stats['section_markers'] += 1
                     except Exception: self.stats['marker_error'] += 1
                 elif v.get('kind') == 'plan':
                     from .annot import section_marker
-                    try: prims += section_marker(self, eid, O, Mv, scale, res, vid); self.stats['section_markers'] += 1
+                    try: prims += _hang(section_marker(self, eid, O, Mv, scale, res, vid)); self.stats['section_markers'] += 1
                     except Exception: self.stats['marker_error'] += 1
                 continue
             if info['cls'] in ('IndependentTag', 'RoomTag', 'SpaceTag', 'AreaTag'):
@@ -265,7 +292,10 @@ class ViewDrawer:
                 continue
             if info['owner'] == vid and info['cls'] == 'TextNote':
                 tp = self.text_note(eid, O, Mv, scale)
-                if tp: prims.append(tp); self.stats['text_notes'] += 1
+                if tp:
+                    prims.append(tp); self.stats['text_notes'] += 1
+                    try: prims += self.text_note_leaders(eid, O, Mv, scale, res, info['cat'])
+                    except Exception: self.stats['leader_error'] += 1
                 continue
             if info['cls'] == 'RoomElem' and v['kind'] == 'plan':
                 try: prims += self.room_fill(eid, v, O, Mv, wc)
@@ -325,7 +355,9 @@ class ViewDrawer:
                             prims.append({'t': 'line', 'pts': [list(q) for q in part.coords], 'style': st, 'elem': eid, 'layer': lay})
                     continue
                 pr = {'t': 'line', 'pts': pts[:, :2].tolist(), 'style': st, 'elem': eid, 'layer': lay}
-                if is_section and not anno and len(pts) > 1: pr['_w'] = pts             # depth-tested below (elevations/sections)
+                if is_section and not anno and len(pts) > 1:
+                    pr['_w'] = pts             # depth-tested below (elevations/sections)
+                    if cid in (-2000023, -2000014): pr['_eps'] = 1.5      # doors/windows sit recessed inside the wall thickness
                 prims.append(pr)
             for fl in pieces['fills']:
                 loops = [((np.asarray(l, float) - O) @ Mv.T)[:, :2].tolist() for l in fl.get('loops') or [] if l]
@@ -374,7 +406,7 @@ class ViewDrawer:
             try: prims += Datums(self).draw(vid, v, datum_ids, O, Mv, scale, res, imp)
             except Exception as ex: self.stats['datum_error'] += 1; print('datum error', repr(ex))
         self.stats['solids'] += len(solids)
-        if not solids and not prims: return {'prims': prims, 'stats': dict(self.stats)}
+        if not solids and not prims: return {'prims': self._finish(prims, O, Mv), 'stats': dict(self.stats)}
         # depth range clip
         allp = []
         clipped = []
@@ -407,7 +439,7 @@ class ViewDrawer:
             if len(T2): clipped.append((eid, cid, T2, uvw, fid, gs, ov)); allp.append(T2.reshape(-1, 3))
         if not allp:
             for p in prims: p.pop('_w', None)
-            return {'prims': prims, 'stats': dict(self.stats)}
+            return {'prims': self._finish(prims, O, Mv), 'stats': dict(self.stats)}
         P = np.concatenate(allp)
         px = px_mm / 304.8 * scale                                    # pixel size in model feet
         bx = [P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max()]
@@ -418,7 +450,9 @@ class ViewDrawer:
             bx = [max(bx[0], cr[0] - mg), max(bx[1], cr[1] - mg), min(bx[2], cr[2] + mg), min(bx[3], cr[3] + mg)]
             if bx[0] >= bx[2] or bx[1] >= bx[3]: bx = [P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max()]
         db = DepthBuffer(bx[0], bx[1], bx[2], bx[3], px)
-        for c in clipped: db.add(c[2])
+        for c in clipped:
+            if c[1] == -2003500 and v['kind'] == 'section': continue        # stacked-wall parents duplicate their child walls (and cover curtain-wall storefronts): not occluders (Commercial east/south elevation DXF R 0.66/0.69 -> 0.80/0.85)
+            db.add(c[2])
         for T in occluders:
             if cut_w is not None: T = _clip_tris_halfspace(T, np.array([0, 0, 1.0]), cut_w)
             if wf is not None and wf > -1e8: T = _clip_tris_halfspace(T, np.array([0, 0, -1.0]), -wf)
@@ -518,11 +552,11 @@ class ViewDrawer:
             P = p.pop('_w', None)
             if P is None: out.append(p); continue
             E = np.stack([P[:-1], P[1:]], 1)
-            vis = [(a, b) for a, b in db.visible_parts(E, eps_s) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
+            vis = [(a, b) for a, b in db.visible_parts(E, max(eps_s, p.pop('_eps', 0.0))) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
             if vis: out.append(dict(p, t='segs', segs=[[a[:2].tolist(), b[:2].tolist()] for a, b in vis], pts=None))
         prims = out
         self.stats['seconds'] = round(time.time() - t0, 1)
-        return {'prims': prims, 'stats': dict(self.stats), 'conds_unknown': {str(k): v for k, v in W.unknown_conds.items()}}
+        return {'prims': self._finish(prims, O, Mv), 'stats': dict(self.stats), 'conds_unknown': {str(k): v for k, v in W.unknown_conds.items()}}
 
     def insulation(self, eid, O, Mv, res):
         """batt insulation (CurveElem, 'Insulation Batting Lines', m_data.m_oUserData: m_width W, m_scale = bulge ratio): Revit's export
@@ -696,6 +730,67 @@ class ViewDrawer:
                 'bold': tt.get('bold'), 'italic': tt.get('italic'), 'halign': SheetComposer._halign(fl_), 'valign': SheetComposer._valign(fl_), 'anchor': True,
                 'elem': eid, 'layer': 'text', 'width': (fl.get('m_lineWidth') or 0) * scale}
 
+    PAPER_LAYERS = {'annotation', 'annotation_fill', 'text', 'datum'}
+
+    def _finish(self, prims, O, Mv):
+        """control-API keys on every prim (all optional for consumers, see CONTROL-API-ANSWERS.md): cat (category id of the owner element),
+        paper (sizes are paper sizes: grow with the view scale), part (sub-part of the element: text | line | leader | arrow | witness | head | frame ...),
+        anchor (world feet point the annotation sits at: its first point)"""
+        info = self.vis.info.info; first = {}
+        for p in prims:
+            e = p.get('elem')
+            if e is None: continue
+            if 'cat' not in p:
+                c = (info.get(e) or {}).get('cat')
+                if c is not None and c != INVALID: p['cat'] = c
+            p.setdefault('paper', p.get('layer') in self.PAPER_LAYERS)
+            if 'part' not in p: p['part'] = 'text' if p['t'] == 'text' else 'fill' if p['t'] == 'fill' else 'line'
+            if p['paper'] and e not in first:
+                q = p.get('origin') if p.get('origin') is not None else (p.get('pts') or [None])[0]
+                if q is not None: first[e] = q
+        Mi = np.linalg.inv(Mv)
+        for p in prims:
+            q = first.get(p.get('elem'))
+            if q is not None and p['paper']:
+                p['anchor'] = (np.asarray([q[0], q[1], 0.0], float) @ Mi.T + O).tolist()
+        return prims
+
+    def text_note_leaders(self, eid, O, Mv, scale, res, cat):
+        """text note leaders: anchor -> elbow -> end (polyline) or, with m_bArcLeaders, the circle arc through the three points; arrow head
+        of the text type's leader style (Arrow 30 Degree: full angle in param -4293960870.., size on paper) at the end"""
+        r = self.f.rec(eid, 'TextNote'); fl = r['fields']
+        leaders = fl.get('m_leaders') or []
+        if not leaders: return []
+        P = lambda p: ((np.asarray(p, float) - O) @ Mv.T)[:2]
+        tt = self.f.rec(self.f.eid(fl.get('m_attrId'))) or {}
+        tf = tt.get('fields') or {}
+        gs = ((self.f.rec(self.f.eid((tf.get('m_lineAndTextAttr') or {}).get('m_categoryId'))) or {}).get('fields') or {}).get('m_gstyleIds') or [None]
+        st = res.line(gs[0], cat, 'proj', eid, annotation=True)
+        ang = 30 * math.pi / 180; size = 1 / 8 * IN * scale
+        ls = self.f.rec(self.f.eid(next((x.get('m_value') for x in (path(tf, 'm_pParamValueSetElementId', 'm_paramSet') or []) if x.get('m_paramId') == 4293960981), None)))
+        if ls:
+            for x in path(ls['fields'], 'm_pParamValueSetDouble', 'm_paramSet') or []:
+                if x.get('m_paramId') == 4293960870: ang = x['m_value']
+                elif x.get('m_paramId') == 4293960882: size = x['m_value'] * scale
+        out = []
+        for lo in leaders:
+            l = lo.get('obj') or lo
+            if not l.get('m_end'): continue
+            a, e = P(l['m_anchor']), P(l['m_end']); el = P(l.get('m_elbow') or l['m_anchor'])
+            pts = [a, el, e]
+            if fl.get('m_bArcLeaders') and not l.get('m_bStraight'):
+                pts = _arc3(a, el, e) or pts
+            out.append({'t': 'line', 'pts': [q.tolist() for q in pts], 'style': st, 'elem': eid, 'layer': 'annotation', 'part': 'leader'})
+            if (l.get('m_type') or 0) != 0:
+                u = pts[-2] - pts[-1]; n_ = np.linalg.norm(u)
+                if n_ > 1e-9:
+                    u /= n_; ca, sa = math.cos(ang / 2), math.sin(ang / 2)
+                    arm = size / ca
+                    for sg in (1, -1):
+                        v = np.array([u[0] * ca - sg * u[1] * sa, u[1] * ca + sg * u[0] * sa]) * arm
+                        out.append({'t': 'line', 'pts': [e.tolist(), (e + v).tolist()], 'style': st, 'elem': eid, 'layer': 'annotation', 'part': 'arrow'})
+        return out
+
     def materials(self):
         if getattr(self, '_mat', None) is None:
             try:
@@ -788,6 +883,56 @@ class ViewDrawer:
                 out[key] = ([col & 255, (col >> 8) & 255, (col >> 16) & 255], self.f.eid(it.get('m_fillPatternId')))
             return {'param': pid, 'entries': out}
         return None
+
+    def stairs_path_text(self, eid, O, Mv, scale, v):
+        """'UP' at the start riser of a run that starts at the view's level, 'DN' at the end riser of a run that ends there: baseline-left text at the
+        riser midpoint + (-3/16\", +0.047\") x scale + the path's text offset (2020 Residential plan 32: all four DN, Commercial plan 32 UP, DXF S-STRS-IDEN)"""
+        if v['kind'] != 'plan': return []
+        r = self.f.rec(eid, 'StairsPathElement'); fl = r['fields']
+        lk = ob_(fl.get('m_stairsLinkElementId')) or {}; sid = self.f.eid(lk.get('m_linkInstOrHostId'))
+        out = []
+        typ = self.f.rec(self.f.eid(fl.get('m_typeId')))
+        la = ob_((typ['fields'] if typ else {}).get('m_pLineAndTextAttr')) or {}
+        font = self.doc['fonts'].get(self.f.eid(la.get('m_fontId'))) or {}
+        size = (font.get('size') or 3 / 32 / 12) * scale
+        for run in self.f.recs('StairsRun'):
+            rf = run['fields']
+            if self.f.eid(rf.get('m_stairsId')) != sid: continue
+            def mid(c):
+                o = ob_(rf[c]); a = np.asarray(o['m_origin'], float); d = np.asarray(o['m_dirVec'], float); t0, t1 = o['m_endParams']
+                return (a + d * (t0 + t1) / 2)
+            bot, top = rf.get('m_bottomElevation'), rf.get('m_topElevation')
+            for key, txt_k, show_k, which, off_k in (('m_oStartRiser', 'm_upText', 'm_showUpText', 'bot', 'm_upTextOffset'), ('m_oEndRiser', 'm_downText', 'm_showDownText', 'top', 'm_downTextOffset')):
+                lvl = bot if which == 'bot' else top
+                if not fl.get(show_k) or lvl is None or abs(float(lvl) - float(self.level_elevation(v, O))) > 0.05 or not fl.get(txt_k): continue
+                off = np.asarray((ob_(fl.get(off_k)) or {}).get('m_xyz') or [0, 0, 0], float)
+                p = mid(key) + off + np.array([-3 / 16 / 12 * scale, 0.047 / 12 * scale, 0.0])
+                uv = ((p - O) @ Mv.T)[:2]
+                out.append({'t': 'text', 'text': fl[txt_k], 'origin': uv.tolist(), 'x': [1.0, 0.0], 'size': size, 'font': font.get('name') or 'Arial', 'halign': 0, 'valign': 2,
+                            'anchor': True, 'elem': eid, 'layer': 'text'})
+        return out
+
+    def level_elevation(self, v, O):
+        return O[2]
+
+    def property_line(self, eid, O, Mv, res, v):
+        """property line segment (site plans): its GLine / GArc curve in the 'Property Lines' category style (dash-dot pattern, pen 8)"""
+        if v['kind'] != 'plan': return []
+        r = self.f.rec(eid, 'PropertyLineSegment')
+        c = r['fields'].get('m_curve') if r else None
+        if not c: return []
+        cls = self.f.tagname(c.get('ptr')); o = ob_(c)
+        if cls == 'GLine':
+            orr = np.asarray(o['m_origin'], float); d = np.asarray(o['m_dirVec'], float); t0, t1 = o['m_endParams']
+            P = np.array([orr + d * t0, orr + d * t1])
+        elif cls == 'GArc':
+            from .gfx import arc_pts
+            t0, t1 = o['m_endParams']
+            P = np.asarray(arc_pts(o['m_center'], o['m_radius'], o['m_xVec'], o['m_yVec'], t0, t1), float)
+        else: return []
+        pts = ((P - O) @ Mv.T)[:, :2]
+        st = res.line(None, -2001265, 'proj', eid)
+        return [{'t': 'line', 'pts': pts.tolist(), 'style': st, 'elem': eid, 'layer': 'projection'}]
 
     def color_legend(self, eid, v, O, Mv, scale):
         """colour scheme legend (ColorFillLegend): title above the origin (top-left of the first row), one row per scheme entry in alphabetical order:
@@ -1007,8 +1152,8 @@ class ViewDrawer:
     E = property(lambda s: s.f.eid)
 
     def _tess(self, s):
-        import rvt_mesh
-        try: t = rvt_mesh.tessellate_geometry(s['geo'])
+        tg = _tess_fn()
+        try: t = tg(s['geo'])
         except Exception: self.stats['tess_error'] += 1; return None
         tris = np.asarray(t['tris'], float).reshape(-1, 3, 3)
         if not len(tris): return tris, [], []
@@ -1032,3 +1177,26 @@ class ViewDrawer:
                 cur = segs[j][1 - e]; line.append(cur.tolist())
             loops.append(line)
         return loops
+
+
+def _arc3(a, b, c, n=24):
+    """points of the circle arc a -> c through b (None when collinear)"""
+    ax, ay = a; bx, by = b; cx, cy = c
+    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12: return None
+    ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d
+    uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d
+    ctr = np.array([ux, uy]); r = np.linalg.norm(a - ctr)
+    th = [math.atan2(*(q - ctr)[::-1]) for q in (a, b, c)]
+    t0, t1, t2 = th
+    d1 = (t1 - t0 + math.pi) % (2 * math.pi) - math.pi        # signed sweep a -> b
+    d2 = (t2 - t1 + math.pi) % (2 * math.pi) - math.pi
+    if d1 * d2 < 0: return None
+    tot = d1 + d2
+    return [ctr + r * np.array([math.cos(t0 + tot * k / n), math.sin(t0 + tot * k / n)]) for k in range(n + 1)]
+
+
+def _hang(prims):
+    """marker heads hang outside the crop region: they stay part of the exported picture (like datum heads)"""
+    for p in prims: p['hang'] = True
+    return prims

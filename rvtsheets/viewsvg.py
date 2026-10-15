@@ -65,17 +65,24 @@ def body(prims, scale, tx, layer_order=('underlay', 'room_fill', 'symbolic_fill'
     return out
 
 
-def view_svg(drawing, scale, margin_mm=5, crop=None):
+def view_svg(drawing, scale, margin_mm=5, crop=None, hang=False):
     """crop: (u0, v0, u1, v1) of an active crop region - the drawing is bounded by it (Revit's own view export does the same)"""
     b = bounds(drawing['prims'])
     if b is None: return '<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm"/>'
     (u0, v0), (u1, v1) = b
+    hg = [p for p in drawing['prims'] if p.get('hang')]
+    if hang and hg and crop is None:                                  # marker heads just outside the model extents are part of the picture
+        hb = bounds(hg, False)
+        if hb is not None:
+            pad = 70.0 / (FT_MM / scale)
+            (a0, b0), (a1, b1) = hb
+            u0 = min(u0, max(a0, u0 - pad)); v0 = min(v0, max(b0, v0 - pad)); u1 = max(u1, min(a1, u1 + pad)); v1 = max(v1, min(b1, v1 + pad))
     if crop is not None:
         cu0, cv0, cu1, cv1 = crop
         if max(u0, cu0) < min(u1, cu1) and max(v0, cv0) < min(v1, cv1):
             u0, v0, u1, v1 = max(u0, cu0), max(v0, cv0), min(u1, cu1), min(v1, cv1)
             # datum heads and bubbles (levels, grids) hang outside the crop region and are part of Revit's picture
-            dp = [p for p in drawing['prims'] if p.get('layer') in ('datum',) or (p.get('t') == 'text' and p.get('elem') in {q.get('elem') for q in drawing['prims'] if q.get('layer') == 'datum'})]
+            dp = [p for p in drawing['prims'] if p.get('layer') in ('datum',) or p.get('hang') or (p.get('t') == 'text' and p.get('elem') in {q.get('elem') for q in drawing['prims'] if q.get('layer') == 'datum'})]
             if dp:
                 db = bounds(dp, False)
                 if db is not None:

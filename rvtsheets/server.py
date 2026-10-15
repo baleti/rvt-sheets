@@ -90,6 +90,23 @@ def make_app(resolver):
             traceback.print_exc(); s = error_svg('%s %s: %s: %s' % (kind, eid, type(ex).__name__, ex)); hdr = {}
         return web.Response(text=s, content_type='image/svg+xml', headers=hdr)
 
+    async def scene_json(req):
+        """/api/{mid}/view/{id}.json?scale=&detail=&template=0&filters=0&cut=&phase=&phaseFilter= : view primitives for the viewer's control panel (CONTROL-API.md)"""
+        from .drawings import scene_text
+        m = model(req.match_info['mid']); vid = int(req.match_info['id'])
+        if m.status()['state'] != 'ready': return web.json_response(m.status(), status=202)
+        q = req.query; opts = {}
+        for k in ('scale', 'detail', 'phase', 'phaseFilter'):
+            if q.get(k) not in (None, ''): opts[k] = int(q[k])
+        if q.get('cut') not in (None, ''): opts['cut'] = float(q['cut'])
+        for k in ('template', 'filters'):
+            if q.get(k) in ('0', 'false'): opts[k] = False
+        try: txt = await _pool.run(0, scene_text, m, vid, opts)
+        except KeyError: raise web.HTTPNotFound(text='unknown view %d' % vid)
+        except Exception as ex:
+            traceback.print_exc(); return web.json_response({'error': '%s: %s' % (type(ex).__name__, ex)}, status=500)
+        return web.Response(text=txt, content_type='application/json', headers={'X-Rvt-Cache-Key': m.key})
+
     async def cache_json(req):
         """cache state without decoding: {cached, sheets, total, views, views_total, key, failed}"""
         m = model(req.match_info['mid'])
@@ -128,6 +145,7 @@ def make_app(resolver):
     app.router.add_get('/api/{mid}/doc.json', doc)
     app.router.add_get('/api/{mid}/sheet/{id}.svg', lambda r: drawing(r, 'sheet'))
     app.router.add_get('/api/{mid}/view/{id}.svg', lambda r: drawing(r, 'view'))
+    app.router.add_get('/api/{mid}/view/{id}.json', scene_json)
     app.router.add_get('/api/{mid}/thumb/{kind}/{id}.png', thumb)
     app.router.add_get('/api/{mid}/cache.json', cache_json)
     app.router.add_get('/api/{mid}/sheet/{id}.pdf', pdf)

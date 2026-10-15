@@ -128,15 +128,15 @@ class Annotations:
             if m: tick = int(m.group(1)) / int(m.group(2)) * IN * scale
         out = []
         t0, t1 = min(ts), max(ts)
-        out.append({'t': 'line', 'pts': [(o + d * t0).tolist(), (o + d * t1).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation'})
+        out.append({'t': 'line', 'pts': [(o + d * t0).tolist(), (o + d * t1).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'line'})
         for p, t in zip(refs, ts):
             q = o + d * t                       # foot on the dimension line
             v = q - p; L = np.linalg.norm(v)
             if L > gap:
                 u = v / L
-                out.append({'t': 'line', 'pts': [(p + u * gap).tolist(), (q + u * ext).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation'})
+                out.append({'t': 'line', 'pts': [(p + u * gap).tolist(), (q + u * ext).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'witness'})
             a = (d + n) / math.sqrt(2) * tick / 2
-            out.append({'t': 'line', 'pts': [(q - a).tolist(), (q + a).tolist()], 'style': dict(tickst, w=max(tickst['w'], line['w'] * 2)), 'elem': eid, 'layer': 'annotation'})
+            out.append({'t': 'line', 'pts': [(q - a).tolist(), (q + a).tolist()], 'style': dict(tickst, w=max(tickst['w'], line['w'] * 2)), 'elem': eid, 'layer': 'annotation', 'part': 'arrow'})
         # segment texts
         segs = fl.get('m_ArrSegInfo') or []
         order = np.argsort(ts)

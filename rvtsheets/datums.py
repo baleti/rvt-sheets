@@ -9,7 +9,7 @@ from . import gfx
 
 def fmt_elev(ft, imperial):
     if imperial:
-        sgn = '-' if ft < 0 else ''; ft = abs(ft); f = int(ft + 1e-9); inch = round((ft - f) * 12, 2)
+        sgn = '-' if ft < 0 else ''; ft = abs(ft); f = int(ft + 1e-9); inch = round(max(ft - f, 0.0) * 12, 2) + 0.0
         if inch >= 12: f += 1; inch = 0
         i = ('%g' % inch)
         return '%s%d\' - %s"' % (sgn, f, i)
@@ -94,6 +94,19 @@ class Datums:
                 lo, hi = e['m_freeEnd3d'], e['m_bubbleEnd3d']
                 p0 = o + ax * lo; p1 = o + ax * hi
             else: p0 = o + ax * lo; p1 = o + ax * hi
+            lvl_ext = None
+            if r['class'] == 'Level' and v.get('kind') == 'section' and e and (e.get('m_freeEnd3d') is not None):
+                # level extents in an elevation/section: ends t along the view's right axis from the level's own origin (P = o + right * t); bubble
+                # end = right end, free end 0.0 = unset -> the 3D free end (Commercial: parapet levels have origin x 76.5 and stored ends -161.1/21.2
+                # in the building section = Revit's -84.6..97.7, same as the Finished Floor line; north elevation mirrored)
+                t_b = e.get('m_bubbleEnd') or e.get('m_bubbleEnd3d') or 0.0
+                t_f = e.get('m_freeEnd') or e.get('m_freeEnd3d') or 0.0
+                if t_b or t_f:
+                    Xr = Mv[0]
+                    lvl_ext = (((o + Xr * t_b - O) @ Mv.T)[:2], ((o + Xr * t_f - O) @ Mv.T)[:2])
+            if lvl_ext is not None:
+                uv_b, uv_f = lvl_ext
+                p0 = o; p1 = o          # placeholders: uv set below
             if r['class'] == 'Level' and not e and v.get('kind') == 'section':
                 # no per-view extents: Revit draws the level across the crop region plus about 1/2" of paper on each side
                 # (2020 Residential building section DXF: 67.97 ft for a 63.59 ft crop at 1:48), head at the +x end
@@ -104,11 +117,17 @@ class Datums:
                     d2 = ((p1 - p0) @ Mv.T)[:2]; L = np.linalg.norm(d2)
                     if L > 1e-9 and abs(d2[1]) < 1e-6 * L:
                         u0 = ((p0 - O) @ Mv.T)[0]; k = (p1 - p0) / ((p1 - O) @ Mv.T - (p0 - O) @ Mv.T)[0]
-                        p0, p1 = p0 + k * (cr[0] - m - u0), p0 + k * (cr[2] + m - u0)
+                        ua, ub_ = sorted([u0, ((p1 - O) @ Mv.T)[0]])
+                        lo_, hi_ = max(ua, cr[0] - m), min(ub_, cr[2] + m)         # clipped to the crop + 1/2" (the envelope may be shorter: Commercial Mezzanine)
+                        if hi_ > lo_:
+                            pa, pb = p0 + k * (lo_ - u0), p0 + k * (hi_ - u0)
+                            p0, p1 = (pa, pb) if u0 <= ((p1 - O) @ Mv.T)[0] else (pb, pa)
             if r['class'] == 'Level':
                 # level line: horizontal in the view at the level elevation; endpoints projected
                 pass
             uv0 = ((p0 - O) @ Mv.T)[:2]; uv1 = ((p1 - O) @ Mv.T)[:2]
+            if lvl_ext is not None: uv0, uv1 = uv_f, uv_b
+            if r['class'] == 'Level' and lvl_ext is None and v.get('kind') == 'section' and uv0[0] > uv1[0]: uv0, uv1 = uv1, uv0     # no stored bubble end: head at the right end (Commercial building section, Mezzanine)
             if v.get('kind') in ('section', 'plan') and not self._meets_crop(v, uv0, uv1): continue      # outside an active crop: hidden
             if r['class'] == 'Grid' and grid_ext is None and v.get('kind') == 'plan':
                 # 3D-extent grid in a cropped view: drawn to the annotation crop region (crop + offsets x scale), the bubble moves there
@@ -155,20 +174,35 @@ class Datums:
                 # head family: +x along the outward line direction for levels, +y outward for grids (?)
                 if r['class'] == 'Grid': R = np.array([[d[1], d[0], 0], [-d[0], d[1], 0], [0, 0, 1]]).T * 0 + np.array([[-d[1], d[0], 0], [d[0], d[1], 0], [0, 0, 1]]).T
                 else: R = np.array([[d[0], -d[1], 0], [d[1], d[0], 0], [0, 0, 1]])
-                prims += self.head(sym, R * scale, np.array([pt[0], pt[1], 0.0]), vals, eid, res, scale)
+                prims += self.head(sym, R * scale, np.array([pt[0], pt[1], 0.0]), vals, eid, res, scale, level=r['class'] == 'Level')
         return prims
 
-    def head(self, sid, R, o, vals, eid, res, scale):
+    def head(self, sid, R, o, vals, eid, res, scale, level=False):
         out = []
         g = self.f.graphics(sid)
         if g and g.get('class') == 'GElement':
-            col = gfx.Collector(self.f)
-            for p in col.collect(g):
+            col = gfx.Collector(self.f); coll = col.collect(g)
+            for p in coll:
                 if p['t'] == 'line' and p.get('gs') not in (None, -1) and self.d.drawable_gs(p['gs']):     # not the family's reference lines
                     pts = gfx.transform_pts(p['pts'], R, o)
                     out.append({'t': 'line', 'pts': [q[:2] for q in pts], 'style': res.line(p.get('gs'), None, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'datum'})
                 elif p['t'] == 'fill' and p.get('loops') and p.get('gs') not in (None, -1) and self.d.drawable_gs(p['gs']):      # filled quadrants of the level head
                     out.append({'t': 'fill', 'loops': [[q[:2] for q in gfx.transform_pts(l, R, o)] for l in p['loops']], 'color': p.get('color') or [0, 0, 0], 'elem': eid, 'layer': 'datum'})
+            if level and not any(p['t'] == 'fill' for p in coll) and any(p['t'] == 'line' and p.get('gs') in (None, -1) for p in coll):
+                # level head circle: cross through the centre and two black quadrants (NW, SE) - Revit's 'Level Head - Circle' (2020 Residential elevations);
+                # the cross lines are the family's style-less lines, the fills are not stored in the symbol graphics
+                circ = [p for p in coll if p['t'] == 'line' and p.get('gs') not in (None, -1) and len(p['pts']) > 8]
+                if circ:
+                    P = np.asarray([q[:2] for p in circ for q in p['pts']], float)
+                    c0 = (P.min(0) + P.max(0)) / 2; rad = (P.max(0) - P.min(0)).max() / 2
+                    st = res.line(circ[0].get('gs'), None, 'proj', eid, annotation=True)
+                    for a, b in (((-rad, 0), (rad, 0)), ((0, -rad), (0, rad))):
+                        pts = gfx.transform_pts([[c0[0] + a[0], c0[1] + a[1], 0.0], [c0[0] + b[0], c0[1] + b[1], 0.0]], R, o)
+                        out.append({'t': 'line', 'pts': [q[:2] for q in pts], 'style': st, 'elem': eid, 'layer': 'datum'})
+                    for a0, a1 in ((90, 180), (270, 360)):
+                        th = np.radians(np.linspace(a0, a1, 13))
+                        loop = [[c0[0], c0[1], 0.0]] + [[c0[0] + rad * np.cos(t), c0[1] + rad * np.sin(t), 0.0] for t in th] + [[c0[0], c0[1], 0.0]]
+                        out.append({'t': 'fill', 'loops': [[q[:2] for q in gfx.transform_pts(loop, R, o)]], 'color': [0, 0, 0], 'elem': eid, 'layer': 'datum'})
         sym = self.d.dec.titleblock_symbol(sid)
         from .sheet import SheetComposer
         for lab in (sym or {}).get('labels', []):

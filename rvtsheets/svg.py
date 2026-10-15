@@ -67,6 +67,10 @@ class SVG:
             bw = (p.get('box') or [0, 0])[0] * FT_MM
             dx = {0: 0, 1: bw / 2, 2: bw}.get(p.get('halign') or 0, 0) if bw else 0
             first = size_mm
+            if bw > 1.0 and not p.get('nowrap'):
+                # rich text in a layout box (title block labels): lines wrap at the box width like Revit's text
+                from .viewdraw import wrap_text
+                lines = wrap_text('\n'.join(lines), bw, size_mm, p.get('font') or 'Arial', bool(p.get('bold'))).split('\n')
         fam = FONT_MAP.get(p.get('font') or 'Arial', "'%s', sans-serif" % p.get('font'))
         wt = ' font-weight="bold"' if p.get('bold') else ''
         it = ' font-style="italic"' if p.get('italic') else ''

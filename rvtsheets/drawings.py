@@ -106,3 +106,77 @@ def render(m, kind, eid):
         except Exception: pass                                # fall back to the line drawing
     from .compose import crop_rect_uv
     return view_svg(drawer.draw(eid), v.get('scale') or 100, crop=crop_rect_uv(v))
+
+
+# ---- view scene JSON (control API: c2-vctl / c2-annot, CONTROL-API.md)
+SCENE_KEEP = ('t', 'elem', 'layer', 'pts', 'segs', 'loops', 'style', 'fill', 'color', 'text', 'origin', 'x', 'size', 'font', 'bold', 'italic', 'halign', 'valign', 'anchor',
+              'box', 'order', 'cat', 'elems', 'part', 'paper', 'gs', 'pattern', 'hang')
+
+
+def _rnd(x, n=4):
+    if isinstance(x, float): return round(x, n)
+    if isinstance(x, (list, tuple)): return [_rnd(a, n) for a in x]
+    if hasattr(x, 'tolist'): return _rnd(x.tolist(), n)
+    return x
+
+
+def scene_name(vid, opts):
+    import hashlib
+    k = json.dumps({a: opts.get(a) for a in sorted(opts) if opts.get(a) is not None}, sort_keys=True)
+    return 'scene_%d_%s.json' % (vid, hashlib.sha1(k.encode()).hexdigest()[:10])
+
+
+def scene(m, vid, opts):
+    """view drawing as JSON primitives (view coordinates, model feet, sizes x scale) with the element table; opts: scale (annotation scale 1:N), detail (1-3),
+    template (False = ignore the view template), filters (False = ignore view filters), cut (absolute cut plane elevation, ft), phase, phaseFilter.
+    The same shape as rvtviewer/vscene_worker.py's scene. Draws with the model's drawer: call from the single drawing thread."""
+    dec, doc = m.decoder(); d = m._drawer; vis = d.vis
+    v0 = doc['views'][vid]; saved_scale = v0.get('scale'); eff0 = vis.effective; saved_range = v0.get('range'); saved_phase = (v0.get('phase'), v0.get('phase_filter'))
+    t0 = time.time()
+    try:
+        if opts.get('scale'): v0['scale'] = int(opts['scale'])
+        if opts.get('cut') is not None and saved_range: v0['range'] = dict(saved_range, cut=float(opts['cut']))
+        if opts.get('phase') is not None: v0['phase'] = int(opts['phase'])
+        if opts.get('phaseFilter') is not None: v0['phase_filter'] = int(opts['phaseFilter'])
+
+        def eff(v):
+            e = dict(eff0(v) if opts.get('template', True) is not False else v)
+            if opts.get('detail'): e['detail_level'] = int(opts['detail'])
+            if opts.get('filters') is False: e['filters'] = None; e['draw_filters'] = None
+            if opts.get('phaseFilter') is not None: e['phase_filter'] = int(opts['phaseFilter'])
+            return e
+        vis.effective = eff
+        dr = d.draw(vid)
+    finally:
+        v0['scale'] = saved_scale; vis.effective = eff0; v0['range'] = saved_range; v0['phase'], v0['phase_filter'] = saved_phase
+    info = vis.info.info; cats = doc['categories']; els = {}
+    for p in dr['prims']:
+        e = p.get('elem')
+        if e is None or e in els: continue
+        i = info.get(e) or {}; c = i.get('cat'); cc = cats.get(c) or {}
+        par = cc.get('parent'); pn = (cats.get(par) or {}).get('name') if par not in (None, -1) else None
+        els[e] = {'cls': i.get('cls'), 'cat': c, 'catName': cc.get('name'), 'parent': par if par not in (None, -1) else None, 'parentName': pn}
+    prims = [{k: _rnd(p[k]) for k in SCENE_KEEP if k in p and p[k] is not None} for p in dr['prims'] if p.get('t') != 'image']
+    vw = {k: _rnd(v0.get(k)) for k in ('id', 'name', 'kind', 'scale', 'origin', 'right', 'up', 'dir', 'range', 'discipline', 'detail_level', 'view_template')}
+    cr = v0.get('crop') or {}
+    vw['crop'] = {k: _rnd(cr.get(k)) for k in ('origin', 'basis', 'bounds', 'active', 'crop_active', 'annotation_crop_active')} if cr else None
+    vw['scale_stored'] = saved_scale; vw['scale'] = int(opts['scale']) if opts.get('scale') else saved_scale
+    try:
+        from .compose import crop_rect_uv
+        vw['crop_uv'] = _rnd(crop_rect_uv(v0))
+    except Exception: vw['crop_uv'] = None
+    return {'view': vw, 'prims': prims, 'elements': {str(k): v for k, v in els.items()}, 'options': opts, 'stats': dr.get('stats'),
+            'seconds': round(time.time() - t0, 1), 'key': m.key}
+
+
+def scene_text(m, vid, opts):
+    """cached scene JSON text (cache file next to the SVGs, same key)"""
+    name = scene_name(vid, opts)
+    if m.cache.has(name): return m.cache.read(name)
+    def j(o):
+        if hasattr(o, 'tolist'): return o.tolist()
+        if isinstance(o, (set, tuple)): return list(o)
+        return str(o)
+    s = json.dumps(scene(m, vid, opts), default=j, separators=(',', ':'))
+    m.cache.write(name, s)
+    return s

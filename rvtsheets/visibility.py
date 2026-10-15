@@ -139,7 +139,7 @@ class Visibility:
         r = self.section_plane_line(eid, v)
         if r is None: return False
         pts, t, bo = r
-        if not (min(bo[0]) - 1e-6 <= t <= max(bo[0]) + 1e-6): return False
+        if not (min(bo[0]) - 1e-6 <= t <= max(bo[0]) + 1e-6) and v.get('id') not in self._elevation_views(): return False      # elevations list every section line crossing their plane (2020 Residential east/north/south)
         from .compose import crop_rect_uv
         cr = crop_rect_uv(v)
         if cr is not None:
@@ -147,6 +147,11 @@ class Visibility:
             uv = [((p - O) @ X, (p - O) @ Y) for p in pts]
             if not (cr[0] <= uv[0][0] <= cr[2]) or max(uv[0][1], uv[1][1]) < cr[1] or min(uv[0][1], uv[1][1]) > cr[3]: return False
         return True
+
+    def _elevation_views(self):
+        if getattr(self, '_ev', None) is None:
+            self._ev = {self.dec.f.eid(r['fields'].get('m_dbViewId')) for r in self.dec.f.recs('InteriorElevArrow')}
+        return self._ev
 
     def _arrows(self):
         if getattr(self, '_arr', None) is None:
@@ -276,6 +281,8 @@ class Visibility:
                 continue
             if c == INVALID: why[eid] = 'no_category'; continue
             if not (e['vflags'] or 0) & 1: why[eid] = 'view_flags'; continue
+            if e['cls'] == 'PropertyLineSegment' and v['kind'] == 'plan' and -2001265 not in hid:      # Revit lists and draws them (site plans) although their own category is internal
+                out[eid] = None; continue
             par = (self.cats.get(c) or {}).get('parent', INVALID)
             ct = CAT_TYPES.get(c) or CAT_TYPES.get(par)
             if ct == 'Internal' or (ct in TYPE_FLAG and xflags.get(TYPE_FLAG[ct])): why[eid] = 'category_type_' + str(ct); continue
