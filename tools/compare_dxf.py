@@ -148,6 +148,22 @@ def main():
     perA = collections.defaultdict(lambda: [0, 0])
     for l, d in zip(la, da): perA[l][0] += 1; perA[l][1] += d <= tol
     res['precision_by_our_layer'] = {l: [n, round(m / n, 3)] for l, (n, m) in perA.items()}
+    ml = os.environ.get('MISS_LAYER')
+    if ml:                                                      # clusters of Revit samples of that layer without ink of ours (view coordinates, feet)
+        sel = np.array([l == ml for l in lb]) & (db > tol)
+        P = B[sel]
+        if len(P):
+            g = np.floor(P / float(os.environ.get('MISS_CELL', '3'))).astype(int); cl = collections.defaultdict(list)
+            for q, c in zip(P, map(tuple, g)): cl[c].append(q)
+            res['missing_clusters'] = [[len(v), np.round(np.min(v, 0), 1).tolist(), np.round(np.max(v, 0), 1).tolist()] for v in sorted(cl.values(), key=lambda v: -len(v))[:12]]
+    el = os.environ.get('EXTRA_LAYER')
+    if el:                                                      # clusters of our samples of that layer with no Revit ink nearby (view coordinates, feet)
+        sel = np.array([l == el for l in la]) & (da > tol)
+        P = (A + off)[sel]
+        if len(P):
+            g = np.floor(P / float(os.environ.get('MISS_CELL', '3'))).astype(int); cl = collections.defaultdict(list)
+            for q, c in zip(P, map(tuple, g)): cl[c].append(q)
+            res['extra_clusters'] = [[len(v), np.round(np.min(v, 0), 1).tolist(), np.round(np.max(v, 0), 1).tolist()] for v in sorted(cl.values(), key=lambda v: -len(v))[:12]]
     print(json.dumps(res, indent=1))
 
 

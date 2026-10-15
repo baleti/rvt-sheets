@@ -89,7 +89,7 @@ class Annotations:
         out = [{'t': 'line', 'pts': (a + rad * np.stack([np.cos(t), np.sin(t)], 1)).tolist(), 'style': line, 'elem': eid, 'layer': 'annotation'},
                {'t': 'line', 'pts': [(a - [rad, 0]).tolist(), (a + [rad, 0]).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation'},
                {'t': 'line', 'pts': [(a - [0, rad]).tolist(), (a + [0, rad]).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation'}]
-        if fl.get('m_leaderLine'): out.append({'t': 'line', 'pts': [a.tolist(), b.tolist(), c.tolist()], 'style': line, 'elem': eid, 'layer': 'annotation'})
+        if fl.get('m_leaderLine'): out.append({'t': 'line', 'pts': [a.tolist(), b.tolist(), c.tolist()], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'leader'})
         opt = ob(tf.get('m_oLinFormatOptions')) or {}
         txt = units.fmt_length(float(P[2]), opt, self.proj_len)
         gap = 1 / 16 * IN * scale
@@ -252,6 +252,35 @@ class Tags:
                         'valign': SheetComposer._valign(lab['flags'] or 0), 'anchor': True, 'elem': eid, 'layer': 'text'})
         return out
 
+    def element_props(self, eid):
+        """properties for picking (control API): name, typeName, familyName, levelName, hostId (tagged element), params {name: value}; every key optional"""
+        out = {}
+        r = self.f.rec(eid)
+        if not r: return out
+        fl = r['fields']
+        ii = ob(fl.get('m_pInstanceInfo')) or {}
+        sym = self.f.eid(ii.get('m_symbolId')) if ii else self.f.eid(fl.get('m_symbolId'))
+        if sym not in (None, INVALID, -1):
+            tn = self.type_name(sym)
+            if tn: out['typeName'] = tn
+            sr = self.f.rec(sym)
+            fam = self.f.rec(self.f.eid(sr['fields'].get('m_familyId'))) if sr else None
+            fn = (ob((fam or {}).get('fields', {}).get('m_symbolInfo')) or {}).get('m_name') if fam else None
+            if fn: out['familyName'] = fn
+        lv = self.f.rec(self.f.eid(fl.get('m_assocLevelId'))) if fl.get('m_assocLevelId') not in (None, INVALID) else None
+        if lv and lv['fields'].get('m_text'): out['levelName'] = lv['fields']['m_text']
+        for k in ('m_taggedElementId', 'm_taggedRoomElemId'):
+            h = self.f.eid(path(fl, k, 'm_linkInstOrHostId'))
+            if h not in (None, INVALID, -1): out['hostId'] = h
+        if fl.get('m_text'): out['name'] = fl['m_text']
+        try:
+            prm = {}
+            for k, v in (self.params_of(eid) or {}).items():
+                if isinstance(v, (int, float, str)) and v != '': prm[str(k)] = v
+            if prm: out['params'] = prm
+        except Exception: pass
+        return out
+
     def type_name(self, sym, depth=0):
         r = self.f.rec(sym)
         if not r: return ''
@@ -330,7 +359,7 @@ class Tags:
             lines_ = [p for p in coll if p['t'] == 'line']
             sp_ = self.params_of(sid)
             frame = False
-            if len(lines_) == 4 and len(coll) == 4 and any(sp_.get(k) for k in ('Left', 'Right', 'Top', 'Bottom')):
+            if r['class'] == 'IndependentTag' and len(lines_) == 4 and len(coll) == 4 and any(sp_.get(k) for k in ('Left', 'Right', 'Top', 'Bottom')):
                 # 'Structural Framing Tag' (Left/Right/Top/Bottom text margins): its only geometry is the label frame rectangle; Revit's sheets show the bare text
                 xs = sorted({round(q[0], 5) for p in lines_ for q in p['pts']}); ys = sorted({round(q[1], 5) for p in lines_ for q in p['pts']})
                 frame = len(xs) == 2 and len(ys) == 2
@@ -352,6 +381,11 @@ class Tags:
                     q.update(elem=eid, layer='text')
                     out.append(q)
         sym = self.d.dec.titleblock_symbol(sid)
+        anchor = None
+        try:                                                   # model-space point the tag annotates: centre of the tagged element's box
+            bb = self.d.vis.info.bbox(tagged) if tagged not in (None, INVALID, -1) else None
+            if bb is not None: anchor = ((np.asarray(bb[0], float) + np.asarray(bb[1], float)) / 2).tolist()
+        except Exception: anchor = None
         for lab in (sym or {}).get('labels', []):
             parts = []
             for prm in lab.get('params') or []:
@@ -371,6 +405,8 @@ class Tags:
             out.append({'t': 'text', 'text': ' '.join(parts), 'origin': org[:2], 'x': [math.cos(ang), math.sin(ang)], 'size': (font.get('size') or 0.0078) * scale,
                         'font': font.get('name') or 'Arial', 'bold': tt.get('bold'), 'halign': SheetComposer._halign(lab['flags'] or 0), 'valign': SheetComposer._valign(lab['flags'] or 0),
                         'anchor': True, 'elem': eid, 'layer': 'text'})
+        if anchor is not None:
+            for p_ in out: p_['anchor'] = anchor; p_['host'] = tagged       # anchor: world feet (a text prim's old boolean 'anchor' is replaced; both truthy)
         return out
 
 
@@ -460,15 +496,18 @@ def section_marker(drawer, eid, O, Mv, scale, res, vid, pts=None):
     f = drawer.f; doc = drawer.doc
     r = f.rec(eid, 'Section')
     if not r: return []
-    fl = r['fields']; pts = pts if pts is not None else (fl.get('m_frontCut') or [])
+    fl = r['fields']; given = pts is not None; pts = pts if pts is not None else (fl.get('m_frontCut') or [])
     if len(pts) < 2: return []
     tv = f.eid(fl.get('m_dbViewId')); vrec = f.rec(tv)
     vt = f.rec(f.eid(vrec['fields'].get('m_dbViewTypeId'))) if vrec else None
     at = f.rec(f.eid(vt['fields'].get('m_sectionAttrId'))) if vt else None
     af = at['fields'] if at else {}
     P = np.asarray([((np.asarray(p, float) - O) @ Mv.T)[:2] for p in pts])
+    if not given and (doc['views'].get(vid) or {}).get('kind') == 'plan':
+        P = _section_visible(P, fl.get('m_boundedSpace') or {}, O, Mv, (doc['views'].get(vid) or {}), scale)
+        if P is None: return []
     st = res.line(None, -2000200, 'proj', eid, annotation=True)
-    out = [{'t': 'line', 'pts': P.tolist(), 'style': st, 'elem': eid, 'layer': 'annotation'}]
+    out = [{'t': 'line', 'pts': P.tolist(), 'style': st, 'elem': eid, 'layer': 'annotation', 'part': 'line'}]
     bs = fl.get('m_boundedSpace') or {}
     look = (Mv @ np.asarray(bs['m_basis'][2], float))[:2] if bs.get('m_basis') else np.array([0.0, 1.0])
     look = look / (np.linalg.norm(look) or 1)
@@ -506,6 +545,55 @@ def section_marker(drawer, eid, O, Mv, scale, res, vid, pts=None):
             out.append({'t': 'text', 'text': txt, 'origin': org[:2], 'x': [1.0, 0.0], 'size': (font.get('size') or 0.0078) * scale, 'font': font.get('name') or 'Arial',
                         'halign': SheetComposer._halign(lab['flags'] or 0), 'valign': SheetComposer._valign(lab['flags'] or 0), 'anchor': True, 'elem': eid, 'layer': 'text'})
     return out
+
+
+def _section_visible(P, bs, O, Mv, v, scale):
+    """section line in a plan: the front cut polyline clipped to the section view's own crop width (m_boundedSpace: origin + basis[0] * [lo, hi];
+    Commercial 'Building Section' in an uncropped plan: x -79.9 .. 85.5 becomes -78.4 .. 79.4, the symbols sit at the clipped ends), then to the
+    plan's crop region (inset 0.2375\" of paper, Commercial Mezzanine: edge -35.9, head at -37.8)"""
+    from .datums import Datums
+    from .compose import crop_rect_uv
+    try:
+        bo = bs['m_boundOffset'][0]; B0 = np.asarray(bs['m_basis'][0], float); org = np.asarray(bs['m_orig'], float)
+        ax = (Mv @ B0)[:2]; ax = ax / (np.linalg.norm(ax) or 1.0)
+        c0 = float(((org - O) @ Mv.T)[:2] @ ax)
+        lo, hi = c0 + min(bo[0], bo[1]) , c0 + max(bo[0], bo[1])        # (hi, lo) stored; coordinates along the section's right axis in view units
+        nrm = np.array([-ax[1], ax[0]]); cs = [(lo, hi)]
+    except Exception:
+        return P
+    tol = 0.125 / 12 * scale                       # overshoots up to 1/8" of paper are kept (Residential section A-3: 0.5 ft at 1:48 stays unclamped)
+    e0 = min(float(P[0] @ ax), float(P[-1] @ ax)); e1 = max(float(P[0] @ ax), float(P[-1] @ ax))
+    if 0 < lo - e0 <= tol: lo = e0
+    if 0 < e1 - hi <= tol: hi = e1
+    rects = []
+    cr = crop_rect_uv(v)
+    if cr is not None and max(P[:, 0].max() - cr[2], cr[0] - P[:, 0].min(), P[:, 1].max() - cr[3], cr[1] - P[:, 1].min()) < 3.0 * scale / 96.0:
+        return P         # cropped plan whose crop hardly cuts the line (Commercial Level 1, view 32: Revit shows the full line, heads at both ends): unchanged (rule unknown)
+    if cr is not None:
+        ins = 0.2375 / 12 * scale
+        rects.append((cr[0] + ins, cr[1] + ins, cr[2] - ins, cr[3] - ins))
+    # clip against the slab lo <= p.ax <= hi (and the crop rect)
+    def clip_slab(a, b):
+        da = float(a @ ax); db = float(b @ ax); d = db - da
+        t0, t1 = 0.0, 1.0
+        if abs(d) < 1e-12:
+            return (a, b) if lo - 1e-9 <= da <= hi + 1e-9 else None
+        ta, tb = (lo - da) / d, (hi - da) / d
+        if ta > tb: ta, tb = tb, ta
+        t0, t1 = max(t0, ta), min(t1, tb)
+        return (a + (b - a) * t0, a + (b - a) * t1) if t0 <= t1 else None
+    vis = []
+    for a, b in zip(P[:-1], P[1:]):
+        sg = clip_slab(a, b)
+        for rc in rects:
+            if sg is not None: sg = Datums._clip(sg[0], sg[1], rc)
+        if sg is not None: vis.append(sg)
+    if not vis: return None
+    Q = [vis[0][0]]
+    for a, b in vis:
+        if np.linalg.norm(a - Q[-1]) > 1e-6: Q.append(a)
+        Q.append(b)
+    return np.asarray(Q)
 
 
 def symbol_prims(drawer, sid, R, o, eid, res, cat):

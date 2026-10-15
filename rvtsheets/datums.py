@@ -145,7 +145,7 @@ class Datums:
             if cseg not in (None, INVALID):
                 st2 = res.line(None, cseg, 'proj', eid, annotation=True)
                 st = dict(st, dash=st2.get('dash'))
-            prims.append({'t': 'line', 'pts': [uv0.tolist(), uv1.tolist()], 'style': st, 'elem': eid, 'layer': 'datum'})
+            prims.append({'t': 'line', 'pts': [uv0.tolist(), uv1.tolist()], 'style': st, 'elem': eid, 'layer': 'datum', 'part': 'line'})
             # heads
             name = fl.get('m_text') or ''
             vals = {'Name': name, 'Elevation': fmt_elev(float(o[2]), imperial)}

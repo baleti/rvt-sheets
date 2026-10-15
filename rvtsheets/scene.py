@@ -181,6 +181,27 @@ class Walker:
             return True
         except Exception: return False
 
+    @staticmethod
+    def _chain_loops(polys, tol=1e-6):
+        """closed loops from edge polylines (3D point lists) by joining matching end points"""
+        rest = [list(map(np.asarray, p)) for p in polys if len(p) > 1]; loops = []
+        while rest:
+            cur = rest.pop(0)
+            grew = True
+            while grew and rest:
+                grew = False
+                for i, q in enumerate(rest):
+                    if np.linalg.norm(cur[-1] - q[0]) < tol: cur = cur + q[1:]
+                    elif np.linalg.norm(cur[-1] - q[-1]) < tol: cur = cur + q[::-1][1:]
+                    elif np.linalg.norm(cur[0] - q[-1]) < tol: cur = q[:-1] + cur
+                    elif np.linalg.norm(cur[0] - q[0]) < tol: cur = q[::-1][:-1] + cur
+                    else: continue
+                    rest.pop(i); grew = True; break
+            if len(cur) > 2:
+                if np.linalg.norm(cur[0] - cur[-1]) > tol: cur = cur + [cur[0]]
+                loops.append([c.tolist() for c in cur])
+        return loops
+
     def _fills_from_faces(self, geo, faces, R, o, g, eid, out):
         try:
             import rvt_brep
@@ -189,7 +210,7 @@ class Walker:
         # boundary edges: each edge has its own line style (GInfo category = graphics style) and m_flags bit 0 = visible (masking regions and
         # invisible boundaries: 6, drawn boundaries: 7 - 2020 Residential detail components vs Revit's DXF); edge = chord between its end points
         # in the face's (u, v) (interior points not used yet)
-        planes = {}
+        planes = {}; edge_polys = {}
         for fc in geo.get('m_pFaces') or []:
             fo = ob(fc) or {}
             pl = rvt_brep.plane_of(fo.get('m_pSurf')) if fo.get('m_pSurf') else None
@@ -207,13 +228,18 @@ class Walker:
             fl_ = eo.get('m_firstAndLastEdgePnts') or []
             if side is None or len(fl_) < 2: continue
             pl = planes[refs[side]]
-            try: pa = rvt_brep.uv3d(pl, *ob(fl_[0])['uv'][side]); pb = rvt_brep.uv3d(pl, *ob(fl_[1])['uv'][side])
+            try:
+                uvs = [ob(fl_[0])['uv'][side]] + [ob(q)['uv'][side] for q in eo.get('m_interiorEdgePnts') or []] + [ob(fl_[1])['uv'][side]]     # curved edges: interior points
+                P3 = [rvt_brep.uv3d(pl, *uv) for uv in uvs]
             except Exception: continue
-            out['curves'].append({'t': 'line', 'pts': (np.asarray([pa, pb], float) @ R.T + o).tolist(), 'gs': gsid, 'elem': eid, 'cond': [], 'boundary': True})
+            out['curves'].append({'t': 'line', 'pts': (np.asarray(P3, float) @ R.T + o).tolist(), 'gs': gsid, 'elem': eid, 'cond': [], 'boundary': True})
+            edge_polys.setdefault(refs[side], []).append(P3)
         hs = [fc.get('handle') for fc in geo.get('m_pFaces') or []]
         for h, fo in zip(hs, faces):
             gf = ob(fo.get('m_pGFilling')) or {}
             loops = loops_by_h.get(h)
+            if not loops and edge_polys.get(h):
+                loops = self._chain_loops(edge_polys[h])         # loops the reader could not build (curved edges): chained from the edge polylines
             if not loops: continue
             T = [(np.asarray(l, float) @ R.T + o).tolist() for l in loops if len(l) > 2]
             pl = gf.get('m_placer') or {}

@@ -110,7 +110,10 @@ def render(m, kind, eid):
 
 # ---- view scene JSON (control API: c2-vctl / c2-annot, CONTROL-API.md)
 SCENE_KEEP = ('t', 'elem', 'layer', 'pts', 'segs', 'loops', 'style', 'fill', 'color', 'text', 'origin', 'x', 'size', 'font', 'bold', 'italic', 'halign', 'valign', 'anchor',
-              'box', 'order', 'cat', 'elems', 'part', 'paper', 'gs', 'pattern', 'hang')
+              'box', 'order', 'cat', 'elems', 'part', 'paper', 'gs', 'pattern', 'hang', 'host')
+
+
+PROP_CLASSES = {'IndependentTag', 'RoomTag', 'SpaceTag', 'AreaTag', 'TextNote', 'LinearDimString', 'SpotElevation', 'Grid', 'Level', 'Section', 'InteriorElev', 'StairsPathElement'}
 
 
 def _rnd(x, n=4):
@@ -156,6 +159,11 @@ def scene(m, vid, opts):
         i = info.get(e) or {}; c = i.get('cat'); cc = cats.get(c) or {}
         par = cc.get('parent'); pn = (cats.get(par) or {}).get('name') if par not in (None, -1) else None
         els[e] = {'cls': i.get('cls'), 'cat': c, 'catName': cc.get('name'), 'parent': par if par not in (None, -1) else None, 'parentName': pn}
+        if i.get('cls') in PROP_CLASSES:
+            try: els[e].update(d.tags.element_props(e))
+            except Exception: pass
+        txt = [q['text'] for q in dr['prims'] if q.get('elem') == e and q.get('t') == 'text' and q.get('text')] if i.get('cls') in PROP_CLASSES else None
+        if txt: els[e]['text'] = '\n'.join(txt)
     prims = [{k: _rnd(p[k]) for k in SCENE_KEEP if k in p and p[k] is not None} for p in dr['prims'] if p.get('t') != 'image']
     vw = {k: _rnd(v0.get(k)) for k in ('id', 'name', 'kind', 'scale', 'origin', 'right', 'up', 'dir', 'range', 'discipline', 'detail_level', 'view_template')}
     cr = v0.get('crop') or {}

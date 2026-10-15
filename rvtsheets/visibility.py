@@ -281,10 +281,15 @@ class Visibility:
                 continue
             if c == INVALID: why[eid] = 'no_category'; continue
             if not (e['vflags'] or 0) & 1: why[eid] = 'view_flags'; continue
-            if e['cls'] == 'PropertyLineSegment' and v['kind'] == 'plan' and -2001265 not in hid:      # Revit lists and draws them (site plans) although their own category is internal
-                out[eid] = None; continue
             par = (self.cats.get(c) or {}).get('parent', INVALID)
             ct = CAT_TYPES.get(c) or CAT_TYPES.get(par)
+            if e['cls'] == 'PropertyLineSegment':
+                # Revit lists and draws them (site plans) although their own category is internal, only inside the PRIMARY view range (not the underlay, not ceiling plans)
+                rg = v.get('range') or {}; bb = self.info.bbox(eid)
+                if v['kind'] != 'plan' or bb is None or rg.get('plan_view_type') == 2 or rg.get('top') is None: why[eid] = 'property_line_rule'; continue
+                zlo_ = min(x for x in (rg.get('bottom'), rg.get('depth')) if x is not None)
+                if bb[0][2] < zlo_ - 1e-6 or bb[0][2] > rg['top'] + 1e-6: why[eid] = 'property_line_range'; continue
+                ct = None
             if ct == 'Internal' or (ct in TYPE_FLAG and xflags.get(TYPE_FLAG[ct])): why[eid] = 'category_type_' + str(ct); continue
             if c in hid or par in hid: why[eid] = 'category_hidden'; continue
             st = self.phase_status(e, v.get('phase'))

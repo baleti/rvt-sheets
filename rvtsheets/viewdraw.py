@@ -5,7 +5,7 @@ clipped to the view depth range -> cut regions at the cut plane + projected feat
 -> symbolic 2D curves projected -> styles resolved (style.Resolver)."""
 import math, collections, time, os, sys
 import numpy as np
-from .reader import INVALID, ob as ob_, path
+from .reader import INVALID, ob, ob as ob_, path
 IN = 1 / 12.0
 from .scene import Walker, ViewCtx
 from .hlr import DepthBuffer
@@ -254,10 +254,21 @@ class ViewDrawer:
                 except Exception: self.stats['spot_error'] += 1
                 continue
             if info['cls'] == 'InteriorElev':
+                from .compose import crop_rect_uv as _cru
+                cr = _cru(v) if v['kind'] == 'plan' else None
+                if cr is not None:
+                    pos_ = (self.f.rec(eid, 'InteriorElev') or {}).get('fields', {}).get('m_pos')
+                    if pos_ is not None:
+                        u_, w_ = ((np.asarray(pos_, float) - O) @ Mv.T)[:2]
+                        if not (cr[0] <= u_ <= cr[2] and cr[1] <= w_ <= cr[3]): self.stats['markers_outside_crop'] += 1; continue      # Revit omits elevation markers outside the crop (Commercial Mezzanine)
                 try: prims += _hang(self.markers.elevation(eid, O, Mv, scale, res)); self.stats['elevation_markers'] += 1
                 except Exception as ex: self.stats['marker_error'] += 1
                 continue
             if info['cls'] == 'InteriorElevArrow': continue
+            if info['cls'] == 'StairsPathElement':
+                try: prims += self.stairs_path(eid, v, O, Mv, scale, res, info['cat']); self.stats['stair_paths'] += 1
+                except Exception: self.stats['stair_path_error'] += 1
+                continue
             if info['cls'] == 'StairsPathElement':
                 try: prims += self.stairs_path_text(eid, O, Mv, scale, v)
                 except Exception: self.stats['stairs_path_error'] += 1
@@ -330,7 +341,11 @@ class ViewDrawer:
                 rg = v['range']; zlo_ = min(x for x in (rg.get('depth'), rg.get('bottom')) if x is not None); bb_ = self.vis.info.bbox(eid)
                 if bb_ is not None and rg.get('top') is not None and bb_[1][2] < zlo_ - 1e-6 and not anno:
                     under_occ = self._underlay_occluder(v, O, Mv, elems, bb_[1][2])
-            for c in pieces['curves']:
+            curves_ = pieces['curves']
+            if info['cls'] in ('Rebar', 'RebarInSystem'):
+                try: curves_ = self.rebar_bars(eid, curves_) or curves_
+                except Exception: self.stats['rebar_error'] += 1
+            for c in curves_:
                 if not self.drawable_gs(c.get('gs')): continue
                 if self._gs_hidden(ev, c.get('gs')): self.stats['hidden_subcategory_lines'] += 1; continue
                 if info['cls'] in ('SiteSurface', 'TopographySurface') and v['kind'] in ('section', '3d'): continue   # contour/surface curves are not drawn in elevations (the ground profile comes from the mesh)
@@ -355,7 +370,7 @@ class ViewDrawer:
                             prims.append({'t': 'line', 'pts': [list(q) for q in part.coords], 'style': st, 'elem': eid, 'layer': lay})
                     continue
                 pr = {'t': 'line', 'pts': pts[:, :2].tolist(), 'style': st, 'elem': eid, 'layer': lay}
-                if is_section and not anno and len(pts) > 1:
+                if is_section and not anno and len(pts) > 1 and cid not in UNOBSCURED_CATS:
                     pr['_w'] = pts             # depth-tested below (elevations/sections)
                     if cid in (-2000023, -2000014): pr['_eps'] = 1.5      # doors/windows sit recessed inside the wall thickness
                 prims.append(pr)
@@ -730,6 +745,8 @@ class ViewDrawer:
                 'bold': tt.get('bold'), 'italic': tt.get('italic'), 'halign': SheetComposer._halign(fl_), 'valign': SheetComposer._valign(fl_), 'anchor': True,
                 'elem': eid, 'layer': 'text', 'width': (fl.get('m_lineWidth') or 0) * scale}
 
+    PART_DEFAULT = {'Grid': ('bubble', 'bubble'), 'Level': ('bubble', 'bubble'), 'IndependentTag': ('head', 'head'), 'RoomTag': ('head', 'head'), 'SpaceTag': ('head', 'head'),
+                    'AreaTag': ('head', 'head'), 'InteriorElev': ('head', 'arrow'), 'Section': ('head', 'head'), 'SpotElevation': ('target', 'target'), 'TextNote': ('frame', 'frame')}
     PAPER_LAYERS = {'annotation', 'annotation_fill', 'text', 'datum'}
 
     def _finish(self, prims, O, Mv):
@@ -744,23 +761,97 @@ class ViewDrawer:
                 c = (info.get(e) or {}).get('cat')
                 if c is not None and c != INVALID: p['cat'] = c
             p.setdefault('paper', p.get('layer') in self.PAPER_LAYERS)
-            if 'part' not in p: p['part'] = 'text' if p['t'] == 'text' else 'fill' if p['t'] == 'fill' else 'line'
+            if 'part' not in p:
+                lp, fp = self.PART_DEFAULT.get((info.get(e) or {}).get('cls'), ('line', 'fill'))
+                p['part'] = 'text' if p['t'] == 'text' else fp if p['t'] == 'fill' else lp
             if p['paper'] and e not in first:
                 q = p.get('origin') if p.get('origin') is not None else (p.get('pts') or [None])[0]
                 if q is not None: first[e] = q
         Mi = np.linalg.inv(Mv)
         for p in prims:
             q = first.get(p.get('elem'))
-            if q is not None and p['paper']:
+            if q is not None and p['paper'] and 'anchor' not in p:
                 p['anchor'] = (np.asarray([q[0], q[1], 0.0], float) @ Mi.T + O).tolist()
         return prims
+
+    def stairs_path(self, eid, v, O, Mv, scale, res, cat):
+        """stair path (StairsPathElement): line along the run centre with an open 90 degree arrow (type's arrowhead) and UP / DN text.
+        Rules read off Revit's DXF (Residential + Commercial, 7 views): the path stops m_distanceToCutMark (1/8" paper) before the break line;
+        the break sits at the riser line floor((4 ft - eps) / riser) - 1 treads from the run start (4 ft = the view's cut offset above the stair base);
+        a stair that is only in the underlay (below the view range depth) shows UP over its whole length; a stair inside the range but wholly
+        below the cut shows DN from the top end, as long as the same 4 ft rule gives; texts: UP centred under the start (gap 5.3 model inches),
+        DN left of the top end (9 model inches)."""
+        f = self.f; r = f.rec(eid, 'StairsPathElement'); fl = r['fields']
+        stid = f.eid(fl['m_stairsLinkElementId']['m_linkInstOrHostId'])
+        st = f.rec(stid); sf = st['fields']
+        runs = [f.eid(x) for c in (sf.get('m_cellList') or {}).get('obj', {}).get('m_cells', []) for x in (c.get('obj') or {}).get('m_runAndLandings') or []]
+        runs = [x for x in runs if f.rec(x, 'StairsRun')]
+        if len(runs) != 1: return []
+        rf = f.rec(runs[0])['fields']
+        s0 = np.asarray(ob(rf['m_oStartRiser'])['m_origin'], float); s1 = np.asarray(ob(rf['m_oEndRiser'])['m_origin'], float)
+        nrs = int(sf.get('m_actualNumberOfRisers') or 0); rh = sf.get('m_actualRiserHeight') or 0.5
+        zb = float(rf.get('m_bottomElevation') or 0.0); zt = zb + float(sf.get('m_stairsHeight') or 0.0)
+        L = float(np.linalg.norm((s1 - s0)[:2]))
+        if nrs < 2 or L < 1e-6: return []
+        tread = L / (nrs - 1)
+        rg = v.get('range') or {}
+        cut = rg.get('cut'); depth = rg.get('depth'); off = (rg.get('offsets') or [4.0])[0] or 4.0
+        if cut is None: return []
+        gap = (path(f.rec(f.eid(fl.get('m_typeId')))['fields'], 'm_distanceToCutMark') or 0.0104167) * scale
+        P = lambda p: ((np.asarray(p, float) - O) @ Mv.T)[:2]
+        a, b = P(s0), P(s1); d = b - a; d /= np.linalg.norm(d)
+        cutcase = False
+        if zb < cut < zt:                                   # crossed by the cut plane: UP to the break
+            up = True; cutcase = True
+            n = max(math.floor((cut - zb - 1e-6) / rh) - 1, 0)
+            p_start, p_end = a, a + d * max(n * tread * 1.0 - gap, 0.0)
+        elif depth is not None and zb >= depth - 1e-6 and zt <= cut:     # inside the range, wholly below the cut: DN from the top
+            up = False
+            n = max(math.floor((off - 1e-6) / rh) - 1, 0)
+            ln = L if (zt - zb) <= off else min(L, n * tread)
+            p_start, p_end = b, b - d * ln
+        else:                                               # underlay: UP over the whole run
+            up = True; p_start, p_end = a, b
+        dd = (p_end - p_start) / (np.linalg.norm(p_end - p_start) or 1.0)
+        st_ = res.line(None, cat, 'proj', eid, annotation=True)
+        out = [{'t': 'line', 'pts': [p_start.tolist(), p_end.tolist()], 'style': st_, 'elem': eid, 'layer': 'annotation', 'part': 'line'}]
+        al = 1 / 16 * IN * scale
+        nrm = np.array([-dd[1], dd[0]])
+        for sg in (1, -1):
+            out.append({'t': 'line', 'pts': [p_end.tolist(), (p_end - dd * al + nrm * sg * al).tolist()], 'style': st_, 'elem': eid, 'layer': 'annotation', 'part': 'arrow'})
+        tt = self.doc['text_types'].get(f.eid(path(f.rec(f.eid(fl.get('m_typeId')))['fields'], 'm_textTypeId'))) or {}
+        font = self.doc['fonts'].get(tt.get('font')) or {}
+        size = (font.get('size') or 3 / 32 * IN) * scale
+        txt = fl.get('m_upText') if up else fl.get('m_downText')
+        if txt and (fl.get('m_showUpText') if up else fl.get('m_showDownText')):
+            if cutcase:     # centred beyond the start, 5.3 model inches clear of the run (box top edge on the far side)
+                c = p_start - dd * (5.3 / 12 + size / 2)
+                org = np.array([c[0], c[1] + size / 2]); halign = 1
+            else:           # whole-run / DN paths: left of the start, 0.185" paper, box top 0.048" paper above it (Residential DXF at 1:48 and 1:96)
+                org = np.array([p_start[0] - 0.185 * IN * scale, p_start[1] + 0.048 * IN * scale]); halign = 0
+            out.append({'t': 'text', 'text': txt, 'origin': org.tolist(), 'x': [1.0, 0.0], 'size': size, 'font': font.get('name') or 'Arial', 'halign': halign, 'valign': 0,
+                        'anchor': True, 'elem': eid, 'layer': 'text', 'part': 'text'})
+        return out
 
     def text_note_leaders(self, eid, O, Mv, scale, res, cat):
         """text note leaders: anchor -> elbow -> end (polyline) or, with m_bArcLeaders, the circle arc through the three points; arrow head
         of the text type's leader style (Arrow 30 Degree: full angle in param -4293960870.., size on paper) at the end"""
         r = self.f.rec(eid, 'TextNote'); fl = r['fields']
         leaders = fl.get('m_leaders') or []
-        if not leaders: return []
+        out = []
+        tt0 = self.f.rec(self.f.eid(fl.get('m_attrId'))) or {}
+        tf0 = tt0.get('fields') or {}
+        if tf0.get('m_textBoxVisibility') and fl.get('m_orig') and (fl.get('m_trueWidth') or fl.get('m_lineWidth')) and fl.get('m_height'):
+            # type 'show border': box around the text, margin = the type's leader offset (paper), width / height = the note's (paper) x scale
+            # (Commercial Level 1 'Store fixture layout by store owner': 118 x 59 in = text 103 x 44 + 2 x 7.65 at 1:96)
+            gs0 = ((self.f.rec(self.f.eid((tf0.get('m_lineAndTextAttr') or {}).get('m_categoryId'))) or {}).get('fields') or {}).get('m_gstyleIds') or [None]
+            mg = (tf0.get('m_leaderOffsetSheet') or 0.0) * scale
+            org_ = ((np.asarray(fl['m_orig'], float) - O) @ Mv.T)[:2]
+            xv = (Mv @ np.asarray(fl.get('m_baseVec') or [1, 0, 0], float))[:2]; yv = (Mv @ np.asarray(fl.get('m_upVec') or [0, 1, 0], float))[:2]
+            w = (fl.get('m_trueWidth') or fl.get('m_lineWidth')) * scale; h = fl['m_height'] * scale
+            cs = [org_ + xv * (-mg) + yv * mg, org_ + xv * (w + mg) + yv * mg, org_ + xv * (w + mg) - yv * (h + mg), org_ + xv * (-mg) - yv * (h + mg)]
+            out.append({'t': 'line', 'pts': [q.tolist() for q in cs + [cs[0]]], 'style': res.line(gs0[0], cat, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation', 'part': 'frame'})
+        if not leaders: return out
         P = lambda p: ((np.asarray(p, float) - O) @ Mv.T)[:2]
         tt = self.f.rec(self.f.eid(fl.get('m_attrId'))) or {}
         tf = tt.get('fields') or {}
@@ -772,7 +863,6 @@ class ViewDrawer:
             for x in path(ls['fields'], 'm_pParamValueSetDouble', 'm_paramSet') or []:
                 if x.get('m_paramId') == 4293960870: ang = x['m_value']
                 elif x.get('m_paramId') == 4293960882: size = x['m_value'] * scale
-        out = []
         for lo in leaders:
             l = lo.get('obj') or lo
             if not l.get('m_end'): continue
@@ -884,6 +974,24 @@ class ViewDrawer:
             return {'param': pid, 'entries': out}
         return None
 
+    def rebar_bars(self, eid, curves):
+        """every bar of a Rebar set / area-path reinforcement bar set as its centre-line polylines (reader: rvt_rebar.rebar_centerlines; the saved graphics of
+        these elements are only the bounding diagonal of the set)"""
+        import rvt_rebar
+        res = rvt_rebar.rebar_centerlines(self.f.fn, eid)
+        if not res or not res.get('bars'): return None
+        gs = curves[0].get('gs') if curves else None
+        out = []
+        for bar in res['bars']:
+            for cv in bar:
+                if cv['type'] == 'line': pts = np.array([cv['p0'], cv['p1']], float)
+                else:
+                    C = np.asarray(cv['center'], float); X = np.asarray(cv['xvec'], float); Y = np.asarray(cv['yvec'], float); r = cv['radius']
+                    th = np.linspace(cv['t0'], cv['t1'], 9)
+                    pts = np.array([C + r * (math.cos(t) * X + math.sin(t) * Y) for t in th])
+                out.append({'pts': pts, 'gs': gs})
+        return out
+
     def stairs_path_text(self, eid, O, Mv, scale, v):
         """'UP' at the start riser of a run that starts at the view's level, 'DN' at the end riser of a run that ends there: baseline-left text at the
         riser midpoint + (-3/16\", +0.047\") x scale + the path's text offset (2020 Residential plan 32: all four DN, Commercial plan 32 UP, DXF S-STRS-IDEN)"""
@@ -917,7 +1025,7 @@ class ViewDrawer:
 
     def property_line(self, eid, O, Mv, res, v):
         """property line segment (site plans): its GLine / GArc curve in the 'Property Lines' category style (dash-dot pattern, pen 8)"""
-        if v['kind'] != 'plan': return []
+        if v['kind'] != 'plan' or -2001265 in self.vis.hidden_categories(self.vis.effective(v))[0]: return []
         r = self.f.rec(eid, 'PropertyLineSegment')
         c = r['fields'].get('m_curve') if r else None
         if not c: return []
