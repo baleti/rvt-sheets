@@ -1,0 +1,759 @@
+"""Stage 3/4: draw the model content of a plan / section / elevation view as 2D primitives in VIEW coordinates
+(u, v = model feet along the view's right / up vectors from the view origin).
+Pipeline per element: visibility -> saved graphics walked for this view (scene.Walker) -> solids tessellated (reader rvt_mesh) ->
+clipped to the view depth range -> cut regions at the cut plane + projected feature edges with hidden-line removal (hlr.DepthBuffer)
+-> symbolic 2D curves projected -> styles resolved (style.Resolver)."""
+import math, collections, time
+import numpy as np
+from .reader import INVALID, ob as ob_
+from .scene import Walker, ViewCtx
+from .hlr import DepthBuffer
+from .style import Resolver
+from .visibility import Visibility
+from . import patterns
+from .visibility import CAT_TYPES, PHASE_IDX
+from . import gfx
+
+FEATURE_ANGLE = math.radians(20)
+UNOBSCURED_CATS = {-2009000, -2009003, -2009009, -2009016, -2009017}     # structural rebar, area/path reinforcement, fabric (?)
+NO_SOLID_CLASSES = {'RoomElem', 'AreaElem', 'ZoneElement', 'MassLevelData'}
+
+
+def _clip_tris_halfspace(T, n, d):
+    """keep the part of triangles T (k,3,3) with x.n <= d"""
+    if not len(T): return T
+    s = T @ n - d                                  # (k,3)
+    inside = s <= 1e-9
+    allin = inside.all(1); none = ~inside.any(1)
+    out = [T[allin]]
+    part = ~allin & ~none
+    for t, ss, ins in zip(T[part], s[part], inside[part]):
+        poly = []
+        for i in range(3):
+            a, b = t[i], t[(i + 1) % 3]; sa, sb = ss[i], ss[(i + 1) % 3]
+            if sa <= 1e-9: poly.append(a)
+            if (sa <= 1e-9) != (sb <= 1e-9):
+                poly.append(a + (b - a) * (sa / (sa - sb)))
+        for i in range(1, len(poly) - 1): out.append(np.array([[poly[0], poly[i], poly[i + 1]]]))
+    return np.concatenate([o for o in out if len(o)]) if any(len(o) for o in out) else T[:0]
+
+
+def _plane_section(T, n, d):
+    """segments where triangles T cross the plane x.n = d"""
+    s = T @ n - d
+    segs = []
+    for t, ss in zip(T, s):
+        if (ss > 0).all() or (ss < 0).all(): continue
+        pts = []
+        for i in range(3):
+            a, b = t[i], t[(i + 1) % 3]; sa, sb = ss[i], ss[(i + 1) % 3]
+            if sa == 0: pts.append(a)
+            elif (sa < 0) != (sb < 0) and sb != 0: pts.append(a + (b - a) * (sa / (sa - sb)))
+        if len(pts) >= 2 and np.linalg.norm(pts[0] - pts[1]) > 1e-9: segs.append((pts[0], pts[1]))
+    return segs
+
+
+OCCLUDER_CATS = {-2000011, -2000032, -2000035, -2000038}          # walls, floors, roofs, ceilings
+
+
+def _feature_edges(T, fid=None):
+    """edges between triangles of different faces (B-rep edges), boundary edges, and sharp edges"""
+    key = lambda p: tuple(np.round(p, 6))
+    E = {}
+    for i, t in enumerate(T):
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            ka, kb = key(t[a]), key(t[b])
+            k = (ka, kb) if ka < kb else (kb, ka)
+            E.setdefault(k, []).append(i)
+    N = np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]); nl = np.linalg.norm(N, axis=1); nl[nl == 0] = 1; N = N / nl[:, None]
+    out = []
+    cosmax = math.cos(FEATURE_ANGLE)
+    for (ka, kb), ts in E.items():
+        if len(ts) == 1: out.append((ka, kb)); continue
+        if len(ts) == 2:
+            i, j = ts
+            if fid is not None and fid[i] != fid[j]: out.append((ka, kb)); continue
+            if fid is None and abs(float(N[i] @ N[j])) < cosmax: out.append((ka, kb))
+    return np.array(out, float).reshape(-1, 2, 3)
+
+
+BELOW_RANGE_CATS = {-2000032, -2000120, -2000919, -2000920, -2000180}     # floors, stairs (runs, landings), ramps
+
+
+class ViewDrawer:
+    def __init__(self, dec, doc, vis=None):
+        self.dec = dec; self.doc = doc; self.f = dec.f
+        self.vis = vis or Visibility(dec, doc)
+        self.stats = collections.Counter()
+        from .filters import FilterEval
+        self.fe = FilterEval(dec, doc)
+
+    def frame(self, v):
+        O = np.asarray(v['origin'], float); X = np.asarray(v['right'], float); Y = np.asarray(v['up'], float); Z = np.asarray(v['dir'], float)
+        return O, X, Y, Z
+
+    def planes(self, v, O, Z):
+        """cut plane depth (w) and far depth in view coordinates; None when absent"""
+        kind = v['kind']; crop = v.get('crop') or {}
+        if kind == 'plan' and v.get('range'):
+            r = v['range']
+            wc = r['cut'] - O[2] if Z[2] > 0 else O[2] - r['cut']
+            # reflected ceiling plans look up from the cut plane to the view depth (2020 Residential 'attic' RCP: depth unlimited, Revit
+            # shows nothing but markers; 'first floor' RCP: cut 7.5, depth 9.0 = the attic level)
+            far = r['depth'] if r.get('plan_view_type') == 2 else min(r['depth'], r['bottom'])
+            wf = far - O[2] if Z[2] > 0 else O[2] - far
+            return wc, wf, Z * (1 if Z[2] > 0 else 1)
+        if kind == 'section' and crop.get('basis'):
+            B = np.asarray(crop['basis'], float); co = np.asarray(crop['origin'], float); b = crop['bounds']
+            near = co + B[2] * b[2][1]; farp = co + B[2] * b[2][0]
+            wc = float((near - O) @ Z)
+            wf = float((farp - O) @ Z) if (crop.get('active') or [[1, 1]] * 3)[2][0] else -1e9
+            return wc, wf, Z
+        return None, -1e9, Z
+
+    def draw(self, vid, px_mm=0.25, max_elems=None, skip_classes=(), skip_cats=()):
+        t0 = time.time()
+        v = self.doc['views'].get(vid) or self.doc['views'].get(str(vid))
+        ev = self.vis.effective(v)
+        scale = v.get('scale') or 100
+        if v.get('kind') == 'sheet': scale = 1
+        O, X, Y, Z = self.frame(v)
+        is_rcp = v.get('kind') == 'plan' and (v.get('range') or {}).get('plan_view_type') == 2
+        if is_rcp and Z[2] > 0: Z = -Z                                # looking up: depth axis flipped, plan x/y unchanged
+        Mv = np.stack([X, Y, Z])                                     # world -> view rows
+        wc, wf, _ = self.planes(v, O, Z)
+        is_section = v['kind'] == 'section' and v.get('class') == 'DBViewSection'
+        cut_w = wc
+        ctx = ViewCtx(Z, detail=ev.get('detail_level') or 2, cut_origin=(O + Z * wc) if wc is not None else None, cut_normal=Z if wc is not None else None, kind=v['kind'], scale=scale)
+        W = Walker(self.f, ctx)
+        from .annot import Annotations
+        self.ann = Annotations(self)
+        from .annot import Tags
+        self.tags = Tags(self)
+        from .annot import Markers
+        self.markers = Markers(self)
+        def _is_anno(e):
+            c = self.vis.info.info.get(e, {}).get('cat')
+            return CAT_TYPES.get(c) == 'Annotation' or CAT_TYPES.get((self.doc['categories'].get(c) or {}).get('parent')) == 'Annotation'
+        W.is_annotation = _is_anno
+        W.invisible_gs = {g for g, st in self.doc['gstyles'].items() if 'nvisible' in str((self.doc['categories'].get(st.get('cat')) or {}).get('name'))}
+        W.is_2d = lambda e: v['kind'] == 'drafting' or _is_anno(e) or self.vis.info.info.get(e, {}).get('cat') == -2002000     # detail items
+        res = Resolver(self.doc, ev, scale)
+        rcp_under = self.underlay_range(v, O, Z) if is_rcp else None
+        elems = self.vis.elements(vid)
+        prims = []; solids = []      # per element: (eid, cat, tris_uvw, gs)
+        topo = []                    # topography surfaces (meshes, no solids): poche in sections
+        occluders = []               # bodies that only hide (internal graphics styles), view coordinates
+        datum_ids = []
+        for k, eid in enumerate(elems):
+            if max_elems and k >= max_elems: break
+            info = self.vis.info.info[eid]
+            if info['cls'] in skip_classes or info['cat'] in skip_cats: continue
+            if info['cls'] in ('Grid', 'Level'): datum_ids.append(eid); continue
+            if info['cls'] == 'LinearDimString':
+                try: prims += self.ann.dimension(eid, O, Mv, scale, res); self.stats['dimensions'] += 1
+                except Exception as ex: self.stats['dimension_error'] += 1
+                continue
+            if info['cls'] == 'InteriorElev':
+                try: prims += self.markers.elevation(eid, O, Mv, scale, res); self.stats['elevation_markers'] += 1
+                except Exception as ex: self.stats['marker_error'] += 1
+                continue
+            if info['cls'] == 'InteriorElevArrow': continue
+            if info['cls'] == 'Section':
+                if v.get('kind') == 'plan':
+                    from .annot import section_marker
+                    try: prims += section_marker(self, eid, O, Mv, scale, res, vid); self.stats['section_markers'] += 1
+                    except Exception: self.stats['marker_error'] += 1
+                continue
+            if info['cls'] in ('IndependentTag', 'RoomTag', 'SpaceTag', 'AreaTag'):
+                try: prims += self.tags.tag(eid, O, Mv, scale, res); self.stats['tags'] += 1
+                except Exception as ex: self.stats['tag_error'] += 1
+                continue
+            if info['owner'] == vid and info['cls'] == 'TextNote':
+                tp = self.text_note(eid, O, Mv, scale)
+                if tp: prims.append(tp); self.stats['text_notes'] += 1
+                continue
+            if info['cls'] == 'RoomElem' and v['kind'] == 'plan':
+                try: prims += self.room_fill(eid, v, O, Mv, wc)
+                except Exception: self.stats['room_fill_error'] += 1
+            if info['cls'] in NO_SOLID_CLASSES: self.stats['spatial_skipped'] += 1; continue     # rooms/spaces/areas: drawn through their sub-categories (interior fill, reference), stage 5
+            try: pieces = W.walk_record(eid)
+            except Exception as ex: self.stats['walk_error'] += 1; continue
+            cid = info['cat']
+            fvis, fovs = self.fe.view_filters(ev, eid, cid, (self.doc['categories'].get(cid) or {}).get('parent', INVALID)) if ev.get('filters') else (True, [])
+            if not fvis: self.stats['hidden_by_filter'] += 1; continue
+            st_ = elems.get(eid) if isinstance(elems, dict) else None
+            pov = None
+            if st_ in PHASE_IDX and self.vis.pfilters.get(ev.get('phase_filter')):
+                if self.vis.pfilters[ev['phase_filter']]['presentation'][PHASE_IDX[st_]] == 2:
+                    pov = self.doc.get('phase_overrides', {}).get(PHASE_IDX[st_])
+            ov = res.overrides(eid, cid, fovs, pov)
+            if info['cls'] in ('SiteSurface', 'TopographySurface'): topo.append((eid, cid, ov))
+            anno = CAT_TYPES.get(cid) == 'Annotation' or CAT_TYPES.get((self.doc['categories'].get(cid) or {}).get('parent')) == 'Annotation'
+            if anno and info['cls'] == 'FamilyInstance':
+                try: prims += self.tags.instance_labels(eid, O, Mv)
+                except Exception: self.stats['label_error'] += 1
+            for tx_ in pieces['texts']:
+                q = dict(tx_); q['origin'] = ((np.asarray(q['origin'], float) - O) @ Mv.T)[:2].tolist(); q['layer'] = 'text'
+                prims.append(q)
+            for c in pieces['curves']:
+                if not self.drawable_gs(c.get('gs')): continue
+                if info['cls'] in ('SiteSurface', 'TopographySurface') and v['kind'] in ('section', '3d'): continue   # contour/surface curves are not drawn in elevations (the ground profile comes from the mesh)
+                pts = (np.asarray(c['pts'], float) - O) @ Mv.T
+                if cut_w is not None and not is_section and (pts[:, 2] > cut_w + 1e-6).all() and False: continue
+                lay = 'symbolic'
+                if is_rcp and not anno and cut_w is not None and (pts[:, 2] > cut_w + 1e-6).all():
+                    # family plan symbols below a ceiling plan's cut (furniture, fixtures): only in the underlay, halftone
+                    if rcp_under is None: continue
+                    zc = -pts[:, 2]
+                    if zc.max() < rcp_under[0] - 1e-6 or zc.min() > rcp_under[1] + 1e-6: continue
+                    lay = 'underlay'
+                st = res.line(c.get('gs'), cid, 'proj', eid, ov=dict(ov, halftone=True) if lay == 'underlay' else ov, annotation=anno)
+                pr = {'t': 'line', 'pts': pts[:, :2].tolist(), 'style': st, 'elem': eid, 'layer': lay}
+                if is_section and not anno and len(pts) > 1: pr['_w'] = pts             # depth-tested below (elevations/sections)
+                prims.append(pr)
+            for fl in pieces['fills']:
+                loops = [((np.asarray(l, float) - O) @ Mv.T)[:, :2].tolist() for l in fl.get('loops') or [] if l]
+                if not loops: continue
+                pid = fl.get('pattern'); pat = self.doc['fill_patterns'].get(pid) if pid not in (None, -1) else None
+                col = fl.get('color')
+                if isinstance(col, int) and col >= 1 << 24: col = [0, 0, 0]          # 0x1000000: no explicit colour (black)
+                if pat is not None and not pat.get('solid'):
+                    reg = patterns.region(loops)
+                    if reg is None: continue
+                    rot = 0.0
+                    pl = fl.get('placer') or {}
+                    if pl.get('m_dir') and fl.get('R'):
+                        dv = Mv @ (np.asarray(fl['R'], float) @ np.array([pl['m_dir'][0], pl['m_dir'][1], 0.0]))
+                        if np.hypot(dv[0], dv[1]) > 1e-9: rot = math.atan2(dv[1], dv[0])
+                    prims.append({'t': 'segs', 'segs': patterns.hatch(reg, pat, scale, view_rot=rot), 'style': {'w': 0.1, 'rgb': col if isinstance(col, list) else [0, 0, 0], 'dash': None},
+                                  'elem': eid, 'layer': 'symbolic_fill'})
+                elif 'placer' in fl:
+                    # solid / pattern-less fill inside a detail or annotation family: a masking region (white) that hides what is drawn
+                    # before it in the view's draw order (2020 Residential 'at grade' vs Revit's DXF: lines cut where components overlap)
+                    prims.append({'t': 'fill', 'loops': loops, 'color': [255, 255, 255], 'elem': eid, 'layer': 'mask'})
+                else:
+                    prims.append({'t': 'fill', 'loops': loops, 'color': col if 'placer' in fl else fl.get('color'), 'pattern': pid, 'elem': eid, 'layer': 'symbolic_fill'})
+            for s in pieces['solids']:
+                if not self.drawable_gs(s.get('gs')):
+                    # internal-category bodies (2020 Residential wall bodies, cat -2000896): their edges are not drawn but they hide
+                    # what lies behind them (elevations otherwise show every interior object through the walls)
+                    self.stats['hidden_internal_solids'] += 1
+                    if cid in OCCLUDER_CATS:
+                        T = self._tess(s)
+                        if T is not None and len(T[0]): occluders.append((T[0] - O) @ Mv.T)
+                    continue
+                T = self._tess(s)
+                if T is None or not len(T[0]): continue
+                tris, fid = T[0], T[1]
+                uvw = (tris - O) @ Mv.T
+                m = self.solid_material(T[2] if len(T) > 2 else None)
+                ov2 = dict(ov, _mat=m) if m is not None else ov
+                if v['kind'] in ('section', '3d') and len(T) > 2 and T[2] is not None: ov2 = dict(ov2, _frs=T[2])
+                solids.append((eid, cid, uvw, fid, s.get('gs'), ov2))
+        if datum_ids:
+            from .datums import Datums
+            from .sheet import SheetComposer
+            imp = SheetComposer.imperial(type('X', (), {'doc': self.doc, 'IMPERIAL': SheetComposer.IMPERIAL})())
+            try: prims += Datums(self).draw(vid, v, datum_ids, O, Mv, scale, res, imp)
+            except Exception as ex: self.stats['datum_error'] += 1; print('datum error', repr(ex))
+        self.stats['solids'] += len(solids)
+        if not solids and not prims: return {'prims': prims, 'stats': dict(self.stats)}
+        # depth range clip
+        allp = []
+        clipped = []
+        # underlay (plan views with an underlay level): bodies wholly below the view depth that reach into the underlay range are drawn
+        # halftone in projection, hidden only by each other (Revit draws the underlay below the model: the level 2 floor does not hide it)
+        under = []
+        uw = self.underlay_range(v, O, Z) if v['kind'] == 'plan' else None
+        lim = (uw[2] * wc if is_rcp else wf) if uw is not None and wc is not None else None     # main range starts at: plan bottom / RCP cut
+        if lim is not None and lim > -1e8:
+            rest = []
+            for sol in solids:
+                z = sol[2][:, :, 2] * uw[2]                           # heights above the view origin
+                if z.max() < lim - 1e-3 and z.max() >= uw[0] - 1e-6 and z.min() <= uw[1] + 1e-6:
+                    T = sol[2].copy(); T[:, :, 2] = z; under.append((sol[0], sol[1], T) + tuple(sol[3:]))
+                else: rest.append(sol)
+            solids = rest
+            if under: prims += self.underlay(under, uw, px_mm, scale, res)
+        for eid, cid, uvw, fid, gs, ov in solids:
+            T = uvw
+            idx = np.arange(len(T))
+            if cut_w is not None:
+                keep_full = (T[:, :, 2] <= cut_w + 1e-9).all(1)
+                T2 = _clip_tris_halfspace(T, np.array([0, 0, 1.0]), cut_w)
+            else: T2 = T
+            if wf is not None and wf > -1e8:
+                # plans: floors, stairs and ramps stay visible down to 4 ft below the bottom of the view range (Revit's view range
+                # exception; writer test file Plan L2 shows the level 2 floor whose top lies on the view's bottom)
+                if not (v['kind'] == 'plan' and not is_rcp and cid in BELOW_RANGE_CATS and T[:, :, 2].max() >= wf - 4.0):
+                    T2 = _clip_tris_halfspace(T2, np.array([0, 0, -1.0]), -wf)
+            if len(T2): clipped.append((eid, cid, T2, uvw, fid, gs, ov)); allp.append(T2.reshape(-1, 3))
+        if not allp:
+            for p in prims: p.pop('_w', None)
+            return {'prims': prims, 'stats': dict(self.stats)}
+        P = np.concatenate(allp)
+        px = px_mm / 304.8 * scale                                    # pixel size in model feet
+        db = DepthBuffer(P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max(), px)
+        for c in clipped: db.add(c[2])
+        for T in occluders:
+            if cut_w is not None: T = _clip_tris_halfspace(T, np.array([0, 0, 1.0]), cut_w)
+            if wf is not None and wf > -1e8: T = _clip_tris_halfspace(T, np.array([0, 0, -1.0]), -wf)
+            if len(T): db.add(T)
+        caps = []
+        # cut regions
+        if cut_w is not None:
+            for eid, cid, T2, uvw, fid, gs, ov in clipped:
+                segs = _plane_section(uvw, np.array([0, 0, 1.0]), cut_w)
+                if not segs: continue
+                st = res.line(gs, cid, 'cut', eid, ov=ov)
+                loops = self._loops(segs)
+                loops2 = [[p[:2] for p in l] for l in loops]
+                closed2 = [l for l in loops2 if len(l) > 3 and np.allclose(l[0], l[-1], atol=1e-6)]
+                if closed2:                     # open fragments next to closed loops come from faces touching the plane: drop them
+                    loops2 = closed2
+                    segs = [(np.array(a), np.array(b)) for l in loops2 for a, b in zip(l, l[1:])]
+                caps.append(loops2)
+                prim = {'t': 'cut', 'loops': loops2, 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in segs], 'style': st, 'elem': eid, 'cat': cid, 'layer': 'cut'}
+                fill = self.cut_fill(eid, cid, gs, ov, ev.get('detail_level') or 2)
+                if fill and ov.get('halftone'):
+                    from .style import HALFTONE_MIX
+                    fill = dict(fill, color=[int(round(a + (255 - a) * HALFTONE_MIX)) for a in fill['color']])
+                if fill:
+                    reg = patterns.region([l for l in loops2 if len(l) > 3 and np.allclose(l[0], l[-1], atol=1e-6)])
+                    pat = self.doc['fill_patterns'].get(fill['pattern'])
+                    if reg is not None and pat:
+                        if pat.get('solid'): prim['fill'] = fill['color']
+                        else: prims.append({'t': 'segs', 'segs': patterns.hatch(reg, pat, scale), 'style': {'w': 0.1, 'rgb': fill['color'], 'dash': None}, 'elem': eid, 'layer': 'cut_fill'})
+                if cid == -2000011 and closed2 and (ov.get('cut_fg_visible') is not False) and (ev.get('detail_level') or 2) != 1:
+                    try: self.wall_layers(eid, closed2, Mv, scale, res, ov, prims, st)
+                    except Exception: self.stats['layer_error'] += 1
+                prims.append(prim)
+                self.stats['cut_elements'] += 1
+        if cut_w is not None and topo and is_section:
+            for eid, cid, ov in topo:
+                try:
+                    from .compose import crop_rect_uv
+                    caps += self.topo_poche(eid, cid, ov, O, Mv, cut_w, scale, res, prims, crop_rect_uv(v))
+                except Exception: self.stats['topo_error'] += 1
+        prims = self.merge_cut_outlines(prims)
+        # cut caps (the cut faces at the cut plane) hide what lies below them
+        for loops2 in caps:
+            reg = patterns.region([l for l in loops2 if len(l) > 3 and np.allclose(l[0], l[-1], atol=1e-6)])
+            if reg is None: continue
+            try:
+                import mapbox_earcut as earcut
+                for poly in getattr(reg, 'geoms', [reg]):
+                    rings = [list(poly.exterior.coords)[:-1]] + [list(r.coords)[:-1] for r in poly.interiors]
+                    verts = np.array([q for r in rings for q in r], float)
+                    ends = np.cumsum([len(r) for r in rings]).astype(np.uint32)
+                    idx = earcut.triangulate_float64(verts, ends).reshape(-1, 3)
+                    T = np.zeros((len(idx), 3, 3)); T[:, :, :2] = verts[idx]; T[:, :, 2] = cut_w
+                    db.add(T)
+            except Exception as ex: self.stats['cap_error'] += 1
+        # projected edges with hidden-line removal
+        eps = px * 2.0
+        for eid, cid, T2, uvw, fid, gs, ov in clipped:
+            E = _feature_edges(T2, None)
+            if cut_w is not None: E = E[~((np.abs(E[:, 0, 2] - cut_w) < 1e-6) & (np.abs(E[:, 1, 2] - cut_w) < 1e-6))]       # edges ON the cut plane belong to the cut outline
+            if cid in UNOBSCURED_CATS:                 # rebar: drawn through its host (Revit 'view unobscured' in the sample views)
+                vis = [(a, b) for a, b in E if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
+            else: vis = [(a, b) for a, b in db.visible_parts(E, eps) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]      # end-on edges collapse to points
+            if not vis: continue
+            st = res.line(gs, cid, 'proj', eid, ov=ov)
+            prims.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis], 'style': st, 'elem': eid, 'layer': 'projection'})
+        # surface patterns of the visible faces (brick, shingles, block...): face material -> Material.surface_pattern, hatched on the
+        # projected front-facing triangles, kept where the depth test says the face is visible (sample points of the hatch lines)
+        if v['kind'] in ('section', '3d') and scale <= 200:
+            try:
+                for eid, cid, T2, uvw, fid, gs, ov in clipped:
+                    if ov.get('_frs') is not None: self.surface_hatch(eid, cid, uvw, ov['_frs'], db, eps, scale, prims, ov)
+            except Exception: self.stats['surface_error'] += 1
+        dord = v.get('draw_order') or []
+        if dord:
+            rank = {e: i for i, e in enumerate(dord)}; top = len(dord)
+            for p in prims:
+                if p.get('layer') in ('cut', 'cut_fill', 'projection'): continue        # model content stays below detail items
+                p['order'] = rank.get(p.get('elem'), top if p.get('layer') in ('text', 'annotation', 'annotation_fill', 'datum') else -1)
+        # family symbolic lines in sections/elevations (door swings, window and furniture elevation symbols) are hidden by what is in
+        # front of them like model edges (2020 Residential elevations showed every interior door through the walls); tolerance 3"
+        eps_s = max(eps, 0.25)
+        out = []
+        for p in prims:
+            P = p.pop('_w', None)
+            if P is None: out.append(p); continue
+            E = np.stack([P[:-1], P[1:]], 1)
+            vis = [(a, b) for a, b in db.visible_parts(E, eps_s) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
+            if vis: out.append(dict(p, t='segs', segs=[[a[:2].tolist(), b[:2].tolist()] for a, b in vis], pts=None))
+        prims = out
+        self.stats['seconds'] = round(time.time() - t0, 1)
+        return {'prims': prims, 'stats': dict(self.stats), 'conds_unknown': {str(k): v for k, v in W.unknown_conds.items()}}
+
+    def underlay_range(self, v, O, Z):
+        r = v.get('range') or {}
+        ub = r.get('underlay_bottom'); ut = r.get('underlay_top')
+        if ub is None or ut is None or abs(ub) > 1e8 or abs(ut) > 1e8: return None
+        lo, hi = sorted((ub - O[2], ut - O[2]))
+        return lo, hi, (1.0 if Z[2] > 0 else -1.0)                     # heights above the origin; sign of the view depth axis (RCP: -1)
+
+    def underlay(self, under, uw, px_mm, scale, res):
+        """projected edges of underlay bodies (halftone), hidden-line removal among themselves"""
+        out = []; clipped = []
+        for eid, cid, uvw, fid, gs, ov in under:
+            T = _clip_tris_halfspace(uvw, np.array([0, 0, 1.0]), uw[1])
+            T = _clip_tris_halfspace(T, np.array([0, 0, -1.0]), -uw[0]) if len(T) else T
+            if len(T): clipped.append((eid, cid, T, gs, ov))
+        if not clipped: return out
+        P = np.concatenate([c[2].reshape(-1, 3) for c in clipped])
+        px = px_mm / 304.8 * scale
+        db = DepthBuffer(P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max(), px)
+        for c in clipped: db.add(c[2])
+        for eid, cid, T, gs, ov in clipped:
+            E = _feature_edges(T, None)
+            vis = [(a, b) for a, b in db.visible_parts(E, px * 2.0) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
+            if not vis: continue
+            st = res.line(gs, cid, 'proj', eid, ov=dict(ov, halftone=True))
+            out.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis], 'style': st, 'elem': eid, 'layer': 'underlay'})
+            self.stats['underlay_elements'] += 1
+        return out
+
+    JOIN_CATS = {-2000011, -2000032, -2000035, -2000038, -2001300, -2000151}     # walls, floors, roofs, ceilings, structural foundations, ... clean up joins (?)
+
+    def merge_cut_outlines(self, prims):
+        """wall-join cleanup: cut regions of one category drawn with the same cut style are unioned, the shared boundaries disappear"""
+        from shapely.ops import unary_union
+        groups = collections.defaultdict(list); keep = []
+        for p in prims:
+            if p['t'] == 'cut' and p.get('cat') in self.JOIN_CATS and not p.get('fill'):
+                st = p['style']; groups[(p['cat'], st['w'], tuple(st['rgb']), tuple(st['dash'] or ()))].append(p)
+            else: keep.append(p)
+        for k, ps in groups.items():
+            regs = []; open_segs = []
+            for p in ps:
+                closed = [l for l in p['loops'] if len(l) > 3 and np.allclose(l[0], l[-1], atol=1e-6)]
+                r = patterns.region(closed)
+                if r is not None and len(closed) == len(p['loops']): regs.append(r.buffer(1e-5, join_style=2))
+                else: keep.append(p)
+            if not regs: continue
+            u = unary_union(regs).buffer(-1e-5, join_style=2)
+            segs = []; loops = []
+            for poly in getattr(u, 'geoms', [u]):
+                if poly.is_empty or poly.geom_type != 'Polygon': continue
+                for ring in [poly.exterior] + list(poly.interiors):
+                    c = list(ring.coords); loops.append([list(q) for q in c])
+                    segs += [[list(a), list(b)] for a, b in zip(c, c[1:])]
+            keep.append({'t': 'cut', 'loops': loops, 'segs': segs, 'style': ps[0]['style'], 'elem': ps[0]['elem'], 'elems': [p['elem'] for p in ps], 'cat': k[0], 'layer': 'cut'})
+        return keep
+
+    def drawable_gs(self, gs):
+        """geometry styled with an internal (non-API) category - wall layer/reference planes, location lines - is never drawn"""
+        if gs in (None, -1): return True
+        st = self.doc['gstyles'].get(gs)
+        if not st: return True
+        c = st.get('cat')
+        return c is None or c >= 0 or c in CAT_TYPES or str(c) in self.dec.cat_names
+
+    def text_note(self, eid, O, Mv, scale):
+        """TextNote record -> text prim in view coordinates (origin model, sizes paper -> model by the view scale)"""
+        r = self.f.rec(eid, 'TextNote')
+        if not r: return None
+        fl = r['fields']
+        raw = (fl.get('m_oSavedRtfData') or {}).get('obj', {}).get('m_arrRtfStream')
+        txt = gfx.rtf_text(raw) if raw is not None else ''
+        tt = self.doc['text_types'].get(self.f.eid(fl.get('m_attrId'))) or {}
+        font = self.doc['fonts'].get(tt.get('font')) or {}
+        fl_ = fl.get('m_flags') or 0
+        size = font.get('size') or 0.0078
+        if raw is not None:
+            fs = gfx.rtf_runs(raw).get('fs')
+            if fs: size = fs / 2 / 72 / 12 * 0.72          # first run's em size (half points) -> Revit text size
+        org = ((np.asarray(fl['m_orig'], float) - O) @ Mv.T)[:2].tolist()
+        x = (Mv @ np.asarray(fl.get('m_baseVec') or [1, 0, 0], float))[:2].tolist()
+        from .sheet import SheetComposer
+        return {'t': 'text', 'text': txt, 'origin': org, 'x': x, 'size': size * scale, 'font': font.get('name') or 'Arial',
+                'bold': tt.get('bold'), 'italic': tt.get('italic'), 'halign': SheetComposer._halign(fl_), 'valign': SheetComposer._valign(fl_), 'anchor': True,
+                'elem': eid, 'layer': 'text', 'width': (fl.get('m_lineWidth') or 0) * scale}
+
+    def materials(self):
+        if getattr(self, '_mat', None) is None:
+            try:
+                import rvt_materials
+                self._mat = rvt_materials.material_table(self.f.fn)
+            except Exception: self._mat = {}
+        return self._mat
+
+    HOST_CATS = {-2000011, -2000032, -2000035, -2000038, -2000040}       # walls, floors, roofs, ceilings, ? (compound structures)
+
+    def cut_fill(self, eid, cid, gs, ov, detail):
+        """cut pattern of an element: override > coarse fill of the type (coarse detail, host objects) > material of the cut body > category material"""
+        if ov.get('cut_fg_visible') is False: return None
+        if ov.get('cut_fg_pattern') is not None: return {'pattern': ov['cut_fg_pattern'], 'color': ov.get('cut_fg_color') or [0, 0, 0]}
+        info = self.vis.info.info.get(eid) or {}
+        if detail == 1 and cid in self.HOST_CATS:            # coarse: host objects show their type's coarse fill (or nothing); families keep material patterns
+            t = self.type_params(eid)
+            if t is not None:
+                pid = t.get(-1002106)
+                if pid not in (None, -1): return {'pattern': pid, 'color': self._rgb(t.get(-1002110)) or [0, 0, 0]}
+                return None
+        st = self.doc['gstyles'].get(gs) or {}
+        mid = ov.get('_mat')                                  # material of the cut body's faces (compound layers, families)
+        if mid in (None, -1): mid = st.get('material', -1)
+        if mid in (None, -1): mid = ((self.doc['categories'].get(cid) or {}).get('proj') or {}).get('material', -1)
+        m = self.materials().get(mid) if mid not in (None, -1) else None
+        cp = (m or {}).get('cut_pattern') or {}
+        if cp.get('id') is not None: return {'pattern': cp['id'], 'color': cp.get('color') or [0, 0, 0]}
+        return None
+
+    @staticmethod
+    def _rgb(v):
+        from .decode import color
+        return color(v) if isinstance(v, int) else v
+
+    def topo_poche(self, eid, cid, ov, O, Mv, cut_w, scale, res, prims, crop=None):
+        """topography cut by a section: the surface mesh (reader polymesh) meets the cut plane in a profile; Revit fills below it down to
+        the poche base with the site material's cut pattern (SiteSettings poche base not decoded: 30 ft below the lowest profile point,
+        the viewport crop cuts it). Returns the poche loops (added to the hidden-line caps)."""
+        import rvt_elemmesh as E
+        m = E.element_mesh(self.f.g, eid)                       # the reader adapter's saved-graphics index (one per file)
+        T = np.asarray(m.get('tris') or [], float).reshape(-1, 3, 3)
+        if not len(T): return []
+        uvw = (T - O) @ Mv.T
+        segs = _plane_section(uvw, np.array([0, 0, 1.0]), cut_w)
+        if not segs: return []
+        loops = []
+        st = res.line(None, cid, 'cut', eid, ov=ov)
+        mats = self.materials()
+        mid = next((k for k, v in mats.items() if 'earth' in str(v.get('name', '')).lower()), None)
+        cp = (mats.get(mid) or {}).get('cut_pattern') or {}
+        for pl in self._loops(segs, 1e-5):
+            P = np.asarray(pl, float)[:, :2]
+            if len(P) < 2: continue
+            if P[0, 0] > P[-1, 0]: P = P[::-1]
+            base = P[:, 1].min() - 30.0
+            if crop is not None:                                    # poche stops at the crop region (also bounds hatch size on big surfaces)
+                P = P[(P[:, 0] >= crop[0] - 1) & (P[:, 0] <= crop[2] + 1)] if len(P) > 2 else P
+                if len(P) < 2: continue
+                base = max(base, crop[1] - 1)
+            loop = P.tolist() + [[P[-1, 0], base], [P[0, 0], base], P[0].tolist()]
+            loops.append(loop)
+            prims.append({'t': 'line', 'pts': P.tolist(), 'style': st, 'elem': eid, 'layer': 'cut'})
+            pat = self.doc['fill_patterns'].get(cp.get('id')) if cp.get('id') is not None else None
+            if pat:
+                reg = patterns.region([loop])
+                if reg is not None and not pat.get('solid'):
+                    prims.append({'t': 'segs', 'segs': patterns.hatch(reg, pat, scale), 'style': {'w': 0.1, 'rgb': cp.get('color') or [0, 0, 0], 'dash': None}, 'elem': eid, 'layer': 'cut_fill'})
+        self.stats['topo_poche'] += len(loops)
+        return [loops]
+
+    def color_schema(self, v):
+        """{param value: (rgb, pattern id)} of the colour scheme applied to rooms in view v (DBView.m_pColorFillSchemaSetting
+        m_categoryToSchema -> ColorFillSchema.m_colorFillArr; entries keyed by the parameter's stored value), or None"""
+        r = self.f.rec(v['id'])
+        st = ob_((r or {'fields': {}})['fields'].get('m_pColorFillSchemaSetting')) or {}
+        for e in st.get('m_categoryToSchema') or []:
+            cat = e.get('first'); cat = cat - 2 ** 32 if isinstance(cat, int) and cat >= 2 ** 31 else cat
+            if cat != -2000160: continue
+            sch = self.f.rec(self.f.eid(e.get('second')))
+            if not sch: continue
+            pid = sch['fields'].get('m_paramId'); pid = self.f.eid(pid) if pid is not None else None
+            if isinstance(pid, int) and pid >= 2 ** 31: pid -= 2 ** 32
+            out = {}
+            for it in sch['fields'].get('m_colorFillArr') or []:
+                if it.get('m_bHidden') or not it.get('m_bInUse', 1) or it.get('m_isPlaceholder'): continue
+                ps = it.get('m_paramStorage') or {}
+                key = ob_(ps.get('m_str')) if isinstance(ob_(ps.get('m_str')), str) else (ps.get('m_str') or {}).get('m_str') if isinstance(ps.get('m_str'), dict) else ps.get('m_str')
+                col = it.get('m_color') or 0
+                out[key] = ([col & 255, (col >> 8) & 255, (col >> 16) & 255], self.f.eid(it.get('m_fillPatternId')))
+            return {'param': pid, 'entries': out}
+        return None
+
+    def room_fill(self, eid, v, O, Mv, wc):
+        """room colour fill: the room's floor outline (lowest planar face of its volume) in the colour scheme's colour for its parameter value"""
+        if not hasattr(self, '_cs'): self._cs = {}
+        if v['id'] not in self._cs: self._cs[v['id']] = self.color_schema(v)
+        cs = self._cs[v['id']]
+        if not cs: return []
+        from .annot import Tags
+        raw = self._tags_for_params().raw_params(eid)
+        val = raw.get(cs['param'])
+        hit = cs['entries'].get(val)
+        if not hit: return []
+        import rvt_elemmesh as E
+        m = E.element_mesh(self.f.g, eid); T = np.asarray(m.get('tris') or [], float).reshape(-1, 3, 3)
+        if not len(T): return []
+        low = T[:, :, 2].min()
+        flat = T[(np.abs(T[:, :, 2] - low) < 1e-3).all(1)]
+        if not len(flat): return []
+        uv = ((flat - O) @ Mv.T)[:, :, :2]
+        loops = [t.tolist() + [t[0].tolist()] for t in uv]
+        reg = patterns.region(loops)
+        if reg is None: return []
+        from shapely.ops import unary_union
+        polys = unary_union([patterns.region([l]) for l in loops if patterns.region([l]) is not None])
+        out = []
+        for poly in getattr(polys, 'geoms', [polys]):
+            if poly.geom_type != 'Polygon' or poly.is_empty: continue
+            out.append({'t': 'fill', 'loops': [list(map(list, poly.exterior.coords))] + [list(map(list, r.coords)) for r in poly.interiors], 'color': hit[0], 'elem': eid, 'layer': 'room_fill'})
+        return out
+
+    def _tags_for_params(self):
+        if getattr(self, '_tg', None) is None:
+            from .annot import Tags
+            self._tg = Tags(self)
+        return self._tg
+
+    def wall_layers(self, eid, loops, Mv, scale, res, ov, prims, st):
+        """compound wall cut: strips of the cut region along the wall normal, one per layer of the wall type
+        (CompoundStructure m_layers: width, material; exterior first = the side the wall's orientation points to, m_isFlipped swaps it),
+        hatched with the layer material's cut pattern and separated by thin lines. Only straight cut regions (rectangular loops)."""
+        r = self.f.rec(eid)
+        if not r: return
+        t = self.f.rec(self.f.eid(r['fields'].get('m_WallAttributesId')))
+        cs = ob_(t['fields'].get('m_pCompoundStructure')) if t else None
+        layers = [ob_(x) for x in (cs or {}).get('m_layers') or []]
+        layers = [l for l in layers if (l.get('m_layerWidth') or 0) > 1e-6]
+        if len(layers) < 2: return
+        P = np.asarray([q[:2] for l in loops for q in l[:-1]], float)
+        if len(P) < 4: return
+        c = P.mean(0); u, sv, vt = np.linalg.svd(P - c, full_matrices=False)
+        ax = vt[0]; nr = np.array([-ax[1], ax[0]])                       # long axis, wall normal (view coordinates)
+        tot = sum(l['m_layerWidth'] for l in layers)
+        d = (P - c) @ nr; lo, hi = d.min(), d.max()
+        if abs((hi - lo) - tot) > 0.15 * tot + 0.02: return             # not a plain straight cut of this wall type
+        # which side is the exterior: wall orientation vs view: use the wall's world normal from its curve driver is not decoded yet;
+        # layer 0 (exterior) on the side away from the building = the side with lower |view-depth| of the wall centre... fall back: +nr
+        flip = bool(r['fields'].get('m_isFlipped'))
+        order = layers if not flip else layers[::-1]
+        edges = [lo]
+        for l in order: edges.append(edges[-1] + l['m_layerWidth'] * (hi - lo) / tot)
+        mats = self.materials(); reg = patterns.region([l for l in loops if len(l) > 3])
+        if reg is None: return
+        from shapely.geometry import box, Polygon
+        from shapely import affinity
+        for i, l in enumerate(order):
+            m = mats.get(self.f.eid(l.get('m_materialId'))) or {}
+            cp = (m.get('cut_pattern') or {}); pat = self.doc['fill_patterns'].get(cp.get('id')) if cp.get('id') is not None else None
+            # strip polygon in (ax, nr) coordinates then back to view coordinates
+            L = (P - c) @ ax; a0, a1 = L.min() - 1, L.max() + 1
+            strip = Polygon([c + ax * a0 + nr * edges[i], c + ax * a1 + nr * edges[i], c + ax * a1 + nr * edges[i + 1], c + ax * a0 + nr * edges[i + 1]])
+            piece = reg.intersection(strip)
+            if piece.is_empty: continue
+            if pat is not None and not pat.get('solid'):
+                prims.append({'t': 'segs', 'segs': patterns.hatch(piece, pat, scale), 'style': {'w': 0.1, 'rgb': cp.get('color') or [0, 0, 0], 'dash': None}, 'elem': eid, 'layer': 'cut_fill'})
+            if i:                                                       # interface line between layers
+                a = c + ax * a0 + nr * edges[i]; b = c + ax * a1 + nr * edges[i]
+                seg = reg.intersection(Polygon([a - nr * 1e-4, b - nr * 1e-4, b + nr * 1e-4, a + nr * 1e-4]).buffer(1e-6))
+                ln = reg.intersection(__import__('shapely.geometry', fromlist=['LineString']).LineString([tuple(a), tuple(b)]))
+                gl = [g for g in getattr(ln, 'geoms', [ln]) if g.geom_type == 'LineString' and not g.is_empty]
+                if gl: prims.append({'t': 'segs', 'segs': [[list(g.coords[0]), list(g.coords[-1])] for g in gl], 'style': dict(st, w=max(0.08, st['w'] * 0.35)), 'elem': eid, 'layer': 'cut'})
+
+    def surface_hatch(self, eid, cid, uvw, frs, db, eps, scale, prims, ov):
+        mats = self.materials(); by = collections.defaultdict(list)
+        n = np.cross(uvw[:, 1] - uvw[:, 0], uvw[:, 2] - uvw[:, 0])
+        front = n[:, 2] > 1e-9                                           # facing the viewer (w towards the eye)
+        for i in np.nonzero(front)[0]:
+            rs = frs[i] if i < len(frs) else None
+            try: rs = int(rs)
+            except Exception: continue
+            if rs in mats: by[rs].append(i)
+        for mid, idx in by.items():
+            sp = (mats[mid].get('surface_pattern') or {})
+            pat = self.doc['fill_patterns'].get(sp.get('id')) if sp.get('id') is not None else None
+            if not pat or pat.get('solid'): continue
+            polys = [patterns.region([uvw[i][:, :2].tolist() + [uvw[i][0, :2].tolist()]]) for i in idx]
+            from shapely.ops import unary_union
+            reg = unary_union([p for p in polys if p is not None and p.area > 1e-6])
+            if reg.is_empty: continue
+            segs = patterns.hatch(reg, pat, scale)
+            if not segs or len(segs) > 20000: continue
+            # depth of each hatch segment: nearest face plane under its midpoint is approximated by the buffer itself -> keep if the
+            # buffer depth at the midpoint belongs to this element (|w - zb| small): sample w from the element's own triangles
+            S = np.array(segs, float)                                    # (k,2,2)
+            mids = S.mean(1)
+            w = self._depth_at(uvw[idx], mids)
+            ok = ~np.isnan(w)
+            if not ok.any(): continue
+            seg3 = np.concatenate([S[ok], np.repeat(w[ok][:, None, None], 2, 1)], 2)
+            vis = db.visible_parts(seg3, eps * 1.5)
+            col = (sp.get('color') or [0, 0, 0])
+            if vis: prims.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis], 'style': {'w': 0.1, 'rgb': col, 'dash': None}, 'elem': eid, 'layer': 'surface_fill'})
+
+    @staticmethod
+    def _depth_at(tris, pts):
+        """w of the nearest triangle covering each (u,v) point (nan when uncovered); tris (n,3,3), pts (k,2)"""
+        out = np.full(len(pts), np.nan)
+        for t in tris:
+            a, b, c = t[0, :2], t[1, :2], t[2, :2]
+            den = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+            if abs(den) < 1e-12: continue
+            lo = np.minimum(np.minimum(a, b), c); hi = np.maximum(np.maximum(a, b), c)
+            m = (pts[:, 0] >= lo[0]) & (pts[:, 0] <= hi[0]) & (pts[:, 1] >= lo[1]) & (pts[:, 1] <= hi[1])
+            if not m.any(): continue
+            P = pts[m]
+            l1 = ((b[1] - c[1]) * (P[:, 0] - c[0]) + (c[0] - b[0]) * (P[:, 1] - c[1])) / den
+            l2 = ((c[1] - a[1]) * (P[:, 0] - c[0]) + (a[0] - c[0]) * (P[:, 1] - c[1])) / den
+            l3 = 1 - l1 - l2
+            inside = (l1 >= -1e-6) & (l2 >= -1e-6) & (l3 >= -1e-6)
+            if not inside.any(): continue
+            w = l1 * t[0, 2] + l2 * t[1, 2] + l3 * t[2, 2]
+            idx = np.nonzero(m)[0][inside]; wi = w[inside]
+            cur = out[idx]; out[idx] = np.where(np.isnan(cur) | (wi > cur), wi, cur)
+        return out
+
+    def solid_material(self, frs):
+        """most common face material of a solid: per-triangle render style ids (rvt_mesh 'frs'), a MaterialElem or a graphics style with a material"""
+        if not frs: return None
+        mats = self.materials(); c = collections.Counter()
+        for rs in frs:
+            if rs is None: continue
+            try: rs = int(rs)
+            except Exception: continue
+            if rs >= 2 ** 31: continue
+            if rs in mats: c[rs] += 1
+            else:
+                m = (self.doc['gstyles'].get(rs) or {}).get('material')
+                if m not in (None, -1): c[m] += 1
+        return c.most_common(1)[0][0] if c else None
+
+    def type_params(self, eid):
+        """paramset of the element's type (walls, floors, roofs, ceilings): {param id: value}, None if no host type"""
+        r = self.f.rec(eid)
+        if not r: return None
+        fl = r['fields']
+        tid = None
+        for k in ('m_WallAttributesId', 'm_floorAttributesId', 'm_FloorAttributesId', 'm_roofAttributesId', 'm_ceilingAttributesId', 'm_typeId', 'm_symbolId'):
+            if k in fl: tid = self.f.eid(fl[k]); break
+        if tid in (None, -1): return None
+        t = self.f.rec(tid)
+        if not t: return None
+        from .decode import Decoder
+        return Decoder._paramset(self, t['fields'])
+
+    E = property(lambda s: s.f.eid)
+
+    def _tess(self, s):
+        import rvt_mesh
+        try: t = rvt_mesh.tessellate_geometry(s['geo'])
+        except Exception: self.stats['tess_error'] += 1; return None
+        tris = np.asarray(t['tris'], float).reshape(-1, 3, 3)
+        if not len(tris): return tris, [], []
+        tris = tris @ np.asarray(s['R'], float).T + np.asarray(s['o'], float)
+        return tris, t.get('fidx'), t.get('frs')
+
+    @staticmethod
+    def _loops(segs, tol=1e-6):
+        """chain cut segments into polylines (closed where possible)"""
+        key = lambda p: (round(p[0] / tol), round(p[1] / tol))
+        adj = collections.defaultdict(list)
+        for i, (a, b) in enumerate(segs): adj[key(a)].append((i, 0)); adj[key(b)].append((i, 1))
+        used = [False] * len(segs); loops = []
+        for i in range(len(segs)):
+            if used[i]: continue
+            used[i] = True; a, b = segs[i]; line = [a.tolist(), b.tolist()]; cur = b
+            for _ in range(len(segs)):
+                nxt = [(j, e) for j, e in adj[key(cur)] if not used[j]]
+                if not nxt: break
+                j, e = nxt[0]; used[j] = True
+                cur = segs[j][1 - e]; line.append(cur.tolist())
+            loops.append(line)
+        return loops

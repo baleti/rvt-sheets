@@ -1,0 +1,147 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>rvt-sheets</title>
+<style>
+body{margin:0;font:13px sans-serif;display:flex;height:100vh;background:#e8e8e8;overflow:hidden}
+#side{width:280px;flex:none;overflow:auto;background:#fafafa;border-right:1px solid #ccc;padding:6px}
+#side h3{margin:8px 0 4px;font-size:12px;color:#555;text-transform:uppercase}
+#side div.it{padding:2px 4px;cursor:pointer;border-radius:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#side div.it:hover{background:#e0e8f4}#side div.sel{background:#c8daf4}
+#side div.it::before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:#ccc;vertical-align:1px}
+#side div.it.c::before{background:#3a9d5d}
+#side .keys{color:#777;font-size:11px;margin-top:10px;line-height:1.5}
+#stage{flex:1;overflow:hidden;position:relative;cursor:grab}
+#paper{position:absolute;left:0;top:0;transform-origin:0 0;box-shadow:0 2px 12px #0004;background:#fff}
+#card{position:absolute;left:50%;top:40%;transform:translate(-50%,-50%);background:#fff;padding:18px 24px;border-radius:6px;box-shadow:0 2px 12px #0003;min-width:360px}
+#bar{height:8px;background:#ddd;border-radius:4px;margin-top:10px}#bar div{height:8px;background:#3a7bd5;border-radius:4px;width:0}
+#status{position:absolute;right:8px;bottom:6px;color:#444;background:#fffc;padding:2px 6px;border-radius:3px}
+#badge{display:none;margin-left:6px;padding:0 5px;border-radius:3px;background:#3a9d5d;color:#fff;font-size:11px}
+#spin{display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#fffe;padding:10px 16px;border-radius:5px;box-shadow:0 1px 6px #0003}
+#index{display:none;position:absolute;inset:0;overflow:auto;background:#eee;padding:16px;box-sizing:border-box}
+#index .g{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+#index .t{background:#fff;border-radius:4px;box-shadow:0 1px 4px #0003;cursor:pointer;padding:6px;text-align:center}
+#index .t:hover{outline:2px solid #3a7bd5}
+#index .t img,#index .t .ph{width:100%;height:160px;object-fit:contain;display:block;background:#fafafa}
+#index .t .ph{line-height:160px;color:#999}
+#index .t div{margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.present #side{display:none}body.present #status{opacity:.5}
+</style></head>
+<body><div id="side"></div><div id="stage"><div id="paper"></div><div id="index"></div><div id="spin"></div>
+<div id="card"><b id="ctitle">Opening model...</b><div id="cstage"></div><div id="bar"><div></div></div></div>
+<div id="status"><span id="stext"></span><span id="badge">cached</span></div></div>
+<script>
+// model id from the hash: #<mid>[/sheet|view/<id>]   (mounted under /sheets/ in the viewer, or standalone)
+const base = location.pathname.replace(/\/$/, '');
+let [mid, kind, id] = location.hash.slice(1).split('/'); mid = mid || 'local';
+const $ = s => document.querySelector(s);
+const side = $('#side'), paper = $('#paper'), stage = $('#stage'), stext = $('#stext'), badge = $('#badge'), spin = $('#spin'), index = $('#index');
+let z = 1, tx = 20, ty = 20, D = null, items = [], cur = -1, seq = 0;
+const cached = new Set();                                       // 'sheet/12' drawings the server has on disk
+function apply(){ paper.style.transform = `translate(${tx}px,${ty}px) scale(${z})`; }
+function fit(){
+  const svg = paper.querySelector('svg'); if (!svg || !svg.viewBox.baseVal) return;
+  const m = document.body.classList.contains('present') ? 8 : 20, w = stage.clientWidth - 2 * m, h = stage.clientHeight - 2 * m, vb = svg.viewBox.baseVal;
+  const s = Math.min(w / vb.width, h / vb.height); svg.setAttribute('width', vb.width * s); svg.setAttribute('height', vb.height * s);
+  z = 1; tx = (stage.clientWidth - vb.width * s) / 2; ty = (stage.clientHeight - vb.height * s) / 2; apply();
+}
+onresize = () => fit();
+stage.onwheel = e => { e.preventDefault(); const k = Math.exp(-e.deltaY * 0.0015), r = stage.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  tx = mx - (mx - tx) * k; ty = my - (my - ty) * k; z *= k; apply(); };
+let drag = null; stage.onmousedown = e => drag = [e.clientX - tx, e.clientY - ty]; onmouseup = () => drag = null;
+onmousemove = e => { if (drag) { tx = e.clientX - drag[0]; ty = e.clientY - drag[1]; apply(); } };
+const url = (k, i) => `${base}/api/${mid}/${k}/${i}.svg` + (D ? '?v=' + D.key : '');
+function markCached(k, i){ cached.add(k + '/' + i); const el = side.querySelector(`.it[data-k=${k}][data-i="${i}"]`); if (el) el.classList.add('c'); }
+
+async function show(n){
+  if (n < 0 || n >= items.length) return;
+  const it = items[n], my = ++seq; cur = n; index.style.display = 'none';
+  history.replaceState(null, '', `#${mid}/${it.k}/${it.i}`);
+  const p1 = document.getElementById('pdf1'); if (p1) { p1.href = `${base}/api/${mid}/sheet/${it.i}.pdf`; p1.style.display = it.k == 'sheet' ? '' : 'none'; }
+  side.querySelectorAll('.it').forEach(d => d.classList.toggle('sel', d.dataset.k == it.k && d.dataset.i == it.i));
+  const sel = side.querySelector('.it.sel'); if (sel) sel.scrollIntoView({block: 'nearest'});
+  const hit = cached.has(it.k + '/' + it.i);
+  stext.textContent = it.label; badge.style.display = 'none';
+  const timer = setTimeout(() => { spin.textContent = 'drawing ' + it.label + ' (first draw of a view can take a while)'; spin.style.display = 'block'; }, hit ? 400 : 150);
+  const t = performance.now(); let txt;
+  try { const r = await fetch(url(it.k, it.i)); txt = await r.text(); if (r.headers.get('X-Rvt-Cache') || r.ok) markCached(it.k, it.i); }
+  catch (e) { txt = null; }
+  clearTimeout(timer); spin.style.display = 'none';
+  if (my != seq) return;                                         // the user moved on meanwhile
+  paper.innerHTML = txt || '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 40"><text x="5" y="20" font-size="6">could not load</text></svg>';
+  fit();
+  const ms = Math.round(performance.now() - t);
+  stext.textContent = `${it.label} (${ms} ms)`; badge.style.display = hit || ms < 300 ? 'inline' : 'none';
+  prefetch(n);
+}
+// background prefetch: the neighbouring drawings (next first), one at a time, only while the user is idle on this one
+let pf = null;
+async function prefetch(n){
+  const my = seq;
+  for (const j of [n + 1, n - 1, n + 2]) {
+    if (j < 0 || j >= items.length || my != seq) continue;
+    const it = items[j]; if (cached.has(it.k + '/' + it.i)) continue;
+    pf = new AbortController();
+    try { const r = await fetch(url(it.k, it.i) + (D ? '&' : '?') + 'prefetch=1', {signal: pf.signal}); await r.text(); if (r.ok) markCached(it.k, it.i); }
+    catch (e) { return; }
+  }
+}
+function showIndex(){
+  if (index.style.display == 'block') { index.style.display = 'none'; return; }
+  const sheets = items.filter(x => x.k == 'sheet'), list = sheets.length ? sheets : items;
+  index.innerHTML = `<div class=g>` + list.map(x => `<div class=t data-n=${items.indexOf(x)}>` + (cached.has(x.k + '/' + x.i)
+      ? `<img loading=lazy src="${base}/api/${mid}/thumb/${x.k}/${x.i}.png${D ? '?v=' + D.key : ''}">` : `<div class=ph>not drawn yet</div>`) + `<div>${x.label}</div></div>`).join('') + '</div>';
+  index.querySelectorAll('.t').forEach(t => t.onclick = () => show(+t.dataset.n));
+  index.style.display = 'block';
+}
+function present(){
+  document.body.classList.toggle('present');
+  if (document.body.classList.contains('present')) document.documentElement.requestFullscreen?.().catch(() => {});
+  else if (document.fullscreenElement) document.exitFullscreen();
+  setTimeout(fit, 120);
+}
+onkeydown = e => {
+  if (e.target.tagName == 'INPUT' || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key == 'ArrowRight' || e.key == 'PageDown' || e.key == ' ') { e.preventDefault(); show(Math.min(cur + 1, items.length - 1)); }
+  else if (e.key == 'ArrowLeft' || e.key == 'PageUp') { e.preventDefault(); show(Math.max(cur - 1, 0)); }
+  else if (e.key == 'Home') show(0); else if (e.key == 'End') show(items.length - 1);
+  else if (e.key == 'f' || e.key == '0') fit();
+  else if (e.key == 'i') showIndex();
+  else if (e.key == 'p') present();
+  else if (e.key == 'Escape') { index.style.display = 'none'; if (document.body.classList.contains('present')) present(); }
+};
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && document.body.classList.contains('present')) { document.body.classList.remove('present'); setTimeout(fit, 120); } });
+// clicking an element: tell an embedding viewer (window.parent / opener) which element it is
+paper.onclick = e => { const el = e.target.closest('[data-e]'); if (el) { const m = {type: 'rvt-sheets-select', mid, elementId: +el.dataset.e}; stext.textContent = 'element ' + m.elementId; (window.opener || window.parent).postMessage(m, '*'); } };
+const card = $('#card');
+async function waitReady(){
+  for (;;) {
+    let st; try { st = await (await fetch(`${base}/api/${mid}/status`)).json(); } catch (e) { st = {state: 'loading', stage: 'waiting for the server', percent: 0}; }
+    $('#ctitle').textContent = (st.file || 'model') + (st.state === 'error' ? ': failed' : '');
+    $('#cstage').textContent = st.state === 'error' ? st.error : `${st.stage || 'starting'} - ${st.percent}% (${st.elapsed || 0}s)`;
+    $('#bar div').style.width = (st.percent || 0) + '%';
+    if (st.state === 'ready' || st.state === 'error') return st;
+    await new Promise(r => setTimeout(r, 700));
+  }
+}
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+(async () => {
+  const st = await waitReady(); if (st.state === 'error') return;
+  card.style.display = 'none';
+  D = await (await fetch(`${base}/api/${mid}/doc.json`)).json();
+  document.title = D.file + ' - rvt-sheets';
+  items = D.sheets.map(s => ({k: 'sheet', i: s.id, label: `${s.number} - ${s.name}`, c: s.cached}))
+    .concat(D.views.map(v => ({k: 'view', i: v.id, label: `[${v.kind}] ${v.name}${v.scale ? ' 1:' + v.scale : ''}`, c: v.cached})));
+  items.forEach(x => { if (x.c) cached.add(x.k + '/' + x.i); });
+  const nc = items.filter(x => x.c).length;
+  const row = x => `<div class="it${x.c ? ' c' : ''}" data-k=${x.k} data-i=${x.i} title="${esc(x.label)}">${esc(x.label)}</div>`;
+  side.innerHTML = `<b>${esc(D.file)}</b>` + (nc ? `<div style="color:#3a9d5d;font-size:11px">${nc == items.length ? 'all' : nc + ' of ' + items.length} drawings cached</div>` : '')
+    + (D.sheets.length ? `<div class=keys>PDF: <a id=pdf1 href="#">this sheet</a> &middot; <a href="${base}/api/${mid}/sheets.pdf">all sheets</a></div>` : '')
+    + `<h3>Sheets (${D.sheets.length})</h3>` + (D.sheets.length ? items.filter(x => x.k == 'sheet').map(row).join('') : '<i>no sheets in this file</i>')
+    + `<h3>Views (${D.views.length})</h3>` + items.filter(x => x.k == 'view').map(row).join('')
+    + `<div class=keys>&larr; &rarr; previous / next &middot; f fit &middot; i sheet index &middot; p present (full screen) &middot; wheel zoom, drag pan</div>`;
+  side.querySelectorAll('.it').forEach(el => el.onclick = () => show(items.findIndex(x => x.k == el.dataset.k && x.i == el.dataset.i)));
+  let n = kind && id ? items.findIndex(x => x.k == kind && x.i == id) : -1;
+  if (n < 0 && D.sheets.length) n = 0;
+  if (n < 0) n = Math.max(0, items.findIndex(x => x.k == 'view' && /\[plan\]/.test(x.label)));
+  if (items.length) show(n); else stext.textContent = 'nothing drawable in this file';
+})();
+</script></body></html>

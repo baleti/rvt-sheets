@@ -1,0 +1,130 @@
+"""Grids (plan views, sections) and levels (sections/elevations): datum line from the datum plane (DatumPlane.m_pSurface origin, xVec
+along the line, envelope = extents along xVec / yVec), per-view extents from the view's ExtentElem, head symbols (type m_familyTagId)
+with their labels at paper size (x view scale). Output prims in view coordinates (model feet)."""
+import math
+import numpy as np
+from .reader import ob, path, INVALID
+from . import gfx
+
+
+def fmt_elev(ft, imperial):
+    if imperial:
+        sgn = '-' if ft < 0 else ''; ft = abs(ft); f = int(ft + 1e-9); inch = round((ft - f) * 12, 2)
+        if inch >= 12: f += 1; inch = 0
+        i = ('%g' % inch)
+        return '%s%d\' - %s"' % (sgn, f, i)
+    return '%d' % round(ft * 304.8)
+
+
+class Datums:
+    def __init__(self, drawer):
+        self.d = drawer; self.f = drawer.f; self.doc = drawer.doc
+
+    def extents(self, vid):
+        out = {}
+        for r in self.f.recs('ExtentElem'):
+            if self.f.eid(r['fields'].get('m_dbViewId')) != vid: continue
+            for e in r['fields'].get('m_idExtents') or []:
+                out[self.f.eid(e['first'])] = ob(path(e, 'second', 'm_oExtentData')) or {}
+        return out
+
+    def draw(self, vid, v, elems, O, Mv, scale, res, imperial=False):
+        prims = []
+        ext = self.extents(vid)
+        Z = Mv[2]
+        for eid in elems:
+            r = self.f.rec(eid, ('Grid', 'Level'))
+            if not r: continue
+            fl = r['fields']; srf = ob(fl.get('m_pSurface')) or {}
+            if not srf.get('m_origin'): continue
+            o = np.asarray(srf['m_origin'], float); x = np.asarray(srf['m_xVec'], float); y = np.asarray(srf['m_yVec'], float)
+            env = path(srf, 'm_Envelope', 'm_corners') or [[-50, -50], [50, 50]]
+            (a0, b0), (a1, b1) = env
+            n = np.cross(x, y)
+            # datum line in this view = intersection of the datum plane with the view plane: direction perpendicular to both normals
+            dline = np.cross(n, Z)
+            if np.linalg.norm(dline) < 1e-6: continue                   # datum plane parallel to the view: not shown
+            dline /= np.linalg.norm(dline)
+            # parameterise along whichever datum axis is the line direction
+            if abs(dline @ x) > abs(dline @ y): ax, lo, hi = x, a0, a1
+            else: ax, lo, hi = y, b0, b1
+            e = ext.get(eid) or {}
+            # per-view 2D extents (freeEnd/bubbleEnd) override the 3D extents when set (?)
+            if e.get('m_freeEnd3d') is not None and (e.get('m_freeEnd3d') or e.get('m_bubbleEnd3d')):
+                lo, hi = e['m_freeEnd3d'], e['m_bubbleEnd3d']
+            p0 = o + ax * lo; p1 = o + ax * hi
+            if r['class'] == 'Level' and not e and v.get('kind') == 'section':
+                # no per-view extents: Revit draws the level across the crop region plus about 1/2" of paper on each side
+                # (2020 Residential building section DXF: 67.97 ft for a 63.59 ft crop at 1:48), head at the +x end
+                from .compose import crop_rect_uv
+                cr = crop_rect_uv(v)
+                if cr:
+                    m = 0.5 / 12 * (v.get('scale') or 100)
+                    d2 = ((p1 - p0) @ Mv.T)[:2]; L = np.linalg.norm(d2)
+                    if L > 1e-9 and abs(d2[1]) < 1e-6 * L:
+                        u0 = ((p0 - O) @ Mv.T)[0]; k = (p1 - p0) / ((p1 - O) @ Mv.T - (p0 - O) @ Mv.T)[0]
+                        p0, p1 = p0 + k * (cr[0] - m - u0), p0 + k * (cr[2] + m - u0)
+            if r['class'] == 'Level':
+                # level line: horizontal in the view at the level elevation; endpoints projected
+                pass
+            uv0 = ((p0 - O) @ Mv.T)[:2]; uv1 = ((p1 - O) @ Mv.T)[:2]
+            cid = self.d.vis.info.info.get(eid, {}).get('cat', -2000220)
+            st = res.line(None, cid, 'proj', eid, annotation=True)
+            t = self.f.rec(self.f.eid(fl.get('m_attrId'))) or {'fields': {}}
+            tf = t['fields']
+            cseg = self.f.eid(tf.get('m_categoryForCenterSegment'))
+            if cseg not in (None, INVALID):
+                st2 = res.line(None, cseg, 'proj', eid, annotation=True)
+                st = dict(st, dash=st2.get('dash'))
+            prims.append({'t': 'line', 'pts': [uv0.tolist(), uv1.tolist()], 'style': st, 'elem': eid, 'layer': 'datum'})
+            # heads
+            name = fl.get('m_text') or ''
+            vals = {'Name': name, 'Elevation': fmt_elev(float(o[2]), imperial)}
+            ends = []
+            # bubble at end 1 (envelope low end, verified against Revit's S101 export); per-view ExtentElem m_endBubbleOverrides bit 0 adds end 2
+            if r['class'] == 'Grid' and v.get('kind') == 'section' and uv0[1] < uv1[1]:
+                uv0, uv1 = uv1, uv0                                  # grids in sections/elevations: the head is at the top end
+            elif r['class'] == 'Grid' and not e and v.get('kind') == 'plan':
+                # no per-view extent: default bubble at the north end of N-S lines and the west end of E-W lines (Revit's export of the
+                # writer's GA/GB grids and Commercial grid 2 / lettered grids; with extents the stored ends decide, as before)
+                dv = uv1 - uv0
+                if abs(dv[1]) >= abs(dv[0]):
+                    if uv0[1] < uv1[1]: uv0, uv1 = uv1, uv0
+                elif uv0[0] > uv1[0]: uv0, uv1 = uv1, uv0
+            ends = [(uv0, uv0 - uv1)]
+            if (e.get('m_endBubbleOverrides') or 0) & 1: ends.append((uv1, uv1 - uv0))
+            if r['class'] == 'Level': ends = [(uv1, uv1 - uv0)]
+            sym = self.f.eid(tf.get('m_familyTagId'))
+            gb = (self.f.g.res.get(sym) or {}).get('bbox') if sym not in (None, INVALID) else None
+            rad = float(gb[1][1]) if gb else 0.0                 # grid head symbol: circle centred on its origin, radius = bbox max y
+            for pt, d in ends:
+                if sym in (None, INVALID): continue
+                d = d / (np.linalg.norm(d) or 1)
+                if r['class'] == 'Grid': pt = pt + d * rad * scale         # the line ends on the bubble's edge (Revit S101 export)
+                # head family: +x along the outward line direction for levels, +y outward for grids (?)
+                if r['class'] == 'Grid': R = np.array([[d[1], d[0], 0], [-d[0], d[1], 0], [0, 0, 1]]).T * 0 + np.array([[-d[1], d[0], 0], [d[0], d[1], 0], [0, 0, 1]]).T
+                else: R = np.array([[d[0], -d[1], 0], [d[1], d[0], 0], [0, 0, 1]])
+                prims += self.head(sym, R * scale, np.array([pt[0], pt[1], 0.0]), vals, eid, res, scale)
+        return prims
+
+    def head(self, sid, R, o, vals, eid, res, scale):
+        out = []
+        g = self.f.graphics(sid)
+        if g and g.get('class') == 'GElement':
+            col = gfx.Collector(self.f)
+            for p in col.collect(g):
+                if p['t'] == 'line':
+                    pts = gfx.transform_pts(p['pts'], R, o)
+                    out.append({'t': 'line', 'pts': [q[:2] for q in pts], 'style': res.line(p.get('gs'), None, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'datum'})
+        sym = self.d.dec.titleblock_symbol(sid)
+        from .sheet import SheetComposer
+        for lab in (sym or {}).get('labels', []):
+            txt = ' '.join(str(vals.get(prm.get('name'), prm.get('sample') or '')) for prm in lab.get('params') or [])
+            tt = self.doc['text_types'].get(lab['type']) or {}
+            font = self.doc['fonts'].get(tt.get('font')) or {}
+            org = gfx.transform_pts([lab['origin']], R, o)[0]
+            xd = (np.asarray(R, float) @ np.asarray(lab['base'], float))[:2]
+            out.append({'t': 'text', 'text': txt, 'origin': org[:2], 'x': [1.0, 0.0], 'size': (font.get('size') or 0.0078) * scale,
+                        'font': font.get('name') or 'Arial', 'halign': SheetComposer._halign(lab['flags'] or 0), 'valign': SheetComposer._valign(lab['flags'] or 0), 'anchor': True,
+                        'elem': eid, 'layer': 'text'})
+        return out
