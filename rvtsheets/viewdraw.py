@@ -221,11 +221,20 @@ class ViewDrawer:
         rcp_under = self.underlay_range(v, O, Z) if is_rcp else None
         elems = self.vis.elements(vid)
         prims = []; solids = []      # per element: (eid, cat, tris_uvw, gs)
+        occ_owner = []; carve_boxes = {}
         topo = []                    # topography surfaces (meshes, no solids): poche in sections
         occluders = []               # bodies that only hide (internal graphics styles), view coordinates
         datum_ids = []
+        stair_skip = set()
+        if v['kind'] == 'plan' and not is_rcp:
+            for eid in elems:
+                if self.vis.info.info[eid]['cls'] != 'StairsElement': continue
+                try: sy = self.stairs_symbol(eid, v, O, Mv, scale, res)
+                except Exception: sy = None; self.stats['stair_symbol_error'] += 1
+                if sy is not None: prims += sy[0]; stair_skip |= sy[1]; self.stats['stair_symbols'] += 1
         for k, eid in enumerate(elems):
             if max_elems and k >= max_elems: break
+            if eid in stair_skip: continue
             info = self.vis.info.info[eid]
             if info['cls'] in skip_classes or info['cat'] in skip_cats: continue
             if ev.get('filters') and info['cls'] in ANNO_FILTER_CLASSES and info['cat'] != INVALID:
@@ -404,7 +413,7 @@ class ViewDrawer:
                     self.stats['hidden_internal_solids'] += 1
                     if cid in OCCLUDER_CATS:
                         T = self._tess(s)
-                        if T is not None and len(T[0]): occluders.append((T[0] - O) @ Mv.T)
+                        if T is not None and len(T[0]): occluders.append((T[0] - O) @ Mv.T); occ_owner.append(eid)
                     continue
                 T = self._tess(s)
                 if T is None or not len(T[0]): continue
@@ -439,6 +448,13 @@ class ViewDrawer:
                 else: rest.append(sol)
             solids = rest
             if under: prims += self.underlay(under, uw, px_mm, scale, res)
+        if v['kind'] == 'section' and elems:
+            try:
+                carve_boxes = self._opening_boxes(elems, O, Mv)
+                if carve_boxes:
+                    occluders = [self._carve_tris(T_, carve_boxes[o_]) if o_ in carve_boxes else T_ for T_, o_ in zip(occluders, occ_owner)]
+                    self.stats['carved_hosts'] += len(carve_boxes)
+            except Exception: self.stats['carve_error'] += 1
         for eid, cid, uvw, fid, gs, ov in solids:
             T = uvw
             idx = np.arange(len(T))
@@ -467,7 +483,7 @@ class ViewDrawer:
         db = DepthBuffer(bx[0], bx[1], bx[2], bx[3], px)
         for c in clipped:
             if c[1] == -2003500 and v['kind'] == 'section': continue        # stacked-wall parents duplicate their child walls (and cover curtain-wall storefronts): not occluders (Commercial east/south elevation DXF R 0.66/0.69 -> 0.80/0.85)
-            db.add(c[2])
+            db.add(self._carve_tris(c[2], carve_boxes[c[0]]) if c[0] in carve_boxes else c[2])
         for T in occluders:
             if cut_w is not None: T = _clip_tris_halfspace(T, np.array([0, 0, 1.0]), cut_w)
             if wf is not None and wf > -1e8: T = _clip_tris_halfspace(T, np.array([0, 0, -1.0]), -wf)
@@ -491,6 +507,25 @@ class ViewDrawer:
                 if closed2:                     # open fragments next to closed loops come from faces touching the plane: drop them
                     loops2 = closed2
                     segs = [(np.array(a), np.array(b)) for l in loops2 for a, b in zip(l, l[1:])]
+                if closed2 and cid == -2000011 and eid in carve_boxes and cut_w is not None:
+                    # hosted door / window openings are missing in the saved wall solid: take their box out of the cut region where the section plane crosses it
+                    try:
+                        from shapely.geometry import box as sbox
+                        from shapely.ops import unary_union
+                        rects = [sbox(lo[0], lo[1], hi[0], hi[1]) for lo, hi in carve_boxes[eid] if lo[2] - 1e-6 <= cut_w <= hi[2] + 1e-6]
+                        reg0 = patterns.region(closed2) if rects else None
+                        if reg0 is not None:
+                            reg1 = reg0.difference(unary_union(rects))
+                            if not reg1.equals(reg0):
+                                nl = []
+                                for pg in getattr(reg1, 'geoms', [reg1]):
+                                    if pg.geom_type != 'Polygon' or pg.area < 1e-9: continue
+                                    nl.append([list(q) for q in pg.exterior.coords]); nl += [[list(q) for q in r_.coords] for r_ in pg.interiors]
+                                if nl:
+                                    closed2 = loops2 = nl
+                                    segs = [(np.array(a), np.array(b)) for l in loops2 for a, b in zip(l, l[1:])]
+                                    self.stats['cut_openings'] += 1
+                    except Exception: self.stats['carve_error'] += 1
                 caps.append(loops2)
                 prim = {'t': 'cut', 'loops': loops2, 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in segs], 'style': st, 'elem': eid, 'cat': cid, 'layer': 'cut'}
                 fill = self.cut_fill(eid, cid, gs, ov, ev.get('detail_level') or 2)
@@ -774,6 +809,81 @@ class ViewDrawer:
                 p['anchor'] = (np.asarray([q[0], q[1], 0.0], float) @ Mi.T + O).tolist()
         return prims
 
+    ZIGZAG = [(-0.0427, -0.0203), (-0.025, 0.0526), (0.025, -0.0536), (0.0427, 0.0193)]      # cut mark zigzag, paper inches about the diagonal's centre
+    CUT_MARK_SLOPE = 0.4675                                                                  # 25 degrees (Residential and Commercial DXF)
+
+    def stairs_symbol(self, eid, v, O, Mv, scale, res):
+        """plan symbol of a straight single-run stair as Revit draws it (read off the DXF of 2020 Residential / Commercial): riser line + nosing line
+        (1 in beyond) per boundary, stringer lines with end caps, and, when the cut plane crosses the stair, the cut mark (25 degree diagonal across
+        the run with a zigzag at its centre) at boundary floor((cut - base - eps) / riser) - 1; boundaries before it are drawn as stairs below the
+        cut (nosing lines dashed 'Overhead'), after it as stairs above (solid). A stair wholly below the cut inside the view range: all 'below'.
+        Returns (prims, element ids replaced) or None when not handled (underlay stairs, several runs, landings)."""
+        f = self.f; st = f.rec(eid, 'StairsElement'); sf = st['fields']
+        runs = [f.eid(x) for c in (sf.get('m_cellList') or {}).get('obj', {}).get('m_cells', []) for x in (c.get('obj') or {}).get('m_runAndLandings') or []]
+        sups = [f.eid(x) for c in (sf.get('m_cellList') or {}).get('obj', {}).get('m_cells', []) for x in (c.get('obj') or {}).get('m_supports') or []]
+        if len(runs) != 1 or not f.rec(runs[0], 'StairsRun'): return None
+        rf = f.rec(runs[0])['fields']
+        s0 = np.asarray(ob(rf['m_oStartRiser'])['m_origin'], float); s1 = np.asarray(ob(rf['m_oEndRiser'])['m_origin'], float)
+        nrs = int(sf.get('m_actualNumberOfRisers') or 0); rh = float(sf.get('m_actualRiserHeight') or 0.0)
+        zb = float(rf.get('m_bottomElevation') or 0.0); zt = zb + float(sf.get('m_stairsHeight') or 0.0)
+        L = float(np.linalg.norm((s1 - s0)[:2]))
+        rg = v.get('range') or {}
+        cut = rg.get('cut'); depth = rg.get('depth')
+        if nrs < 2 or L < 1e-6 or not rh or cut is None or depth is None: return None
+        if zb < cut < zt: kb = max(math.floor((cut - zb - 1e-6) / rh) - 1, 0)
+        elif zt <= cut and zb >= depth - 1e-6: kb = None
+        else: return None
+        half = float(rf.get('m_actualRunWidth') or 0.0) / 2
+        if half <= 0: return None
+        sw = float(rf.get('m_leftStringerWidth') or 2 / 12)
+        tread = L / (nrs - 1)
+        P = lambda p: ((np.asarray(p, float) - O) @ Mv.T)[:2]
+        a, b = P(s0), P(s1); d = (b - a) / np.linalg.norm(b - a)
+        if abs(d[0]) > 1e-3: return None                      # runs along the view's x: cut mark orientation not read off yet
+        sg = 1.0 if d[1] > 0 else -1.0
+        cx = a[0]; xl, xr = cx - half, cx + half; xol, xor_ = cx - half - sw, cx + half + sw
+        cat = -2000921
+        st_solid = res.line(None, cat, 'proj', eid, annotation=False)
+        st_dash = res.line(None, cat, 'proj', eid, annotation=False, ov={'proj_pattern': self._overhead_pattern()})
+        nos = 1 / 12.0; K = self.CUT_MARK_SLOPE
+        cy = a[1] + sg * kb * tread if kb is not None else None
+        out = []
+        def seg(p0, p1, style, part='tread'):
+            if np.linalg.norm(np.asarray(p1) - np.asarray(p0)) > 1e-6:
+                out.append({'t': 'line', 'pts': [np.asarray(p0, float).tolist(), np.asarray(p1, float).tolist()], 'style': style, 'elem': eid, 'layer': 'symbolic', 'part': part})
+        def is_above(x, y): return (y - (cy + (x - cx) * K)) * sg > 0          # beyond the cut mark, toward the top of the stair
+        def across(y, below_style):
+            if kb is None: seg((xl, y), (xr, y), below_style); return
+            ya, yb = is_above(xl, y), is_above(xr, y)
+            if ya and yb: seg((xl, y), (xr, y), st_solid); return
+            if not ya and not yb: seg((xl, y), (xr, y), below_style); return
+            xs = cx + (y - cy) / K; gx = 0.0427 * scale / 12.0
+            near = abs(y - cy) < 0.0536 * scale / 12.0
+            lo, hi = (xs - gx, xs + gx) if near else (xs, xs)
+            seg((xl, y), (lo, y), st_solid if ya else below_style); seg((hi, y), (xr, y), below_style if ya else st_solid)
+        for i in range(nrs):
+            y = a[1] + sg * i * tread
+            across(y, st_solid)
+            if i < nrs - 1: across(y + sg * nos, st_dash if (kb is None or i < kb) else st_solid)
+        for x in (xl, xr, xol, xor_):                          # stringer lines: below the cut mark one style, above another (both solid here)
+            if kb is None: seg((x, a[1]), (x, b[1]), st_solid, 'stringer')
+            else:
+                yd = min(max(cy + (x - cx) * K, min(a[1], b[1])), max(a[1], b[1]))
+                seg((x, a[1]), (x, yd), st_solid, 'stringer'); seg((x, yd), (x, b[1]), st_solid, 'stringer')
+        for y in (a[1], b[1]):
+            seg((xl, y), (xol, y), st_solid, 'stringer'); seg((xr, y), (xor_, y), st_solid, 'stringer')
+        if kb is not None:                                     # cut mark: diagonal with a zigzag at its centre
+            zig = [(cx + zx * scale / 12.0, cy + zy * scale / 12.0) for zx, zy in self.ZIGZAG]
+            seg((xol, cy + (xol - cx) * K), zig[0], st_solid, 'cutmark')
+            for k in range(3): seg(zig[k], zig[k + 1], st_solid, 'cutmark')
+            seg(zig[3], (xor_, cy + (xor_ - cx) * K), st_solid, 'cutmark')
+        return out, set(runs) | set(sups) | {eid}
+
+    def _overhead_pattern(self):
+        for k, lp in self.doc['line_patterns'].items():
+            if str(lp.get('name')) in ('Overhead 1/16"', 'Overhead'): return k
+        return None
+
     def stairs_path(self, eid, v, O, Mv, scale, res, cat):
         """stair path (StairsPathElement): line along the run centre with an open 90 degree arrow (type's arrowhead) and UP / DN text.
         Rules read off Revit's DXF (Residential + Commercial, 7 views): the path stops m_distanceToCutMark (1/8" paper) before the break line;
@@ -973,6 +1083,49 @@ class ViewDrawer:
                 out[key] = ([col & 255, (col >> 8) & 255, (col >> 16) & 255], self.f.eid(it.get('m_fillPatternId')))
             return {'param': pid, 'entries': out}
         return None
+
+    def _opening_boxes(self, elems, O, Mv):
+        """{host wall id: [(lo, hi) boxes in view coordinates]} of the doors / windows hosted by each wall (m_hostId)"""
+        boxes = {}
+        for e in elems:
+            inf = self.vis.info.info.get(e) or {}
+            if inf.get('cls') != 'FamilyInstance' or inf.get('cat') not in (-2000023, -2000014): continue
+            r = self.f.rec(e)
+            hid = self.f.eid(r['fields'].get('m_hostId')) if r else None
+            bb = self.vis.info.bbox(e)
+            if hid in (None, INVALID) or bb is None: continue
+            lo, hi = np.asarray(bb[0], float), np.asarray(bb[1], float)
+            C = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+            Q = (C - O) @ Mv.T
+            boxes.setdefault(hid, []).append((Q.min(0), Q.max(0)))
+        return boxes
+
+    def _carve_tris(self, T, bxs):
+        """door / window openings are not part of the saved wall solids: cut the projected box of every hosted opening out of the wall's view-facing
+        (constant depth) triangles whose depth lies inside the box, so sections and elevations see through the opening"""
+        from shapely.geometry import Polygon, box as sbox
+        import mapbox_earcut as earcut
+        out = []; keep = np.ones(len(T), bool)
+        for lo, hi in bxs:
+            tmin = T[:, :, :2].min(1); tmax = T[:, :, :2].max(1); wm = T[:, :, 2].mean(1)
+            cand = np.where(keep & (tmax[:, 0] > lo[0]) & (tmin[:, 0] < hi[0]) & (tmax[:, 1] > lo[1]) & (tmin[:, 1] < hi[1]) & (wm > lo[2] - 0.08) & (wm < hi[2] + 0.08))[0]
+            rect = sbox(lo[0], lo[1], hi[0], hi[1])
+            for i in cand:
+                t = T[i]
+                if np.ptp(t[:, 2]) > 0.02: continue
+                pg = Polygon(t[:, :2])
+                if pg.area < 1e-9: continue
+                d = pg.difference(rect)
+                if d.equals(pg): continue
+                keep[i] = False
+                for g in getattr(d, 'geoms', [d]):
+                    if g.geom_type != 'Polygon' or g.area < 1e-9: continue
+                    rings = [list(g.exterior.coords)[:-1]] + [list(q.coords)[:-1] for q in g.interiors]
+                    verts = np.array([q for r_ in rings for q in r_], float); ends = np.cumsum([len(r_) for r_ in rings]).astype(np.uint32)
+                    idx = earcut.triangulate_float64(verts, ends).reshape(-1, 3)
+                    tt = np.zeros((len(idx), 3, 3)); tt[:, :, :2] = verts[idx]; tt[:, :, 2] = float(t[:, 2].mean())
+                    out.append(tt)
+        return np.concatenate([T[keep]] + out) if out else T[keep]
 
     def rebar_bars(self, eid, curves):
         """every bar of a Rebar set / area-path reinforcement bar set as its centre-line polylines (reader: rvt_rebar.rebar_centerlines; the saved graphics of

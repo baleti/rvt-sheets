@@ -640,7 +640,8 @@ def callout(drawer, eid, O, Mv, scale, res, vid):
     rad = float(af.get('m_cornerRadius') or 0) * scale
     if rad > 0 and rad * 2 < min(np.ptp(C2[:, 0]), np.ptp(C2[:, 1])):
         poly = poly.buffer(-rad, join_style=2).buffer(rad, resolution=8)
-    out.append({'t': 'line', 'pts': [list(q) for q in poly.exterior.coords], 'style': st, 'elem': eid, 'layer': 'annotation'})
+    stb = res.line(None, -2000539, 'proj', eid, annotation=True)          # 'Callout Boundary' subcategory: pen 8, Dash 1/8" (Revit DXF: linetype 'Dash 1_8_', lineweight 1.4 mm)
+    out.append({'t': 'line', 'pts': [list(q) for q in poly.exterior.coords], 'style': stb, 'elem': eid, 'layer': 'annotation'})
     vd = next((x['second'] for x in fl.get('m_viewDataMapForCallout') or [] if f.eid(x.get('first')) == vid), None)
     sid = f.eid(af.get('m_familyTagId'))
     if not vd or vd.get('m_headPoint') is None or sid in (None, INVALID): return out

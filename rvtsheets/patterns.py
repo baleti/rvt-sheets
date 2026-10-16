@@ -4,6 +4,7 @@ segments (dash/space lengths along the line, empty = continuous). Drafting patte
 model patterns (target 1) in model feet. Region coordinates are view u,v in model feet; paper size = model * (1/scale)."""
 import math
 import numpy as np
+import shapely
 from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString
 from shapely.ops import unary_union
 
@@ -62,26 +63,30 @@ def hatch(geom, pattern, scale, view_rot=0.0):
         n = int(R / off) + 2
         if 2 * n > MAX_LINES: n = MAX_LINES // 2
         segs = [s * k for s in g.get('segments') or []]
-        lines = []
-        for j in range(int(jc) - n, int(jc) + n + 1):
-            base = o + j * (off * nrm + shift * d)
-            tc = float((np.array([cx, cy]) - base) @ d)
-            p0 = base + (tc - R) * d; p1 = base + (tc + R) * d
-            if not segs:
-                lines.append(LineString([tuple(p0), tuple(p1)]))
-            else:
-                per = sum(abs(s) for s in segs)
-                if per <= 1e-12: continue
+        ends = []                                                    # (p0, p1) pairs, built into LineStrings in one vectorised call below
+        js = np.arange(int(jc) - n, int(jc) + n + 1)
+        if not segs:
+            bases = o[None, :] + js[:, None] * (off * nrm + shift * d)[None, :]
+            tcs = (np.array([cx, cy])[None, :] - bases) @ d
+            p0 = bases + (tcs - R)[:, None] * d[None, :]; p1 = bases + (tcs + R)[:, None] * d[None, :]
+            lines_arr = np.stack([p0, p1], 1)
+        else:
+            per = sum(abs(s_) for s_ in segs)
+            if per <= 1e-12: continue
+            for j in js:
+                base = o + j * (off * nrm + shift * d)
+                tc = float((np.array([cx, cy]) - base) @ d)
                 t = math.floor((tc - R) / per) * per
                 while t < tc + R:
-                    for i, s in enumerate(segs):
-                        L = abs(s)
+                    for i, s_ in enumerate(segs):
+                        L = abs(s_)
                         if i % 2 == 0:                                  # dash (a zero-length dash is a dot)
-                            q0 = base + t * d; q1 = base + (t + max(L, 1e-4 * k)) * d
-                            lines.append(LineString([tuple(q0), tuple(q1)]))
+                            ends.append((base + t * d, base + (t + max(L, 1e-4 * k)) * d))
                         t += L
-        if not lines: continue
-        cl = geom.intersection(MultiLineString(lines))
+            lines_arr = np.asarray(ends, float).reshape(-1, 2, 2)
+        if not len(lines_arr): continue
+        lines = shapely.linestrings(lines_arr)
+        cl = geom.intersection(shapely.multilinestrings(lines))
         for ls in getattr(cl, 'geoms', [cl]):
             if ls.is_empty or ls.geom_type != 'LineString': continue
             c = list(ls.coords)

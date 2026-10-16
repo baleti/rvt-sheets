@@ -67,7 +67,7 @@ class SVG:
             bw = (p.get('box') or [0, 0])[0] * FT_MM
             dx = {0: 0, 1: bw / 2, 2: bw}.get(p.get('halign') or 0, 0) if bw else 0
             first = size_mm
-            if bw > 1.0 and not p.get('nowrap'):
+            if bw > 1.0 and not p.get('nowrap') and p['text'].count(' ') >= 3:      # short labels ('Drawn By') overflow in a fallback font like Revit's does not wrap them
                 # rich text in a layout box (title block labels): lines wrap at the box width like Revit's text
                 from .viewdraw import wrap_text
                 lines = wrap_text('\n'.join(lines), bw, size_mm, p.get('font') or 'Arial', bool(p.get('bold'))).split('\n')

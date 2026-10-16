@@ -63,7 +63,7 @@ class Visibility:
         # view discipline (Revit per-view element lists, 2020 Residential/Commercial/rst_basic, 2024 Snowdon Structural, 2026 writer test file):
         # Coordination plans list no section/elevation markers, Structural plans no elevation markers, Architectural plans show them
         disc = v.get('discipline')
-        if disc == 4095: return False
+        if disc == 4095 and e['cls'] in ('InteriorElev', 'InteriorElevArrow'): return False      # coordination plans list no elevation markers; sections do show (2026 rosette 'VR plan') when no filter hides them
         if disc == 2 and e['cls'] in ('InteriorElev', 'InteriorElevArrow'): return False
         if e['cls'] == 'InteriorElev':
             arrows = self._arrows().get(eid, [])

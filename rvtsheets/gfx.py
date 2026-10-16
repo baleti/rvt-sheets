@@ -67,6 +67,23 @@ def arc_pts(c, r, x, y, t0, t1, rx=None):
     return [(c + rx * math.cos(t) * x + ry * math.sin(t) * y).tolist() for t in np.linspace(t0, t1, n)]
 
 
+_IDX = [False, None]
+
+
+def _index_fn():
+    """Rust handle indexer (rvt_fast.index_handles: same dict, same node objects, 3.5x), None when unavailable"""
+    if not _IDX[0]:
+        _IDX[0] = True
+        try:
+            import os, sys
+            p = os.path.expanduser('~/src/rvt-core/python')
+            if os.path.isdir(p) and p not in sys.path: sys.path.append(p)
+            import rvt_fast
+            _IDX[1] = rvt_fast.index_handles
+        except Exception: _IDX[1] = None
+    return _IDX[1]
+
+
 class Collector:
     def __init__(self, f, cond_ok=None):
         self.f = f; self.prims = []; self.unknown = {}
@@ -80,11 +97,18 @@ class Collector:
         return self.prims
 
     def _index(self, x):
+        fn = _index_fn()
+        if fn is not None:
+            try: self.handles.update(fn(x)); return
+            except Exception: pass
+        self._index_py(x)
+
+    def _index_py(self, x):
         if isinstance(x, dict):
             if 'handle' in x and 'obj' in x and isinstance(x.get('handle'), int) and x['handle'] != 0xFFFFFFFF: self.handles[x['handle']] = x
-            for v in x.values(): self._index(v)
+            for v in x.values(): self._index_py(v)
         elif isinstance(x, list):
-            for v in x: self._index(v)
+            for v in x: self._index_py(v)
 
     def deref(self, x):
         if isinstance(x, dict) and set(x) == {'ref'}: return self.handles.get(x['ref'])

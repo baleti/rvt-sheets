@@ -164,6 +164,21 @@ class Datums:
             ends = [(uv0, uv0 - uv1)]
             if (e.get('m_endBubbleOverrides') or 0) & 1: ends.append((uv1, uv1 - uv0))
             if r['class'] == 'Level': ends = [(uv1, uv1 - uv0)]
+            # head leader (ExtentElem.m_pLeader at the bubble end, m_pFreeEndLeader at the free end): the datum line runs end -> elbow -> anchor and the head sits at the anchor
+            # (2026 rosetta level 'B.O. Footing': jog before the head)
+            for key, bub in (('m_pLeader', True), ('m_pFreeEndLeader', False)):
+                ld = ob(e.get(key)) if e.get(key) else None
+                if not ld or not ld.get('m_anchor') or not ld.get('m_elbow') or not ld.get('m_end'): continue
+                if v.get('kind') not in ('section', 'plan'): continue
+                ptw = [np.asarray(ld[k_], float) for k_ in ('m_end', 'm_elbow', 'm_anchor')]
+                q = [((p_ - O) @ Mv.T)[:2] for p_ in ptw]
+                end_pt = uv1 if (r['class'] == 'Level' or not bub) else uv0
+                if not bub: end_pt = uv0 if r['class'] == 'Level' else uv1
+                if np.linalg.norm(np.asarray([q[2][0], end_pt[1]]) - end_pt) > 0.05 * max(np.linalg.norm(uv1 - uv0), 1.0) or abs(q[2][0] - end_pt[0]) > 0.05 * max(np.linalg.norm(uv1 - uv0), 1.0): continue        # the anchor is where the bubble end was: leader belongs to the other end / is stale otherwise
+                prims[-1]['pts'] = [(uv0 if end_pt is uv1 else uv1).tolist(), q[0].tolist(), q[1].tolist(), q[2].tolist()]
+                if bub:
+                    dd = q[2] - q[1]
+                    ends = [(q[2], dd)] + ([(uv1, uv1 - uv0)] if (e.get('m_endBubbleOverrides') or 0) & 1 and r['class'] != 'Level' else [])
             sym = self.f.eid(tf.get('m_familyTagId'))
             gb = (self.f.g.res.get(sym) or {}).get('bbox') if sym not in (None, INVALID) else None
             rad = float(gb[1][1]) if gb else 0.0                 # grid head symbol: circle centred on its origin, radius = bbox max y

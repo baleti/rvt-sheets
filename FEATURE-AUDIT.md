@@ -21,7 +21,9 @@ Evidence: tools/check_elements.py (element sets vs FilteredElementCollector), to
 | worksets | partial | visibility not modelled (all worksets shown) |
 | design options | partial | primary option only |
 | grids | done | 2D/3D extents along -axis (Snowdon, Commercial), bubble end, annotation-crop clip, heads at paper size; multi-segment grids missing |
-| levels | partial | extents/heads in sections done; plan hidden; datum head symbol quadrant fill missing |
+| levels | partial | extents/heads in sections done; plan hidden; head symbol with cross + NW/SE black quadrants (2020 families) |
+| colour scheme legends | done | alphabetical entries, wrap, title; 'Calculating...' placeholder row not reproduced |
+| property lines, stairs path text | done | property lines inside the primary view range; UP/DN at start/end riser |
 | tags (independent, room, space, area) | partial | symbol graphics + labels + rotation (orientation 1/2); label-visibility rules (family label parameters), leaders missing; 'Structural Framing Tag' frame suppressed (Revit shows bare text) |
 | dimensions | partial | linear done (ticks, witness, text, units 2022+); angular/radial/arc missing; alternate units missing; dimension hide rule unknown |
 | spot elevations / slopes | partial | values verified by reading Revit's sheet (5'-0", 7'-7"); Revit draws the text without target/leader here: placement rule unknown |
@@ -29,7 +31,7 @@ Evidence: tools/check_elements.py (element sets vs FilteredElementCollector), to
 | section / callout / elevation markers | done (plans), partial (sections) | filters + discipline + range + scale + crop rules |
 | detail components, filled regions, masking regions, repeating details | done | |
 | surface patterns (projection) | missing | cut patterns done |
-| reinforcement (area/path/wall, bar by bar) | missing | gt_rebar exists for rst files |
+| reinforcement (rebar sets, area/path reinforcement bar by bar) | done (release 4) | bars from rvt_rebar.rebar_centerlines; rst_basic S-RBAR recall 1.0 in sections/plans; wall reinforcement in sections not checked; fabric sheets missing |
 | graphical column schedules | missing | |
 | revision clouds, revision schedules | missing | no corpus samples |
 | schedules / legends | partial | values + groups; legends components partial |
