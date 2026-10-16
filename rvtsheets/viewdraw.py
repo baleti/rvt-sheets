@@ -11,7 +11,7 @@ from .scene import Walker, ViewCtx
 from .hlr import DepthBuffer
 from .style import Resolver
 from .visibility import Visibility
-from . import patterns
+from . import patterns, gfx
 from .visibility import CAT_TYPES, PHASE_IDX
 from . import gfx
 
@@ -398,6 +398,7 @@ class ViewDrawer:
                 try: curves_ = self.rebar_bars(eid, curves_) or curves_
                 except Exception: self.stats['rebar_error'] += 1
             for c in curves_:
+                if 'pts' not in c: continue                  # image placements etc. (drawn by the sheet / title block code)
                 if not self.drawable_gs(c.get('gs')): continue
                 if self._gs_hidden(ev, c.get('gs')): self.stats['hidden_subcategory_lines'] += 1; continue
                 if v['kind'] == 'plan' and self._elevation_swing(c.get('gs')): self.stats['elevation_swing_skipped'] += 1; continue      # door/window 'Elevation Swing' lines show only in elevations/sections (Residential plan 32: Revit DXF has none)
@@ -660,6 +661,7 @@ class ViewDrawer:
             vis = [(a, b) for a, b in db.visible_parts(E, max(eps_s, p.pop('_eps', 0.0))) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
             if vis: out.append(dict(p, t='segs', segs=[[a[:2].tolist(), b[:2].tolist()] for a, b in vis], pts=None))
         prims = out
+        for k_, v_ in gfx.UNKNOWN_CLASSES.items(): self.stats['unknown_gnode ' + k_] = v_
         self.stats['seconds'] = round(time.time() - t0, 1)
         return {'prims': self._finish(prims, O, Mv), 'stats': dict(self.stats), 'conds_unknown': {str(k): v for k, v in W.unknown_conds.items()}}
 

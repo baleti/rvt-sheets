@@ -26,7 +26,7 @@ try:
             else:
                 dr_ = vd.draw(i); s = view_svg(dr_, doc['views'][i].get('scale') or 100)
                 for kk, vv in (dr_.get('stats') or {}).items():
-                    if 'error' in kk and vv: errs[kk] = errs.get(kk, 0) + vv      # internal swallowed errors per stat key
+                    if ('error' in kk or kk.startswith('unknown')) and vv: errs[kk] = errs.get(kk, 0) + vv      # internal swallowed errors per stat key
             ok += 1
         except Exception as ex:
             fails.append('%s %s: %s: %s' % (k, i, type(ex).__name__, str(ex)[:120]))

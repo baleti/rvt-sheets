@@ -103,7 +103,8 @@ class File:
     def g(self):
         if self._g is None:
             try:
-                import rvt_fast
+                import os, rvt_fast
+                os.environ.setdefault('RVT_FAST_REC_MEMO', '1')       # decoded symbol records kept per Doc (read-only contract; Structural render 98.6 -> 78.8 s)
                 self._g = rvt_fast.Doc(self.fn)             # subclass of the reference Doc, records from Rust buffers
             except Exception:
                 import rvt_elemmesh

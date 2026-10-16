@@ -122,6 +122,21 @@ class Visibility:
         den = float(B[0] @ Z)
         if abs(den) < 1e-6: return None
         t = float((O - o) @ Z) / den
+        fc = [np.asarray(q, float) for q in (fl.get('m_frontCut') or [])]
+        if len(fc) > 2:
+            # jogged section: the marker sits on the straight piece (parallel to the section's right axis) nearest to where the view plane meets it
+            # (Residential 'Building Section' seen from the east: Revit puts the A-2 head on the last piece, 12 ft from the first)
+            best = None
+            for a, b in zip(fc[:-1], fc[1:]):
+                dv = b - a
+                if np.linalg.norm(dv) < 1e-6 or abs(float(dv @ B[0])) < 0.98 * np.linalg.norm(dv): continue
+                base = o + B[2] * float((a - o) @ B[2])
+                tb = float((O - base) @ Z) / den
+                lo, hi = sorted((float((a - o) @ B[0]), float((b - o) @ B[0])))
+                tt = float(tb)
+                dist = max(lo - tt, tt - hi, 0.0)
+                if best is None or dist < best[0] - 1e-9: best = (dist, base, tb)
+            if best is not None: o, t = best[1], best[2]
         return [o + B[0] * t + B[1] * max(bo[1]), o + B[0] * t + B[1] * min(bo[1])], t, bo
 
     def marker_in_section(self, eid, v):

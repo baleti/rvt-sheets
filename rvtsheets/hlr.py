@@ -1,5 +1,6 @@
 """Hidden-line removal by depth buffer (numba). View coordinates: u, v on paper (feet of model), w = depth towards the viewer
 (larger w = nearer the eye). A segment sample is visible when no triangle in front of it covers its pixel."""
+import os
 import numpy as np
 try:
     from numba import njit
@@ -70,7 +71,13 @@ class DepthBuffer:
         self.zb = np.full((self.H, self.W), -1e30)
 
     def add(self, tris):
-        if len(tris): _raster(np.ascontiguousarray(tris, dtype=np.float64), self.W, self.H, self.u0, self.v0, self.px, self.zb)
+        if not len(tris): return
+        tris = np.ascontiguousarray(tris, dtype=np.float64)
+        try:
+            import rvt_fast
+            if os.environ.get('RVT_NO_RUST_RASTER') != '1' and rvt_fast.hlr_raster(tris, self.W, self.H, self.u0, self.v0, self.px, self.zb): return    # bit-identical to _raster, row bands in parallel
+        except Exception: pass
+        _raster(tris, self.W, self.H, self.u0, self.v0, self.px, self.zb)
 
     def visible_parts(self, segs, eps):
         """segs (m,2,3) -> list of visible sub-segments [(p0, p1)] in uvw"""

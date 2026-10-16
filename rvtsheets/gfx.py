@@ -85,6 +85,34 @@ def _index_fn():
     return _IDX[1]
 
 
+import collections as _co
+UNKNOWN_CLASSES = _co.Counter()          # graphic node classes the collector does not know (reported in the view stats)
+
+
+
+def nurbs_points(o, n=None):
+    """GNurbSpline -> polyline: rational de Boor evaluation of m_ctrlPoints (m_Point, m_w), m_Knots, m_Degree over m_endParams"""
+    deg = int(o.get('m_Degree') or 3); cps = o.get('m_ctrlPoints') or []; kn = [float(k) for k in o.get('m_Knots') or []]
+    P = np.array([c['m_Point'] for c in cps], float); W = np.array([float(c.get('m_w', 1.0)) for c in cps], float)
+    if len(P) < 2 or len(kn) != len(P) + deg + 1: return [P[0].tolist(), P[-1].tolist()] if len(P) >= 2 else []
+    t0, t1 = [float(x) for x in (o.get('m_endParams') or [kn[deg], kn[len(P)]])]
+    if n is None:
+        n = int(min(max(8, 4 * len(P)), 96))
+    Pw = np.concatenate([P * W[:, None], W[:, None]], 1)
+    out = []
+    for t in np.linspace(t0, t1, n):
+        k = deg
+        while k < len(P) - 1 and t >= kn[k + 1]: k += 1
+        d = [Pw[j + k - deg].copy() for j in range(deg + 1)]
+        for r in range(1, deg + 1):
+            for j in range(deg, r - 1, -1):
+                den = kn[j + 1 + k - r] - kn[j + k - deg]
+                a = 0.0 if abs(den) < 1e-12 else (t - kn[j + k - deg]) / den
+                d[j] = (1 - a) * d[j - 1] + a * d[j]
+        v = d[deg]; out.append((v[:3] / (v[3] or 1.0)).tolist())
+    return out
+
+
 class Collector:
     def __init__(self, f, cond_ok=None):
         self.f = f; self.prims = []; self.unknown = {}
@@ -170,10 +198,14 @@ class Collector:
             ii = ob(o.get('m_instanceInfo')) or {}
             t = ii.get('m_Trf') or {}
             self.prims.append(dict(p, t='instance', symbol=self.f.eid(ii.get('m_symbolId')), R=t.get('m_3x3'), o=t.get('m_or')))
+        elif cls == 'GNurbSpline':
+            pts = nurbs_points(o)
+            if len(pts) > 1: self.prims.append(dict(p, t='line', pts=pts))
         elif cls == 'Geometry':
             return                     # B-rep holder (faces referenced by GFilling); solids handled by the 3D path
         else:
             self.unknown[cls] = self.unknown.get(cls, 0) + 1
+            UNKNOWN_CLASSES[cls] += 1
 
     def face_loops(self, face):
         """planar face (Face -> EdgeLoops -> Edges) -> 3D loops via the reader's planar B-rep helper"""
