@@ -59,6 +59,12 @@ OCCLUDER_CATS = {-2000011, -2000032, -2000035, -2000038}          # walls, floor
 
 def _feature_edges(T, fid=None):
     """edges between triangles of different faces (B-rep edges), boundary edges, and sharp edges"""
+    if fid is None and os.environ.get('RVT_NO_RUST_RASTER') != '1':
+        try:
+            import rvt_fast
+            E_ = rvt_fast.feature_edges(np.ascontiguousarray(T, dtype=np.float64), math.cos(FEATURE_ANGLE))      # bit-identical (12-15x)
+            if E_ is not None: return E_
+        except Exception: pass
     R = np.round(np.asarray(T, float), 6).tolist()
     E = {}
     for i, t in enumerate(R):
@@ -145,7 +151,7 @@ def wrap_text(txt, width, em, name, bold=False):
     return '\n'.join(out)
 
 
-ANNO_FILTER_CLASSES = ('Section', 'LinearDimString', 'SpotElevation', 'InteriorElev', 'IndependentTag', 'RoomTag', 'SpaceTag', 'AreaTag')
+ANNO_FILTER_CLASSES = ('Section', 'LinearDimString', 'SpotElevation', 'InteriorElev', 'IndependentTag', 'BeamSystemTag', 'SpanDirectionSymbol', 'RoomTag', 'SpaceTag', 'AreaTag')
 
 
 class ViewDrawer:
@@ -174,6 +180,8 @@ class ViewDrawer:
         if kind == 'section' and crop.get('basis'):
             B = np.asarray(crop['basis'], float); co = np.asarray(crop['origin'], float); b = crop['bounds']
             near = co + B[2] * b[2][1]; farp = co + B[2] * b[2][0]
+            cu = (v.get('cutters') or {}).get('Cutter')
+            if cu and cu.get('origin') is not None and os.environ.get('RVT_CUTTER', '1') == '1': near = np.asarray(cu['origin'], float)       # the view's own cut plane
             wc = float((near - O) @ Z)
             wf = float((farp - O) @ Z) if (crop.get('active') or [[1, 1]] * 3)[2][0] else -1e9
             return wc, wf, Z
@@ -220,6 +228,7 @@ class ViewDrawer:
         res = Resolver(self.doc, ev, scale)
         rcp_under = self.underlay_range(v, O, Z) if is_rcp else None
         elems = self.vis.elements(vid)
+        self._vis_elems = set(elems)                 # tags of elements that are not in this view are not drawn (rst basic cross section: CHS / foundation tags)
         prims = []; solids = []      # per element: (eid, cat, tris_uvw, gs)
         occ_owner = []; carve_boxes = {}
         topo = []                    # topography surfaces (meshes, no solids): poche in sections
@@ -303,7 +312,7 @@ class ViewDrawer:
                     try: prims += _hang(callout(self, eid, O, Mv, scale, res, vid)); self.stats['callouts'] += 1
                     except Exception: self.stats['marker_error'] += 1
                 elif v.get('kind') == 'section':
-                    from .annot import section_marker
+                    from .annot import section_marker, section_head_extent
                     try:
                         sp_ = self.vis.section_plane_line(eid, v)
                         if sp_:
@@ -311,7 +320,12 @@ class ViewDrawer:
                             from .datums import Datums
                             from .compose import crop_rect_uv as _cru2
                             ar_ = _cru2(v)                              # cut at the crop region (Residential East elevation: the A-2 head sits at the crop top), inset like plan markers
-                            if ar_ is not None: i_ = 0.2375 / 12 * scale; ar_ = (ar_[0] + i_, ar_[1] + i_, ar_[2] - i_, ar_[3] - i_)
+                            if ar_ is not None:
+                                i_ = 0.2375 / 12 * scale; top_ = i_
+                                he_ = section_head_extent(self, eid) if os.environ.get('RVT_HEADFIT', '1') == '1' else None
+                                if he_: top_ = he_ * scale          # the head symbol (circle + stub, 0.0503 ft of paper outward) sits entirely inside the crop: line cut one symbol length below the crop top (Residential East: Revit symbol tip at the crop top)
+                                if he_ and ((np.asarray(pts_[0], float) - O) @ Mv.T)[1] <= ar_[3] + 1e-6: top_ = -1e6     # the line's own top lies inside the crop: the head hangs outside it unclamped (rst basic: line ends at the plane top)
+                                ar_ = (ar_[0] + i_, ar_[1] + i_, ar_[2] - i_, ar_[3] - top_)
                             if ar_ is not None:                       # the marker line is cut at the annotation crop region (rst basic longitudinal section: S202 line ended 400 px below the view)
                                 P_ = np.asarray([((np.asarray(q, float) - O) @ Mv.T)[:2] for q in pts_]); vis_ = []
                                 for a_, b_ in zip(P_[:-1], P_[1:]):
@@ -330,9 +344,15 @@ class ViewDrawer:
                     try: prims += _hang(section_marker(self, eid, O, Mv, scale, res, vid)); self.stats['section_markers'] += 1
                     except Exception: self.stats['marker_error'] += 1
                 continue
-            if info['cls'] in ('IndependentTag', 'RoomTag', 'SpaceTag', 'AreaTag'):
+            if info['cls'] in ('IndependentTag', 'BeamSystemTag', 'SpanDirectionSymbol', 'RoomTag', 'SpaceTag', 'AreaTag'):
                 try: prims += self.tags.tag(eid, O, Mv, scale, res); self.stats['tags'] += 1
                 except Exception as ex: self.stats['tag_error'] += 1
+                continue
+            if info['cls'] == 'ContourLabelingElem':
+                try:
+                    from .compose import crop_rect_uv as _cru3
+                    prims += self.ann.contour_labels(eid, O, Mv, scale, res, _cru3(v))
+                except Exception: self.stats['contour_label_error'] += 1
                 continue
             if info['owner'] == vid and info['cls'] == 'TextNote':
                 tp = self.text_note(eid, O, Mv, scale)

@@ -7,8 +7,13 @@ from .reader import ob, path, INVALID
 from . import gfx
 
 
-def fmt_elev(ft, imperial):
+def fmt_elev(ft, imperial, f=None):
     if imperial:
+        if f is not None and abs(abs(ft) * 12 % 1.0 - 0.0) > 1e-6 and abs(abs(ft) * 12 % 1.0 - 1.0) > 1e-6:       # fractional inches: the project length format (Snowdon level '-3'-5 1/2"')
+            try:
+                from . import units
+                return units.fmt_length(ft, {'m_bUseDefault': 1}, units.length_format(f))
+            except Exception: pass
         sgn = '-' if ft < 0 else ''; ft = abs(ft); f = int(ft + 1e-9); inch = round(max(ft - f, 0.0) * 12, 2) + 0.0
         if inch >= 12: f += 1; inch = 0
         i = ('%g' % inch)
@@ -124,6 +129,17 @@ class Datums:
                 cr2 = _cru(v)
                 if cr2 is not None and cr2[0] <= uv_b[0] <= cr2[2] and not (cr2[0] <= uv_f[0] <= cr2[2]):
                     uv_b, uv_f = uv_f, uv_b          # details: the bubble end lies inside the crop, the free end outside it: the head goes to the end outside (Commercial 1:8 / 1:24 wall details)
+                elif cr2 is not None and (uv_b[0] > cr2[2] or uv_b[0] < cr2[0]) and (uv_f[0] > cr2[2] or uv_f[0] < cr2[0]) and abs(uv_b[1] - uv_f[1]) < 1e-6:
+                    # both stored ends lie outside the crop (rst basic 'Section Wall': Level 2 -92.6 .. 89 ft in a 36 ft crop): Revit draws the line across the annotation crop region, head at the right end
+                    ac3 = self.annotation_rect(v, scale)
+                    if ac3 is not None:
+                        right = uv_b[0] >= uv_f[0]
+                        if not (min(uv_b[0], uv_f[0]) < ac3[0] and max(uv_b[0], uv_f[0]) > ac3[2]): ac3 = None
+                    if ac3 is not None:
+                        lo3, hi3 = max(min(uv_b[0], uv_f[0]), ac3[0]), min(max(uv_b[0], uv_f[0]), ac3[2])
+                        if hi3 > lo3:
+                            yy = uv_b[1]; ends = (np.array([hi3, yy]), np.array([lo3, yy]))
+                            uv_b, uv_f = (ends if right else ends[::-1])
                 p0 = o; p1 = o          # placeholders: uv set below
             if r['class'] == 'Level' and not e and v.get('kind') == 'section':
                 # no per-view extents: Revit draws the level across the crop region plus about 1/2" of paper on each side
@@ -172,7 +188,7 @@ class Datums:
             prims.append({'t': 'line', 'pts': [uv0.tolist(), uv1.tolist()], 'style': st, 'elem': eid, 'layer': 'datum', 'part': 'line'})
             # heads
             name = fl.get('m_text') or ''
-            vals = {'Name': name, 'Elevation': fmt_elev(float(o[2]), imperial)}
+            vals = {'Name': name, 'Elevation': fmt_elev(float(o[2]), imperial, self.f)}
             ends = []
             # bubble at end 1 (envelope low end, verified against Revit's S101 export); per-view ExtentElem m_endBubbleOverrides bit 0 adds end 2
             if grid_ext is not None: pass

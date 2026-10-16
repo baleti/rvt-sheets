@@ -86,7 +86,12 @@ class DepthBuffer:
         L = np.linalg.norm(segs[:, 1, :2] - segs[:, 0, :2], axis=1)
         n = int(min(max(4, (L.max() / self.px) * 1.5), 400))
         vis = np.zeros((len(segs), n), dtype=np.bool_)
-        _visible(segs, n, self.u0, self.v0, self.px, self.zb, eps, vis)
+        ok = False
+        try:
+            import rvt_fast
+            ok = os.environ.get('RVT_NO_RUST_RASTER') != '1' and rvt_fast.hlr_visible(segs, n, self.u0, self.v0, self.px, self.zb, eps, vis)     # bit-identical to _visible, segments in parallel
+        except Exception: pass
+        if not ok: _visible(segs, n, self.u0, self.v0, self.px, self.zb, eps, vis)
         out = []
         for s in range(len(segs)):
             row = vis[s]

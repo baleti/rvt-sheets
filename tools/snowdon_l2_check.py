@@ -28,4 +28,8 @@ cw = [p['text'] for p in P if p['t'] == 'text' and p['text'].startswith('CW')]
 chk('CW wall tags', len(cw) == 8 and set(cw) == {'CW12"', 'CW10"'}, str(sorted(set(cw))))
 chk('no joist system sketch', not any(info.get(p['elem'], {}).get('cls') == 'JoistSystem' for p in P))
 chk('no datum polylines', not any(p['layer'] == 'datum' and p['t'] == 'line' and p.get('part') == 'line' and len(p['pts']) > 2 for p in P))
+bst = [p['text'] for p in P if p['t'] == 'text' and info.get(p['elem'], {}).get('cls') == 'BeamSystemTag']
+chk('joist system notes', len(bst) == 7 and '18LH04 @ Max 4\'-0"' in bst, str(len(bst)))
+spots = {p['text'] for p in P if p['t'] == 'text' and info.get(p['elem'], {}).get('cls') == 'SpotElevation'}
+chk('spot elevations read the picked face', "7'-4 1/2\"" in spots and "4'-7\"" in spots, str(sorted(spots)))
 print('ALL OK' if ok else 'FAILED'); sys.exit(0 if ok else 1)
