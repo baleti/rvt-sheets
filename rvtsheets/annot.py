@@ -761,7 +761,15 @@ def callout(drawer, eid, O, Mv, scale, res, vid):
     from shapely.ops import nearest_points
     a = np.asarray(nearest_points(poly.exterior, Point(h))[0].coords[0])
     dv = h - a; L = np.linalg.norm(dv)
-    if L > hr + 1e-6: out.append({'t': 'line', 'pts': [a.tolist(), (h - dv / L * hr).tolist()], 'style': st, 'elem': eid, 'layer': 'annotation'})
+    if L > 1e-6 and hr > 0:
+        # the head point is where the leader meets the head: Revit places the head circle one radius beyond it, along the leader (typ. wall callouts vs the DXF)
+        sh = dv / L * hr
+        for p_ in sp:
+            if p_.get('pts'): p_['pts'] = [[q[0] + sh[0], q[1] + sh[1]] + list(q[2:]) for q in p_['pts']]
+            if p_.get('origin') is not None: p_['origin'] = [p_['origin'][0] + sh[0], p_['origin'][1] + sh[1]] + list(p_['origin'][2:])
+            if p_.get('loops'): p_['loops'] = [[[q[0] + sh[0], q[1] + sh[1]] + list(q[2:]) for q in l] for l in p_['loops']]
+        h = h + sh
+    if L > 1e-6 and L > 0: out.append({'t': 'line', 'pts': [a.tolist(), (h - dv / L * hr).tolist()], 'style': st, 'elem': eid, 'layer': 'annotation'})
     vp = next((x for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
     sheet = next((s for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
     vals = {'Detail Number': (vp or {}).get('detail_number') or '', 'Sheet Number': (sheet or {}).get('sheetNumber') or '', 'Reference Label': ''}

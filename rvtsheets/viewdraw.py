@@ -309,7 +309,9 @@ class ViewDrawer:
                         if sp_:
                             pts_ = sp_[0]
                             from .datums import Datums
-                            ar_ = Datums.annotation_rect(v, scale)
+                            from .compose import crop_rect_uv as _cru2
+                            ar_ = _cru2(v)                              # cut at the crop region (Residential East elevation: the A-2 head sits at the crop top), inset like plan markers
+                            if ar_ is not None: i_ = 0.2375 / 12 * scale; ar_ = (ar_[0] + i_, ar_[1] + i_, ar_[2] - i_, ar_[3] - i_)
                             if ar_ is not None:                       # the marker line is cut at the annotation crop region (rst basic longitudinal section: S202 line ended 400 px below the view)
                                 P_ = np.asarray([((np.asarray(q, float) - O) @ Mv.T)[:2] for q in pts_]); vis_ = []
                                 for a_, b_ in zip(P_[:-1], P_[1:]):
@@ -405,7 +407,7 @@ class ViewDrawer:
                 if is_section and v['kind'] == 'section' and cut_w is not None and pts[:, 2].min() > cut_w + 1e-6: self.stats['curves_before_cut'] += 1; continue      # symbol lines wholly in front of the section plane (planting 18 ft before the building section)      # family symbol lines (planting) behind the far clip are not drawn
                 if cut_w is not None and not is_section and (pts[:, 2] > cut_w + 1e-6).all() and False: continue
                 lay = 'symbolic'
-                if v['kind'] == 'plan' and not anno and info['cls'] == 'FamilyInstance' and cut_w is not None and (c.get('flags') or 0) & 0x80000 and not (c.get('flags') or 0) & 0x2a0 and (pts[:, 2] > cut_w + 1e-6).all():
+                if v['kind'] == 'plan' and not anno and info['cls'] == 'FamilyInstance' and cid not in (-2001330, -2001320, -2001300) and cut_w is not None and (c.get('flags') or 0) & 0x80000 and not (c.get('flags') or 0) & 0x2a0 and (pts[:, 2] > cut_w + 1e-6).all():
                     self.stats['family_lines_above_cut'] += 1; continue      # family curves flagged 0x80000 (not 0x20/0x80/0x200) lying above the cut plane (door head / overhead track lines) are not in Revit's plan (Residential 32/36/basement: P +1.4..6 pts, R -0.3..1)
                 if is_rcp and not anno and cut_w is not None and (pts[:, 2] > cut_w + 1e-6).all():
                     # family plan symbols below a ceiling plan's cut (furniture, fixtures): only in the underlay, halftone
@@ -592,6 +594,10 @@ class ViewDrawer:
                     except Exception: self.stats['layer_error'] += 1
                 prims.append(prim)
                 self.stats['cut_elements'] += 1
+        if topo and v['kind'] == 'plan' and not is_rcp:
+            for eid, cid, ov in topo:
+                try: self.topo_boundary(eid, cid, ov, O, Mv, res, prims)
+                except Exception: self.stats['topo_boundary_error'] += 1
         if cut_w is not None and topo and v["kind"] == "section":
             for eid, cid, ov in topo:
                 try:
@@ -1119,6 +1125,28 @@ class ViewDrawer:
     def _rgb(v):
         from .decode import color
         return color(v) if isinstance(v, int) else v
+
+    def topo_boundary(self, eid, cid, ov, O, Mv, res, prims):
+        """plan views: the outline of a topography surface (edges used by one triangle of its mesh: outer boundary, sub-region and pad holes) as lines in the
+        Topography style; Revit's plan shows no contours here (Residential first floor DXF C-TOPO: the site rectangle, pad / driveway / path outlines)"""
+        import rvt_elemmesh as E
+        m = E.element_mesh(self.f.g, eid)
+        T = np.asarray(m.get('tris') or [], float).reshape(-1, 3, 3)
+        if not len(T): return
+        key = lambda p: (round(float(p[0]), 4), round(float(p[1]), 4), round(float(p[2]), 4))
+        cnt = collections.Counter(); ends = {}
+        for t in T:
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                ka, kb = key(t[a]), key(t[b]); k = (ka, kb) if ka < kb else (kb, ka)
+                cnt[k] += 1; ends[k] = (t[a], t[b])
+        segs = [ends[k] for k, n in cnt.items() if n == 1]
+        if not segs: return
+        st = res.line(None, cid, 'proj', eid, ov=ov)
+        uv = [(((np.asarray(a) - O) @ Mv.T)[:2], ((np.asarray(b) - O) @ Mv.T)[:2]) for a, b in segs]
+        for pl in self._loops([(np.append(a, 0.0), np.append(b, 0.0)) for a, b in uv], 1e-4):
+            P = np.asarray(pl, float)[:, :2]
+            if len(P) > 1: prims.append({'t': 'line', 'pts': P.tolist(), 'style': st, 'elem': eid, 'layer': 'projection'})
+        self.stats['topo_boundary'] += 1
 
     def topo_poche(self, eid, cid, ov, O, Mv, cut_w, scale, res, prims, crop=None):
         """topography cut by a section: the surface mesh (reader polymesh) meets the cut plane in a profile; Revit fills below it down to

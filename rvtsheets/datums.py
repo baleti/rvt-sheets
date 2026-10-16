@@ -88,7 +88,14 @@ class Datums:
                 # (m_freeEnd / m_bubbleEnd, set when the view trimmed the datum: Snowdon L2 lettered grids) win over the 3D ends
                 f_, b_ = (e.get('m_freeEnd') or 0.0), (e.get('m_bubbleEnd') or 0.0)
                 if not (f_ or b_): f_, b_ = e['m_freeEnd3d'], e['m_bubbleEnd3d']
-                grid_ext = (o - ax * b_, o - ax * f_)                    # bubble end, free end
+                if v.get('kind') == 'section':
+                    # sections / details: ends t run along the view's up (vertical grids) or right axis from the grid's own origin (P = o + D * t), an unset free
+                    # end (0.0) is the 3D free end (Commercial 'Typical Wall Section' grid 1: bubble on top, line down to the crop)
+                    Rw = np.asarray(v['right'], float); Uw = np.asarray(v['up'], float)
+                    D = Rw if abs(ax @ Rw) > abs(ax @ Uw) else Uw
+                    if not f_: f_ = e['m_freeEnd3d']
+                    grid_ext = (o + D * b_, o + D * f_)
+                else: grid_ext = (o - ax * b_, o - ax * f_)                    # bubble end, free end
                 p0, p1 = grid_ext
             elif e.get('m_freeEnd3d') is not None and (e.get('m_freeEnd3d') or e.get('m_bubbleEnd3d')):
                 lo, hi = e['m_freeEnd3d'], e['m_bubbleEnd3d']

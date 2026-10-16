@@ -153,6 +153,9 @@ def scene(m, vid, opts):
     finally:
         v0['scale'] = saved_scale; vis.effective = eff0; v0['range'] = saved_range; v0['phase'], v0['phase_filter'] = saved_phase
     info = vis.info.info; cats = doc['categories']; els = {}
+    texts = {}                                    # element -> its text prims (one pass; was a scan of all prims per element)
+    for q in dr['prims']:
+        if q.get('t') == 'text' and q.get('text') and q.get('elem') is not None: texts.setdefault(q['elem'], []).append(q['text'])
     for p in dr['prims']:
         e = p.get('elem')
         if e is None or e in els: continue
@@ -162,7 +165,7 @@ def scene(m, vid, opts):
         if i.get('cls') in PROP_CLASSES:
             try: els[e].update(d.tags.element_props(e))
             except Exception: pass
-        txt = [q['text'] for q in dr['prims'] if q.get('elem') == e and q.get('t') == 'text' and q.get('text')] if i.get('cls') in PROP_CLASSES else None
+        txt = texts.get(e) if i.get('cls') in PROP_CLASSES else None
         if txt: els[e]['text'] = '\n'.join(txt)
     prims = [{k: _rnd(p[k]) for k in SCENE_KEEP if k in p and p[k] is not None} for p in dr['prims'] if p.get('t') != 'image']
     vw = {k: _rnd(v0.get(k)) for k in ('id', 'name', 'kind', 'scale', 'origin', 'right', 'up', 'dir', 'range', 'discipline', 'detail_level', 'view_template')}
