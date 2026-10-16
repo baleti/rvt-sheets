@@ -300,6 +300,10 @@ class Visibility:
             if e['owner'] == INVALID:
                 bb = self.info.bbox(eid)
                 if bb is not None and not vol(bb): why[eid] = 'outside_view_volume'; continue
+                if bb is not None and e['cat'] == -2001120 and v['kind'] == 'plan' and v.get('range') and (v['range'].get('plan_view_type') != 2):
+                    # ceiling-hosted lighting fixtures wholly above the cut plane are not in a floor plan (Residential plans 32 / 180203 / basement: collector lists none; the ceiling plan, whose cut plane is at the ceiling, lists them)
+                    cz = v['range'].get('cut')
+                    if cz is not None and bb[0][2] >= cz - 1e-6: why[eid] = 'above_cut_lighting'; continue
                 if bb is None and e['cls'] not in DATUM_CLASSES and e['cls'] not in ('Viewer3d', 'ExtentElem', 'ModelClipBox'): why[eid] = 'no_graphics_no_bbox'; continue
             out[eid] = st
         return (out, why) if explain else out

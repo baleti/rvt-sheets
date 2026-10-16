@@ -56,7 +56,6 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
     except Exception as ex: log('sheet-owned elements failed: %r' % ex)
     for k, item in enumerate(dr['viewports']):
         vp = item['vp']; v = doc['views'].get(vp['view'])
-        for p in item.get('title') or []: s.prim(p)
         if v['kind'] not in ('plan', 'section', 'drafting', 'legend', '3d'):
             o = vp['offset']; s.text({'text': '[%s view not drawn yet: %s]' % (v['kind'], v['name']), 'origin': [o[0], o[1], 0], 'size': 2.5 / FT_MM}); continue
         if v['kind'] == '3d' and (v.get('crop') or {}).get('proj_method') == 2 and not (vp.get('scale') or 0) and shaded3d.is_shaded(v):
@@ -71,11 +70,14 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
                     cx = vp['offset'][0] + (b[0][0] + b[0][1]) / 2 * D; cy = vp['offset'][1] + (b[1][0] + b[1][1]) / 2 * D
                     a = s.P((cx - w / 2, cy + h / 2))
                     s.raw('<image x="%.3f" y="%.3f" width="%.3f" height="%.3f" href="data:image/png;base64,%s" preserveAspectRatio="none"/>' % (a[0], a[1], w * FT_MM, h * FT_MM, base64.b64encode(img[0]).decode()))
+                    for p in item.get('title') or []: s.prim(p)
                     continue
             except Exception as ex: log('3d view %s failed: %r' % (v['id'], ex))
         try: d = vd.draw(v['id'])
         except Exception as ex:
-            log('view %s failed: %r' % (v['id'], ex)); continue
+            log('view %s failed: %r' % (v['id'], ex))
+            for p in item.get('title') or []: s.prim(p)
+            continue
         f = vp['scale'] or 1.0 / (v.get('scale') or 100)
         ox, oy = vp['offset'][0], vp['offset'][1]
         tx = lambda u, w: s.P((ox + u * f, oy + w * f))
@@ -115,5 +117,6 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
             s.raw('<g data-view="%s" data-datums="1"%s>' % (v['id'], clip2))
             for e in viewsvg.body(dp, sc, tx): s.raw(e)
             s.raw('</g>')
+        for p in item.get('title') or []: s.prim(p)         # viewport titles are drawn over the view's own (white) masks (Residential A-2 detail 5)
         log('  %s %-30s %d prims %s' % (v['id'], v['name'], len(d['prims']), d['stats'].get('seconds')))
     return s.tostring()

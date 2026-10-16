@@ -57,7 +57,7 @@ class SVG:
         lines = p['text'].split('\n')
         ha = {0: 'start', 1: 'middle', 2: 'end'}.get(p.get('halign') or 0, 'start')
         lh = size_mm * LINE_PITCH
-        if p.get('anchor'):
+        if p.get('anchor') and 'rtf' not in p:           # (a list-valued anchor = the control API's world point, not the alignment flag; saved-graphics rich text carries 'rtf')
             # notes/labels: origin is the anchor point on the alignment side; vertical: top / middle / bottom of the text block
             dx = 0.0
             n = len(lines); asc = size_mm * 0.9

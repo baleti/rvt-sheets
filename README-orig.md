@@ -30,6 +30,10 @@ drawing, final line `warmed N sheets, M views`. --host1 runs it on host1 via h1r
 rvtsheets drawing code (the key changes; warm deletes the old cache directory of the same file). `tools/smoke.sh FILE` = headless demo check,
 `tools/timing.py FILE...` = first-render vs cached table.
 
+View primitives as JSON (viewer control panel, CONTROL-API.md): `GET /sheets/api/{mid}/view/{id}.json?scale=&detail=&template=0&filters=0&cut=&phase=&phaseFilter=` (cached next to the SVGs).
+
+QA against Revit's own exports: `~/src/rvt-qa/qa-view FILE VIEWID --svg OURS.svg`, `tools/compare_dxf.py FILE VIEWID REVIT.dxf --register`, `tools/check_elements.py FILE [VIEWID]`; per-feature status: FEATURE-AUDIT.md.
+
 PDF: the page has 'PDF: this sheet / all sheets' links (GET /sheets/api/{mid}/sheet/{id}.pdf, /sheets/api/{mid}/sheets.pdf).
 
 Page keys: left/right (or PageUp/PageDown/space) previous/next drawing, f fit, i sheet index with thumbnails, p present mode (full screen,

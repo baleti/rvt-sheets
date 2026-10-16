@@ -104,8 +104,19 @@ class Datums:
                 if t_b or t_f:
                     Xr = Mv[0]
                     lvl_ext = (((o + Xr * t_b - O) @ Mv.T)[:2], ((o + Xr * t_f - O) @ Mv.T)[:2])
+                    if not self._meets_crop(v, lvl_ext[0], lvl_ext[1]):
+                        # the extents miss the crop region (1:24 detail): the level is still drawn across the crop, head at its right end
+                        from .compose import crop_rect_uv
+                        cr_ = crop_rect_uv(v)
+                        if cr_ is not None:
+                            m_ = 0.5 / 12 * (v.get('scale') or 100); vv = lvl_ext[0][1]
+                            lvl_ext = (np.array([cr_[2] + m_, vv]), np.array([cr_[0] - m_, vv]))
             if lvl_ext is not None:
                 uv_b, uv_f = lvl_ext
+                from .compose import crop_rect_uv as _cru
+                cr2 = _cru(v)
+                if cr2 is not None and cr2[0] <= uv_b[0] <= cr2[2] and not (cr2[0] <= uv_f[0] <= cr2[2]):
+                    uv_b, uv_f = uv_f, uv_b          # details: the bubble end lies inside the crop, the free end outside it: the head goes to the end outside (Commercial 1:8 / 1:24 wall details)
                 p0 = o; p1 = o          # placeholders: uv set below
             if r['class'] == 'Level' and not e and v.get('kind') == 'section':
                 # no per-view extents: Revit draws the level across the crop region plus about 1/2" of paper on each side
@@ -118,10 +129,12 @@ class Datums:
                     if L > 1e-9 and abs(d2[1]) < 1e-6 * L:
                         u0 = ((p0 - O) @ Mv.T)[0]; k = (p1 - p0) / ((p1 - O) @ Mv.T - (p0 - O) @ Mv.T)[0]
                         ua, ub_ = sorted([u0, ((p1 - O) @ Mv.T)[0]])
+                        ac_ = self.annotation_rect(v, scale)                           # the line spans crop + the annotation offsets (1" each side, active or not: rst basic section 1:50);
+                        if ac_ is not None: cr = ac_; m = 0.0                           # the envelope may be shorter (Residential building section, Commercial Mezzanine)
                         lo_, hi_ = max(ua, cr[0] - m), min(ub_, cr[2] + m)         # clipped to the crop + 1/2" (the envelope may be shorter: Commercial Mezzanine)
-                        if hi_ > lo_:
-                            pa, pb = p0 + k * (lo_ - u0), p0 + k * (hi_ - u0)
-                            p0, p1 = (pa, pb) if u0 <= ((p1 - O) @ Mv.T)[0] else (pb, pa)
+                        if hi_ <= lo_: lo_, hi_ = cr[0] - m, cr[2] + m                # the envelope misses the crop: Revit still draws the level across it (Commercial Typical Wall Section, Mezzanine)
+                        pa, pb = p0 + k * (lo_ - u0), p0 + k * (hi_ - u0)
+                        p0, p1 = (pa, pb) if u0 <= ((p1 - O) @ Mv.T)[0] else (pb, pa)
             if r['class'] == 'Level':
                 # level line: horizontal in the view at the level elevation; endpoints projected
                 pass
@@ -129,7 +142,7 @@ class Datums:
             if lvl_ext is not None: uv0, uv1 = uv_f, uv_b
             if r['class'] == 'Level' and lvl_ext is None and v.get('kind') == 'section' and uv0[0] > uv1[0]: uv0, uv1 = uv1, uv0     # no stored bubble end: head at the right end (Commercial building section, Mezzanine)
             if v.get('kind') in ('section', 'plan') and not self._meets_crop(v, uv0, uv1): continue      # outside an active crop: hidden
-            if r['class'] == 'Grid' and grid_ext is None and v.get('kind') == 'plan':
+            if r['class'] == 'Grid' and grid_ext is None and v.get('kind') in ('plan', 'section'):
                 # 3D-extent grid in a cropped view: drawn to the annotation crop region (crop + offsets x scale), the bubble moves there
                 # (Snowdon L2: vertical grids end 8 ft outside the crop at 1:96, bubbles at the new ends)
                 ac = self.annotation_rect(v, scale)
@@ -141,6 +154,10 @@ class Datums:
             st = res.line(None, cid, 'proj', eid, annotation=True)
             t = self.f.rec(self.f.eid(fl.get('m_attrId'))) or {'fields': {}}
             tf = t['fields']
+            if r['class'] == 'Level':                      # level line style of the type (LevelAttributes.m_lineAndTextAttr category -> graphic style: 'Center' dash-dot in Revit's Residential / Commercial / rst basic pictures)
+                lc = self.f.rec(self.f.eid((tf.get('m_lineAndTextAttr') or {}).get('m_categoryId')))
+                gsl = (lc or {}).get('fields', {}).get('m_gstyleIds') or []
+                if gsl: st = res.line(self.f.eid(gsl[0]), cid, 'proj', eid, annotation=True)
             cseg = self.f.eid(tf.get('m_categoryForCenterSegment'))
             if cseg not in (None, INVALID):
                 st2 = res.line(None, cseg, 'proj', eid, annotation=True)
@@ -154,13 +171,11 @@ class Datums:
             if grid_ext is not None: pass
             elif r['class'] == 'Grid' and v.get('kind') == 'section' and uv0[1] < uv1[1]:
                 uv0, uv1 = uv1, uv0                                  # grids in sections/elevations: the head is at the top end
-            elif r['class'] == 'Grid' and not e and v.get('kind') == 'plan':
-                # no per-view extent: default bubble at the north end of N-S lines and the west end of E-W lines (Revit's export of the
-                # writer's GA/GB grids and Commercial grid 2 / lettered grids; with extents the stored ends decide, as before)
+            # plan grids without per-view extents: east-west lines keep the envelope's low end (p0: Commercial west, rst basic D-H east), north-south lines the
+            # north end (Commercial / rst basic lo = north, Snowdon L2 lo = south but Revit's 1-9 are on top)
+            if r['class'] == 'Grid' and not e and v.get('kind') == 'plan':
                 dv = uv1 - uv0
-                if abs(dv[1]) >= abs(dv[0]):
-                    if uv0[1] < uv1[1]: uv0, uv1 = uv1, uv0
-                elif uv0[0] > uv1[0]: uv0, uv1 = uv1, uv0
+                if abs(dv[1]) >= abs(dv[0]) and uv0[1] < uv1[1]: uv0, uv1 = uv1, uv0       # north-south lines: bubble at the north end (Commercial, rst basic, Snowdon L2: 1-9 on top)
             ends = [(uv0, uv0 - uv1)]
             if (e.get('m_endBubbleOverrides') or 0) & 1: ends.append((uv1, uv1 - uv0))
             if r['class'] == 'Level': ends = [(uv1, uv1 - uv0)]
@@ -200,7 +215,7 @@ class Datums:
             for p in coll:
                 if p['t'] == 'line' and p.get('gs') not in (None, -1) and self.d.drawable_gs(p['gs']):     # not the family's reference lines
                     pts = gfx.transform_pts(p['pts'], R, o)
-                    out.append({'t': 'line', 'pts': [q[:2] for q in pts], 'style': res.line(p.get('gs'), None, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'datum'})
+                    out.append({'t': 'line', 'pts': [q[:2] for q in pts], 'style': res.line(p.get('gs'), None, 'proj', eid, annotation=True), 'gs': p.get('gs'), 'elem': eid, 'layer': 'datum'})
                 elif p['t'] == 'fill' and p.get('loops') and p.get('gs') not in (None, -1) and self.d.drawable_gs(p['gs']):      # filled quadrants of the level head
                     out.append({'t': 'fill', 'loops': [[q[:2] for q in gfx.transform_pts(l, R, o)] for l in p['loops']], 'color': p.get('color') or [0, 0, 0], 'elem': eid, 'layer': 'datum'})
             if level and not any(p['t'] == 'fill' for p in coll) and any(p['t'] == 'line' and p.get('gs') in (None, -1) for p in coll):
@@ -227,6 +242,6 @@ class Datums:
             org = gfx.transform_pts([lab['origin']], R, o)[0]
             xd = (np.asarray(R, float) @ np.asarray(lab['base'], float))[:2]
             out.append({'t': 'text', 'text': txt, 'origin': org[:2], 'x': [1.0, 0.0], 'size': (font.get('size') or 0.0078) * scale,
-                        'font': font.get('name') or 'Arial', 'halign': SheetComposer._halign(lab['flags'] or 0), 'valign': SheetComposer._valign(lab['flags'] or 0), 'anchor': True,
-                        'elem': eid, 'layer': 'text'})
+                        'font': font.get('name') or 'Arial', 'halign': ({0: 2, 2: 0}.get(SheetComposer._halign(lab['flags'] or 0), 1) if (level and xd[0] < -0.5) else SheetComposer._halign(lab['flags'] or 0)),
+                        'valign': SheetComposer._valign(lab['flags'] or 0), 'anchor': True, 'elem': eid, 'layer': 'text'})      # a head on the left end is mirrored: its text stays upright and reads to the right of the marker
         return out

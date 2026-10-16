@@ -59,11 +59,11 @@ OCCLUDER_CATS = {-2000011, -2000032, -2000035, -2000038}          # walls, floor
 
 def _feature_edges(T, fid=None):
     """edges between triangles of different faces (B-rep edges), boundary edges, and sharp edges"""
-    key = lambda p: tuple(np.round(p, 6))
+    R = np.round(np.asarray(T, float), 6).tolist()
     E = {}
-    for i, t in enumerate(T):
+    for i, t in enumerate(R):
         for a, b in ((0, 1), (1, 2), (2, 0)):
-            ka, kb = key(t[a]), key(t[b])
+            ka, kb = tuple(t[a]), tuple(t[b])
             k = (ka, kb) if ka < kb else (kb, ka)
             E.setdefault(k, []).append(i)
     N = np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]); nl = np.linalg.norm(N, axis=1); nl[nl == 0] = 1; N = N / nl[:, None]
@@ -237,6 +237,7 @@ class ViewDrawer:
             if eid in stair_skip: continue
             info = self.vis.info.info[eid]
             if info['cls'] in skip_classes or info['cat'] in skip_cats: continue
+            if info['cls'] == 'JoistSystem': self.stats['joist_system_skipped'] += 1; continue          # the system's boundary / layout sketch (cyan dashes) is not drawn by Revit (rst basic Level 1, Snowdon L2)
             if ev.get('filters') and info['cls'] in ANNO_FILTER_CLASSES and info['cat'] != INVALID:
                 # view filters hide annotation elements too (Snowdon L2: 'Views - Sheets' = NOT Family and Type contains '_Working' hides every section marker)
                 fcat = info['cat']
@@ -262,6 +263,9 @@ class ViewDrawer:
                     prims += sp
                 except Exception: self.stats['spot_error'] += 1
                 continue
+            if info['cls'] == 'FamilyInstance' and v['kind'] == 'plan':
+                try: prims += self.family_label(eid, O, Mv, scale)
+                except Exception as ex_: self.stats['family_label_error'] += 1; self.__dict__.setdefault('_fle', repr(ex_))
             if info['cls'] == 'InteriorElev':
                 from .compose import crop_rect_uv as _cru
                 cr = _cru(v) if v['kind'] == 'plan' else None
@@ -275,6 +279,9 @@ class ViewDrawer:
                 continue
             if info['cls'] == 'InteriorElevArrow': continue
             if info['cls'] == 'StairsPathElement':
+                try: stl = self.f.eid(self.f.rec(eid, 'StairsPathElement')['fields']['m_stairsLinkElementId']['m_linkInstOrHostId'])
+                except Exception: stl = None
+                if stl is not None and stl not in elems: self.stats['stair_paths_hidden'] += 1; continue          # the stair itself is not shown in this view (rst basic Level 2): no path
                 try: prims += self.stairs_path(eid, v, O, Mv, scale, res, info['cat']); self.stats['stair_paths'] += 1
                 except Exception: self.stats['stair_path_error'] += 1
                 continue
@@ -299,7 +306,22 @@ class ViewDrawer:
                     from .annot import section_marker
                     try:
                         sp_ = self.vis.section_plane_line(eid, v)
-                        if sp_: prims += _hang(section_marker(self, eid, O, Mv, scale, res, vid, pts=sp_[0])); self.stats['section_markers'] += 1
+                        if sp_:
+                            pts_ = sp_[0]
+                            from .datums import Datums
+                            ar_ = Datums.annotation_rect(v, scale)
+                            if ar_ is not None:                       # the marker line is cut at the annotation crop region (rst basic longitudinal section: S202 line ended 400 px below the view)
+                                P_ = np.asarray([((np.asarray(q, float) - O) @ Mv.T)[:2] for q in pts_]); vis_ = []
+                                for a_, b_ in zip(P_[:-1], P_[1:]):
+                                    sg_ = Datums._clip(a_, b_, ar_)
+                                    if sg_ is not None: vis_.append(sg_)
+                                if not vis_: continue
+                                Q_ = [vis_[0][0]]
+                                for a_, b_ in vis_:
+                                    if np.linalg.norm(a_ - Q_[-1]) > 1e-6: Q_.append(a_)
+                                    Q_.append(b_)
+                                pts_ = [np.asarray(O) + np.asarray(Mv.T @ np.array([q[0], q[1], 0.0])) for q in Q_]
+                            prims += _hang(section_marker(self, eid, O, Mv, scale, res, vid, pts=pts_)); self.stats['section_markers'] += 1
                     except Exception: self.stats['marker_error'] += 1
                 elif v.get('kind') == 'plan':
                     from .annot import section_marker
@@ -327,7 +349,10 @@ class ViewDrawer:
                 except Exception: self.stats['insulation_error'] += 1
             if info['cls'] in NO_SOLID_CLASSES: self.stats['spatial_skipped'] += 1; continue     # rooms/spaces/areas: drawn through their sub-categories (interior fill, reference), stage 5
             try: pieces = W.walk_record(eid)
-            except Exception as ex: self.stats['walk_error'] += 1; continue
+            except Exception as ex:
+                self.stats['walk_error'] += 1
+                if os.environ.get('RVT_DEBUG'): import traceback; traceback.print_exc()
+                continue
             cid = info['cat']
             fvis, fovs = self.fe.view_filters(ev, eid, cid, (self.doc['categories'].get(cid) or {}).get('parent', INVALID)) if ev.get('filters') else (True, [])
             if not fvis: self.stats['hidden_by_filter'] += 1; continue
@@ -342,8 +367,24 @@ class ViewDrawer:
             if anno and info['cls'] == 'FamilyInstance':
                 try: prims += self.tags.instance_labels(eid, O, Mv)
                 except Exception: self.stats['label_error'] += 1
+                try:                                                      # leaders of generic annotations / keynote notes: anchor -> elbow -> end (Residential details 4 and 5 of sheet A-2)
+                    for lo_ in (self.f.rec(eid)['fields'].get('m_leaders') or []):
+                        l_ = ob(lo_); pts_ = [((np.asarray(l_[k_], float) - O) @ Mv.T)[:2] for k_ in ('m_anchor', 'm_elbow', 'm_end') if l_.get(k_)]
+                        if len(pts_) == 3:
+                            prims.append({'t': 'line', 'pts': [q_.tolist() for q_ in pts_], 'style': res.line(None, cid, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation', 'part': 'leader'})
+                            self.stats['annotation_leaders'] += 1
+                except Exception: self.stats['leader_error'] += 1
             for tx_ in pieces['texts']:
                 q = dict(tx_); q['origin'] = ((np.asarray(q['origin'], float) - O) @ Mv.T)[:2].tolist(); q['layer'] = 'text'
+                if q.get('x') is not None:                       # instance transform carries the annotation scale: direction in view coordinates, size x scale (Help Button '?')
+                    xv = (Mv @ np.asarray(q['x'], float))[:2]; k_ = float(np.linalg.norm(xv))
+                    if k_ > 1e-9:
+                        q['x'] = (xv / k_).tolist()
+                        if q.get('y') is not None: q['y'] = ((Mv @ np.asarray(q['y'], float))[:2] / k_).tolist()
+                        if abs(k_ - 1.0) > 1e-6:
+                            q['size'] = (q.get('size') or 0.0078) * k_
+                            for kk_ in ('box', 'text_box', 'text_off'):
+                                if q.get(kk_): q[kk_] = [a_ * k_ for a_ in q[kk_]]
                 prims.append(q)
             under_occ = None
             if v['kind'] == 'plan' and v.get('range') and info['owner'] == INVALID and not is_rcp:
@@ -357,10 +398,15 @@ class ViewDrawer:
             for c in curves_:
                 if not self.drawable_gs(c.get('gs')): continue
                 if self._gs_hidden(ev, c.get('gs')): self.stats['hidden_subcategory_lines'] += 1; continue
+                if v['kind'] == 'plan' and self._elevation_swing(c.get('gs')): self.stats['elevation_swing_skipped'] += 1; continue      # door/window 'Elevation Swing' lines show only in elevations/sections (Residential plan 32: Revit DXF has none)
                 if info['cls'] in ('SiteSurface', 'TopographySurface') and v['kind'] in ('section', '3d'): continue   # contour/surface curves are not drawn in elevations (the ground profile comes from the mesh)
                 pts = (np.asarray(c['pts'], float) - O) @ Mv.T
+                if is_section and v['kind'] == 'section' and wf is not None and wf > -1e8 and pts[:, 2].max() < wf - 1e-6: self.stats['curves_beyond_far_clip'] += 1; continue
+                if is_section and v['kind'] == 'section' and cut_w is not None and pts[:, 2].min() > cut_w + 1e-6: self.stats['curves_before_cut'] += 1; continue      # symbol lines wholly in front of the section plane (planting 18 ft before the building section)      # family symbol lines (planting) behind the far clip are not drawn
                 if cut_w is not None and not is_section and (pts[:, 2] > cut_w + 1e-6).all() and False: continue
                 lay = 'symbolic'
+                if v['kind'] == 'plan' and not anno and info['cls'] == 'FamilyInstance' and cut_w is not None and (c.get('flags') or 0) & 0x80000 and not (c.get('flags') or 0) & 0x2a0 and (pts[:, 2] > cut_w + 1e-6).all():
+                    self.stats['family_lines_above_cut'] += 1; continue      # family curves flagged 0x80000 (not 0x20/0x80/0x200) lying above the cut plane (door head / overhead track lines) are not in Revit's plan (Residential 32/36/basement: P +1.4..6 pts, R -0.3..1)
                 if is_rcp and not anno and cut_w is not None and (pts[:, 2] > cut_w + 1e-6).all():
                     # family plan symbols below a ceiling plan's cut (furniture, fixtures): only in the underlay, halftone
                     if rcp_under is None: continue
@@ -399,6 +445,9 @@ class ViewDrawer:
                         if np.hypot(dv[0], dv[1]) > 1e-9: rot = math.atan2(dv[1], dv[0])
                     prims.append({'t': 'segs', 'segs': patterns.hatch(reg, pat, scale, view_rot=rot), 'style': {'w': 0.1, 'rgb': col if isinstance(col, list) else [0, 0, 0], 'dash': None},
                                   'elem': eid, 'layer': 'symbolic_fill'})
+                elif 'placer' in fl and fl.get('edge_gs') not in (None, -1) and fl['edge_gs'] not in W.invisible_gs and self._region_rgb(fl['edge_gs'], res) not in (None, [255, 255, 255]):
+                    # filled region type with a visible line style: its colour is the style's (Commercial 'Help Button' Solid Blue / Solid Black regions)
+                    prims.append({'t': 'fill', 'loops': loops, 'color': self._region_rgb(fl['edge_gs'], res), 'pattern': pid, 'gs': fl['edge_gs'], 'elem': eid, 'layer': 'symbolic_fill'})
                 elif 'placer' in fl:
                     # solid / pattern-less fill inside a detail or annotation family: a masking region (white) that hides what is drawn
                     # before it in the view's draw order (2020 Residential 'at grade' vs Revit's DXF: lines cut where components overlap)
@@ -748,6 +797,13 @@ class ViewDrawer:
         c = st.get('cat')
         return c in hc[1]
 
+    def _elevation_swing(self, gs):
+        c = self.__dict__.setdefault('_esw', {})
+        if gs not in c:
+            st = self.doc['gstyles'].get(gs) or {}
+            c[gs] = ((self.doc['categories'].get(st.get('cat')) or {}).get('name') == 'Elevation Swing')
+        return c[gs]
+
     def drawable_gs(self, gs):
         """geometry styled with an internal (non-API) category - wall layer/reference planes, location lines - is never drawn"""
         if gs in (None, -1): return True
@@ -789,6 +845,25 @@ class ViewDrawer:
         paper (sizes are paper sizes: grow with the view scale), part (sub-part of the element: text | line | leader | arrow | witness | head | frame ...),
         anchor (world feet point the annotation sits at: its first point)"""
         info = self.vis.info.info; first = {}
+        lead = [p for p in prims if p.get('_tagged') is not None]
+        if lead:                                                  # tag leaders end on the tagged element's drawn geometry, nearest to the tag head
+            byel = {}
+            for p in prims:
+                if p.get('elem') is not None and p.get('layer') in ('cut', 'projection', 'symbolic', 'cut_fill', 'underlay') and p['t'] in ('line', 'segs', 'cut'):
+                    byel.setdefault(p['elem'], []).append(p)
+            for p in lead:
+                tg = p.pop('_tagged'); pl = byel.get(tg)
+                if not pl: continue
+                h = np.asarray(p['pts'][0], float); best = None
+                for q in pl:
+                    for sg in ([q['pts']] if q['t'] == 'line' else q['segs']):
+                        A = np.asarray(sg, float)[:, :2]
+                        for a_, b_ in zip(A[:-1], A[1:]):
+                            ab = b_ - a_; L2 = float(ab @ ab)
+                            t_ = 0.0 if L2 < 1e-12 else min(max(float((h - a_) @ ab) / L2, 0.0), 1.0)
+                            c_ = a_ + ab * t_; dd = float(np.linalg.norm(c_ - h))
+                            if best is None or dd < best[0]: best = (dd, c_)
+                if best is not None: p['pts'][1] = best[1].tolist()
         for p in prims:
             e = p.get('elem')
             if e is None: continue
@@ -943,6 +1018,10 @@ class ViewDrawer:
                         'anchor': True, 'elem': eid, 'layer': 'text', 'part': 'text'})
         return out
 
+    def _region_rgb(self, gs, res):
+        st = res.line(gs, None, 'proj', None)
+        return list(st.get('rgb') or [0, 0, 0]) if st else None
+
     def text_note_leaders(self, eid, O, Mv, scale, res, cat):
         """text note leaders: anchor -> elbow -> end (polyline) or, with m_bArcLeaders, the circle arc through the three points; arrow head
         of the text type's leader style (Arrow 30 Degree: full angle in param -4293960870.., size on paper) at the end"""
@@ -1001,12 +1080,27 @@ class ViewDrawer:
 
     HOST_CATS = {-2000011, -2000032, -2000035, -2000038, -2000040}       # walls, floors, roofs, ceilings, ? (compound structures)
 
+    def _compound_of(self, eid):
+        r = self.f.rec(eid)
+        if not r: return None
+        import re as _re
+        for k_, v_ in r['fields'].items():
+            if _re.fullmatch(r'm_\w*Attr(ibutes)?Id', k_) and v_ is not None:
+                t = self.f.rec(self.f.eid(v_))
+                cs = ob((t or {}).get('fields', {}).get('m_pCompoundStructure')) if t else None
+                if cs: return cs
+        return None
+
     def cut_fill(self, eid, cid, gs, ov, detail):
         """cut pattern of an element: override > coarse fill of the type (coarse detail, host objects) > material of the cut body > category material"""
         if ov.get('cut_fg_visible') is False: return None
         if ov.get('cut_fg_pattern') is not None: return {'pattern': ov['cut_fg_pattern'], 'color': ov.get('cut_fg_color') or [0, 0, 0]}
         info = self.vis.info.info.get(eid) or {}
         if detail == 1 and cid in self.HOST_CATS:            # coarse: host objects show their type's coarse fill (or nothing); families keep material patterns
+            cs_ = self._compound_of(eid)
+            if cs_ is not None:                              # the coarse fill lives in the type's compound structure (basement concrete walls)
+                pid_ = self.f.eid(cs_.get('m_coarseScaleFillPatternElemId'))
+                if pid_ not in (None, -1, INVALID): return {'pattern': pid_, 'color': self._rgb(cs_.get('m_coarseScaleFillColor')) or [0, 0, 0]}
             t = self.type_params(eid)
             if t is not None:
                 pid = t.get(-1002106)
@@ -1144,6 +1238,40 @@ class ViewDrawer:
                     pts = np.array([C + r * (math.cos(t) * X + math.sin(t) * Y) for t in th])
                 out.append({'pts': pts, 'gs': gs})
         return out
+
+    def _label_param_ids(self):
+        c = self.__dict__.get('_lblp')
+        if c is None:
+            c = self._lblp = set()
+            for r in self.f.recs('ParamElemFamily'):
+                d = (ob_(r['fields'].get('m_pParamDef')) or {})
+                if d.get('m_caption') == 'Label': c.add(r['id'])
+        return c
+
+    def family_label(self, eid, O, Mv, scale):
+        """family text label bound to the string parameter 'Label' ('REF.', 'DW' of appliances): the label element is not in the saved symbol graphics;
+        Revit draws it 3/32\" Arial centred on the symbol's bounding box (2020 Residential plan 32 DXF A-ANNO-NOTE)"""
+        ids = self._label_param_ids()
+        if not ids: return []
+        r = self.f.rec(eid)
+        fl = r['fields']; sym = self.f.eid(fl.get('m_masterSymbolId'))
+        if sym in (None, 4294967295): return []
+        txt = None
+        for rec in (self.f.rec(sym), self.f.rec(self.f.eid((self.f.rec(sym) or {'fields': {}})['fields'].get('m_familyId'))) if False else None):
+            if not rec: continue
+            for k, val in self.tags.fam_values(rec).items():
+                if int(k) in ids and isinstance(val, str) and val.strip(): txt = val.strip(); break
+            if txt: break
+        if not txt: return []
+        gb = (self.f.g.res.get(sym) or {}).get('bbox')
+        trf = (ob_(fl.get('m_pInstanceInfo')) or {}).get('m_Trf') or {}
+        if not gb or not trf.get('m_3x3'): return []
+        M = np.asarray(trf['m_3x3'], float); o = np.asarray(trf['m_or'], float)
+        ctr = o + M @ ((np.asarray(gb[0], float) + np.asarray(gb[1], float)) / 2)
+        uv = ((ctr - O) @ Mv.T)[:2]
+        font = self.doc['fonts'].get(next(iter(self.doc['fonts']), None)) or {}
+        return [{'t': 'text', 'text': txt, 'origin': uv.tolist(), 'x': [1.0, 0.0], 'size': 3 / 32 / 12 * scale, 'font': 'Arial', 'halign': 1, 'valign': 1,
+                 'anchor': True, 'elem': eid, 'layer': 'text'}]
 
     def stairs_path_text(self, eid, O, Mv, scale, v):
         """'UP' at the start riser of a run that starts at the view's level, 'DN' at the end riser of a run that ends there: baseline-left text at the

@@ -102,8 +102,12 @@ class File:
     @property
     def g(self):
         if self._g is None:
-            import rvt_elemmesh
-            self._g = rvt_elemmesh.Doc(self.fn)
+            try:
+                import rvt_fast
+                self._g = rvt_fast.Doc(self.fn)             # subclass of the reference Doc, records from Rust buffers
+            except Exception:
+                import rvt_elemmesh
+                self._g = rvt_elemmesh.Doc(self.fn)
         return self._g
 
     def graphics(self, eid):
@@ -111,8 +115,12 @@ class File:
         except Exception: return None
 
     def params(self):
-        import rvt_params
-        return rvt_params.params(self.fn)
+        try:
+            import rvt_fast
+            return rvt_fast.params(self.fn)                 # identical output to the reference, Rust kernels
+        except Exception:
+            import rvt_params
+            return rvt_params.params(self.fn)
 
 
 @functools.lru_cache(None)

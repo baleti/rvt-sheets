@@ -35,7 +35,7 @@ def _inside(p, box):
     return lo[0] <= u1 and hi[0] >= u0 and lo[1] <= v1 and hi[1] >= v0
 
 
-def body(prims, scale, tx, layer_order=('underlay', 'room_fill', 'symbolic_fill', 'cut_fill', 'surface_fill', 'projection', 'cut', 'symbolic', 'annotation_fill'), clip=None):
+def body(prims, scale, tx, layer_order=('underlay', 'room_fill', 'symbolic_fill', 'cut_fill', 'surface_fill', 'projection', 'cut', 'symbolic', 'annotation_fill'), clip=None, mclip=False):
     """svg elements; tx(u, v) -> paper mm (x, y)"""
     out = []
     def D(pts): return ' '.join(('M' if i == 0 else 'L') + '%.3f %.3f' % tx(*p[:2]) for i, p in enumerate(pts))
@@ -51,6 +51,7 @@ def body(prims, scale, tx, layer_order=('underlay', 'room_fill', 'symbolic_fill'
     for p in sorted(prims, key=key):
         if clip is not None and not _inside(p, clip): continue
         e = ' data-e="%s"' % p.get('elem')
+        if mclip and (p.get('layer') in MODEL_LAYERS or p.get('layer') == 'mask'): e += ' clip-path="url(#cropclip)"'      # model content is cut at the crop region (Revit shows nothing of it beyond)
         if p['t'] == 'line': out.append('<path d="%s" %s%s/>' % (D(p['pts']), stroke(p['style']), e))
         elif p['t'] == 'segs': out.append('<path d="%s" %s%s/>' % (' '.join(D(s) for s in p['segs']), stroke(p['style']), e))
         elif p['t'] == 'cut':
@@ -65,18 +66,28 @@ def body(prims, scale, tx, layer_order=('underlay', 'room_fill', 'symbolic_fill'
     return out
 
 
-def view_svg(drawing, scale, margin_mm=5, crop=None, hang=False):
+def view_svg(drawing, scale, margin_mm=5, crop=None, hang=True):
     """crop: (u0, v0, u1, v1) of an active crop region - the drawing is bounded by it (Revit's own view export does the same)"""
     b = bounds(drawing['prims'])
     if b is None: return '<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm"/>'
     (u0, v0), (u1, v1) = b
-    hg = [p for p in drawing['prims'] if p.get('hang')]
-    if hang and hg and crop is None:                                  # marker heads just outside the model extents are part of the picture
+    hg = [p for p in drawing['prims'] if p.get('hang') or p.get('layer') in ('annotation', 'annotation_fill', 'text') and p.get('elem') is not None]
+    hb_all = None
+    if hang and hg:                                  # dimension chains, tags, notes and marker heads outside the model extents are part of Revit's picture (Residential plan 32 PNG)
         hb = bounds(hg, False)
+        tp = []                                                          # text extents: origin and an estimated end of the longest line
+        for q in hg:
+            if q.get('t') == 'text' and q.get('origin') is not None and q.get('text'):
+                o_ = np.asarray(q['origin'][:2], float); xd = np.asarray(q.get('x') or [1.0, 0.0], float)[:2]; wd = max(len(l) for l in q['text'].split('\n')) * 0.55 * (q.get('size') or 0.01) / 0.72
+                tp += [o_, o_ + xd / (np.linalg.norm(xd) or 1.0) * wd * (-1 if q.get('halign') == 2 else 1), o_ + [0.0, -(q.get('size') or 0.01) * 1.2 * q['text'].count('\n')]]
+        if tp:
+            T_ = np.asarray(tp, float)
+            hb = (T_.min(0), T_.max(0)) if hb is None else (np.minimum(hb[0], T_.min(0)), np.maximum(hb[1], T_.max(0)))
         if hb is not None:
-            pad = 70.0 / (FT_MM / scale)
+            pad = 1e4 / (FT_MM / scale)                              # no limit: Revit's view picture holds every annotation (colour scheme legend 100 mm right of the plan)
             (a0, b0), (a1, b1) = hb
-            u0 = min(u0, max(a0, u0 - pad)); v0 = min(v0, max(b0, v0 - pad)); u1 = max(u1, min(a1, u1 + pad)); v1 = max(v1, min(b1, v1 + pad))
+            hb_all = (a0, b0, a1, b1)
+            if crop is None: u0 = min(u0, max(a0, u0 - pad)); v0 = min(v0, max(b0, v0 - pad)); u1 = max(u1, min(a1, u1 + pad)); v1 = max(v1, min(b1, v1 + pad))
     if crop is not None:
         cu0, cv0, cu1, cv1 = crop
         if max(u0, cu0) < min(u1, cu1) and max(v0, cv0) < min(v1, cv1):
@@ -89,11 +100,17 @@ def view_svg(drawing, scale, margin_mm=5, crop=None, hang=False):
                     pad = 70.0 / (FT_MM / scale)                         # heads sit within ~70 mm of paper of the crop
                     (a0, b0), (a1, b1) = db
                     u0 = min(u0, max(a0, cu0 - pad)); v0 = min(v0, max(b0, cv0 - pad)); u1 = max(u1, min(a1, cu1 + pad)); v1 = max(v1, min(b1, cv1 + pad))
+    if crop is not None and hb_all is not None:                  # annotations outside the crop region (colour scheme legend, tags, dimension chains) stay in the picture
+        u0 = min(u0, hb_all[0]); v0 = min(v0, hb_all[1]); u1 = max(u1, hb_all[2]); v1 = max(v1, hb_all[3])
     k = FT_MM / scale
     W = (u1 - u0) * k + 2 * margin_mm; H = (v1 - v0) * k + 2 * margin_mm
     tx = lambda u, v: ((u - u0) * k + margin_mm, (v1 - v) * k + margin_mm)
-    return ('<svg xmlns="http://www.w3.org/2000/svg" width="%.1fmm" height="%.1fmm" viewBox="0 0 %.3f %.3f"><rect width="100%%" height="100%%" fill="#fff"/>\n' % (W, H, W, H)
-            + '\n'.join(body(drawing['prims'], scale, tx, clip=((u0 - 2 * margin_mm / k, v0 - 2 * margin_mm / k), (u1 + 2 * margin_mm / k, v1 + 2 * margin_mm / k)))) + '\n</svg>\n')
+    defs = ''; mc = False
+    if crop is not None:
+        x0_, y1_ = tx(crop[0], crop[1]); x1_, y0_ = tx(crop[2], crop[3])
+        defs = '<defs><clipPath id="cropclip"><rect x="%.3f" y="%.3f" width="%.3f" height="%.3f"/></clipPath></defs>\n' % (min(x0_, x1_), min(y0_, y1_), abs(x1_ - x0_), abs(y1_ - y0_)); mc = True
+    return ('<svg xmlns="http://www.w3.org/2000/svg" width="%.1fmm" height="%.1fmm" viewBox="0 0 %.3f %.3f"><rect width="100%%" height="100%%" fill="#fff"/>\n' % (W, H, W, H) + defs
+            + '\n'.join(body(drawing['prims'], scale, tx, clip=((u0 - 2 * margin_mm / k, v0 - 2 * margin_mm / k), (u1 + 2 * margin_mm / k, v1 + 2 * margin_mm / k)), mclip=mc)) + '\n</svg>\n')
 
 
 def text_svg(p, tx, scale):
@@ -108,8 +125,15 @@ def text_svg(p, tx, scale):
         pass
     lines = p['text'].split('\n'); lh = size_mm * LINE_PITCH
     ha = {0: 'start', 1: 'middle', 2: 'end'}.get(p.get('halign') or 0, 'start')
-    asc = size_mm * 0.9; n = len(lines)
-    first = {0: asc, 1: asc - ((n - 1) * lh + asc) / 2, 2: -(n - 1) * lh}.get(p.get('valign') or 0, asc)
-    tsp = ''.join('<tspan x="0" dy="%.3f">%s</tspan>' % ((first if i == 0 else lh), html.escape(l)) for i, l in enumerate(lines))
+    asc = size_mm * 0.9; n = len(lines); dx = 0.0
+    if p.get('anchor') and 'rtf' not in p: first = {0: asc, 1: asc - ((n - 1) * lh + asc) / 2, 2: -(n - 1) * lh}.get(p.get('valign') or 0, asc)
+    else:
+        # saved-graphics rich text (family labels such as the Help Button '?'): origin = top-left of the layout box, alignment inside the box
+        bw = (p.get('box') or [0, 0])[0] * FT_MM / scale
+        dx = {0: 0.0, 1: bw / 2, 2: bw}.get(p.get('halign') or 0, 0.0) if bw else 0.0
+        first = size_mm
+    tsp = ''.join('<tspan x="%.3f" dy="%.3f">%s</tspan>' % (dx, (first if i == 0 else lh), html.escape(l)) for i, l in enumerate(lines))
     wt = ' font-weight="bold"' if p.get('bold') else ''
-    return '<text xml:space="preserve" transform="translate(%.3f %.3f) rotate(%.3f)" font-family="%s, sans-serif" font-size="%.3f" text-anchor="%s"%s data-e="%s">%s</text>' % (x, y, ang, html.escape(p.get('font') or 'Arial'), size_mm, ha, wt, p.get('elem'), tsp)
+    c = p.get('color'); fill = ''
+    if isinstance(c, int) and 0 < c < 1 << 24: fill = ' fill="#%02x%02x%02x"' % (c & 255, (c >> 8) & 255, (c >> 16) & 255)       # text colour (BGR int): the Help Button '?' is light grey on blue
+    return '<text xml:space="preserve" transform="translate(%.3f %.3f) rotate(%.3f)" font-family="%s, sans-serif" font-size="%.3f" text-anchor="%s"%s%s data-e="%s">%s</text>' % (x, y, ang, html.escape(p.get('font') or 'Arial'), size_mm, ha, wt, fill, p.get('elem'), tsp)

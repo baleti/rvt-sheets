@@ -372,7 +372,7 @@ class Decoder:
                  'type': self.E(o.get('m_attrId')), 'flags': o.get('m_flags'), 'nowrap': o.get('m_bNoWrapping')}
             if kind == 'label':
                 d['params'] = [{'param': self.E(p.get('m_paramId')), 'name': self.param_names.get(str(self.E(p.get('m_paramId')))), 'sample': p.get('m_sampleText'), 'prefix': p.get('m_prefix'),
-                                'suffix': p.get('m_suffix'), 'spaces': p.get('m_leadingSpaces'), 'linebreak': p.get('m_bLeadingLineBreak')} for p in o.get('m_paramDataFormattingArr') or []]
+                                'suffix': p.get('m_suffix'), 'fmt': (p.get('m_formatOptions') if (p.get('m_formatOptions') or {}).get('m_bUseDefault') == 0 else None), 'spaces': p.get('m_leadingSpaces'), 'linebreak': p.get('m_bLeadingLineBreak')} for p in o.get('m_paramDataFormattingArr') or []]
             return d
         return {'id': sid, 'name': path(fl, 'm_symbolInfo', 'm_name'), 'family': self.E(fl.get('m_familyId')), 'outline': path(fl, 'm_outline', 'm_minmax'),
                 'labels': [note(n, 'label') for n in fl.get('m_tagNoteData') or []], 'texts': [note(n, 'text') for n in fl.get('m_textNoteData') or []]}

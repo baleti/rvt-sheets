@@ -11,6 +11,10 @@ from . import units
 IN = 1 / 12.0
 
 
+def typ_params(a, tf):
+    return ob(tf.get('m_pParamValueSetElementId')) or {}
+
+
 class Annotations:
     def __init__(self, drawer):
         self.d = drawer; self.f = drawer.f; self.doc = drawer.doc
@@ -47,6 +51,45 @@ class Annotations:
                     'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
         return out
 
+    def spot_coordinate(self, eid, fl, tf, O, Mv, scale, res):
+        """spot coordinate (dimension style type 5): filled arrow at the reference point, leader a -> bend (m_bendOrPosPtOffset) -> end (+ m_horizLeaderLength),
+        the type's target symbol (circle + cross + underline) at the leader end, text 'N <north>' / 'E <east>' above it (values m_values[2] / [1] of the
+        first segment, the style's length format); layout read off the rst basic Level 2 DXF (leader end E: text left 0.5 in, top 0.34 in of paper from E)"""
+        P = np.asarray(fl['m_refPnts'][0], float); a = ((P - O) @ Mv.T)[:2]
+        off = np.asarray(fl.get('m_bendOrPosPtOffset') or [0, 0, 0], float)
+        b = a + (Mv @ off)[:2]; dx = 1.0 if b[0] >= a[0] else -1.0
+        hl = float(fl.get('m_horizLeaderLength') or 0.0); c = b + [dx * hl, 0.0]
+        line = res.line(None, -2000260, 'proj', eid, annotation=True)
+        out = [{'t': 'line', 'pts': [a.tolist(), b.tolist(), c.tolist()], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'leader'}]
+        # arrowhead of the type's leader style (filled): length = style size, full angle = style angle
+        ang, size = 15 * math.pi / 180, 1 / 16 * IN
+        ls = self.f.rec(self.f.eid(tf.get('m_arrowHeadStyleId')))
+        if ls:
+            for x in path(ls['fields'], 'm_pParamValueSetDouble', 'm_paramSet') or []:
+                if x.get('m_paramId') == 4293960870: ang = x['m_value']
+                elif x.get('m_paramId') == 4293960882: size = x['m_value']
+        u = (b - a); u = u / (np.linalg.norm(u) or 1.0); n = np.array([-u[1], u[0]])
+        L = size * scale; w = L * math.tan(ang / 2)
+        out.append({'t': 'fill', 'loops': [[a.tolist(), (a + u * L + n * w).tolist(), (a + u * L - n * w).tolist(), a.tolist()]], 'color': [0, 0, 0], 'elem': eid, 'layer': 'annotation_fill', 'part': 'arrow'})
+        sym = None
+        for x in path(typ_params(self, tf), 'm_paramSet') or []:
+            if x.get('m_paramId') == 4293960860: sym = self.f.eid(x.get('m_value'))
+        if sym not in (None, INVALID, -1):
+            out += symbol_prims(self.d, sym, np.eye(3) * scale, np.array([c[0], c[1], 0.0]), eid, res, -2000260)
+        la = ob(tf.get('m_pLineAndTextAttr')) or {}
+        font = self.doc['fonts'].get(self.f.eid(la.get('m_fontId'))) or {}
+        fs = (font.get('size') or 3 / 32 * IN) * scale
+        seg = ob((fl.get('m_ArrSegInfo') or [None])[0]) or {}
+        vals = [(q.get('m_value') if isinstance(q, dict) else None) for q in seg.get('m_values') or []]
+        opt = ob(tf.get('m_oLinFormatOptions')) or {}
+        lines = []
+        if len(vals) >= 3 and vals[2] is not None: lines.append('%s %s' % (tf.get('m_seIndNS') or 'N', units.fmt_length(float(vals[2]), opt, self.proj_len)))
+        if len(vals) >= 2 and vals[1] is not None: lines.append('%s %s' % (tf.get('m_seIndEW') or 'E', units.fmt_length(float(vals[1]), opt, self.proj_len)))
+        if lines:
+            out.append({'t': 'text', 'text': '\n'.join(lines), 'origin': [c[0] - 0.5 * IN * scale if dx > 0 else c[0] + 0.5 * IN * scale, c[1] + 0.34 * IN * scale], 'x': [1.0, 0.0], 'size': fs,
+                        'font': font.get('name') or 'Arial', 'halign': 0 if dx > 0 else 2, 'valign': 0, 'anchor': True, 'elem': eid, 'layer': 'text', 'part': 'text'})
+        return out
+
     def spot_elevation(self, eid, O, Mv, scale, res):
         """spot elevation in plans/sections (draft, no Revit reference yet): target symbol (circle + cross) at the reference point, leader to
         the bend point (m_bendOrPosPtOffset, model units), shoulder (style m_leaderShoulderLength, paper) and the elevation text (reference z
@@ -54,6 +97,8 @@ class Annotations:
         r = self.f.rec(eid, 'SpotElevation')
         if not r: return []
         fl = r['fields']; ts = ob(fl.get('m_oTypeState')) or {}
+        typ_ = self.f.rec(self.f.eid(fl.get('m_styleSymbolId')))
+        if typ_ and typ_['fields'].get('m_dimensionStyleType') == 5 and fl.get('m_refPnts'): return self.spot_coordinate(eid, fl, typ_['fields'], O, Mv, scale, res)
         if ts.get('m_slopeRep') == 1 or not fl.get('m_refPnts') or not fl.get('m_displayElevation'): return []
         P = np.asarray(fl['m_refPnts'][0], float)
         a = ((P - O) @ Mv.T)[:2]
@@ -101,6 +146,9 @@ class Annotations:
         r = self.f.rec(eid, 'LinearDimString')
         if not r: return []
         fl = r['fields']
+        wr = fl.get('m_witnessRefs') or []
+        if wr and all(self.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId')) in (None, INVALID, -1) for w in wr):
+            return []            # every witness reference points at no element (Snowdon L2 dimension 595385): Revit does not draw it
         dl = ob(fl.get('m_pDimLine')) or {}
         if not dl.get('m_origin'): return []
         P = lambda p: ((np.asarray(p, float) - O) @ Mv.T)[:2]
@@ -129,12 +177,31 @@ class Annotations:
         out = []
         t0, t1 = min(ts), max(ts)
         out.append({'t': 'line', 'pts': [(o + d * t0).tolist(), (o + d * t1).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'line'})
-        for p, t in zip(refs, ts):
+        # references to family instances (window/door centre planes) take the type's centerline tick mark ('Dot Open 1/16"') instead of the linear tick
+        wr = fl.get('m_witnessRefs') or []
+        cen = set()
+        if len(wr) == len(refs):
+            for i_, w_ in enumerate(wr):
+                try:
+                    g_ = ob(w_['m_pWitnessRef'])['m_geomRef']; r_ = self.f.rec(self.f.eid(g_['m_elemId']))
+                    if r_ and r_['class'] == 'FamilyInstance': cen.add(i_)
+                except Exception: pass
+        cdia = 1 / 16 * IN * scale
+        cst = self.f.rec(self.f.eid(tf.get('m_centerlineTickMarkStyleId')))
+        if cst:
+            import re as _re
+            m_ = _re.search(r'(\d+)/(\d+)"', path(cst['fields'], 'm_symbolInfo', 'm_name') or '')
+            if m_: cdia = int(m_.group(1)) / int(m_.group(2)) * IN * scale
+        for i_, (p, t) in enumerate(zip(refs, ts)):
             q = o + d * t                       # foot on the dimension line
             v = q - p; L = np.linalg.norm(v)
             if L > gap:
                 u = v / L
                 out.append({'t': 'line', 'pts': [(p + u * gap).tolist(), (q + u * ext).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'witness'})
+            if i_ in cen:
+                th = np.linspace(0, 2 * math.pi, 25)
+                out.append({'t': 'line', 'pts': [(q + (d * math.cos(x) + n * math.sin(x)) * cdia / 2).tolist() for x in th], 'style': dict(tickst, w=line['w']), 'elem': eid, 'layer': 'annotation', 'part': 'arrow'})
+                continue
             a = (d + n) / math.sqrt(2) * tick / 2
             out.append({'t': 'line', 'pts': [(q - a).tolist(), (q + a).tolist()], 'style': dict(tickst, w=max(tickst['w'], line['w'] * 2)), 'elem': eid, 'layer': 'annotation', 'part': 'arrow'})
         # segment texts
@@ -154,6 +221,11 @@ class Annotations:
             pos = P(org) if org and any(org) else o + d * (ts[i] + ts[i + 1]) / 2
             out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * 0.3).tolist(), 'x': d_txt.tolist(), 'size': size,
                         'font': font.get('name') or 'Arial', 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
+            if tf.get('m_alternateUnits') == 2 and (ob(tf.get('m_oLinFormatOptionsAlternate')) or {}).get('m_accuracy', 1) >= 1e-4:                  # alternate units below the primary text (rst basic 3000 / 9' - 10": 2.27 ft = 2.91 text heights at 1:100)
+                aopt = ob(tf.get('m_oLinFormatOptionsAlternate')) or {}
+                atxt = (tf.get('m_alternateUnitsPrefix') or '') + units.fmt_length(val, aopt, self.proj_len) + (tf.get('m_alternateUnitsSuffix') or '')
+                out.append({'t': 'text', 'text': atxt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * (0.3 - 2.91)).tolist(), 'x': d_txt.tolist(), 'size': size,
+                            'font': font.get('name') or 'Arial', 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text', 'part': 'alt_text'})
         if not segs:
             txt = units.fmt_length(t1 - t0, ob(tf.get('m_oLinFormatOptions')) or {}, self.proj_len)
             pos = o + d * (t0 + t1) / 2
@@ -336,6 +408,10 @@ class Tags:
         if tr:
             ii = ob(tr['fields'].get('m_pInstanceInfo')) or {}
             sym = self.f.eid(ii.get('m_symbolId')) if ii else None
+            if sym in (None, INVALID):                         # system families (walls, floors...): the type element sits in an '...AttributesId' field
+                import re as _re
+                for k_, v_ in tr['fields'].items():
+                    if _re.fullmatch(r'm_\w*Attr(ibutes)?Id', k_) and v_ is not None and self.f.eid(v_) not in (None, INVALID, -1) and self.f.rec(self.f.eid(v_)): sym = self.f.eid(v_); break
             tsym = sym
             if sym not in (None, INVALID):
                 for k, v in self.params_of(sym).items(): vals.setdefault(k, v)
@@ -366,7 +442,7 @@ class Tags:
             for p in coll:
                 if p['t'] == 'line' and not frame:
                     pts = gfx.transform_pts(p['pts'], R, o)
-                    out.append({'t': 'line', 'pts': [q[:2] for q in pts], 'style': res.line(p.get('gs'), None, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation'})
+                    out.append({'t': 'line', 'pts': [q[:2] for q in pts], 'style': res.line(p.get('gs'), None, 'proj', eid, annotation=True), 'gs': p.get('gs'), 'elem': eid, 'layer': 'annotation'})
                 elif p['t'] == 'fill' and p.get('loops'):
                     out.append({'t': 'fill', 'loops': [[q[:2] for q in gfx.transform_pts(l, R, o)] for l in p['loops']], 'color': p.get('color'), 'elem': eid, 'layer': 'symbolic_fill'})
                 elif p['t'] == 'text' and p.get('text') and p.get('origin') is not None:
@@ -387,24 +463,54 @@ class Tags:
             if bb is not None: anchor = ((np.asarray(bb[0], float) + np.asarray(bb[1], float)) / 2).tolist()
         except Exception: anchor = None
         for lab in (sym or {}).get('labels', []):
-            parts = []
+            parts = []; seps = []
             for prm in lab.get('params') or []:
                 nm = prm.get('name') or ''
                 v = raw.get(prm.get('param')) if isinstance(prm.get('param'), int) and prm.get('param') < 0 else None
                 if v is None: v = vals.get(nm)
                 if prm.get('param') == -1002001 and not v and tsym not in (None, INVALID): v = self.type_name(tsym)       # Type Name: the (master) symbol's own name
+                if v is None and nm == 'Area' and tr and tr['class'] == 'RoomElem':      # room area: Revit computes it from the boundary; here the floor face of the room volume
+                    try:
+                        import rvt_elemmesh as E
+                        T_ = np.asarray(E.element_mesh(self.f.g, tagged).get('tris') or [], float).reshape(-1, 3, 3)
+                        if len(T_):
+                            fl_ = T_[(np.abs(T_[:, :, 2] - T_[:, :, 2].min()) < 1e-3).all(1)]
+                            if len(fl_): v = float(sum(np.linalg.norm(np.cross(t_[1] - t_[0], t_[2] - t_[0])) / 2 for t_ in fl_))
+                    except Exception: v = None
                 if v is None: v = ''                                   # Revit shows an empty label when the value is missing (sample text only in the family editor)
+                if isinstance(v, float) and prm.get('fmt'):
+                    v = units.fmt_length(v, dict(prm['fmt'], m_displayUnits=units.du_of(prm['fmt'])), units.length_format(self.f))      # the label's own number format (CW12")
+                    if (ob(prm['fmt'].get('m_symbolTypeId') if isinstance(prm['fmt'].get('m_symbolTypeId'), dict) else {}) or {}).get('m_typeId', '') == '': pass
                 if isinstance(v, float):
                     if any(w in nm for w in ('Length', 'Width', 'Height', 'Elevation', 'Offset', 'Thickness', 'Depth', 'Perimeter')): v = units.fmt_length(v, {'m_bUseDefault': 1}, units.length_format(self.f))
                     elif 'Area' in nm: v = ('%d SF' % round(v)) if units.is_imperial(self.f) else ('%.2f m²' % (v * 0.09290304))
                     else: v = '%g' % v
                 parts.append((prm.get('prefix') or '') + str(v) + (prm.get('suffix') or ''))
+                seps.append('\n' if prm.get('linebreak') else ' ' * int(prm.get('spaces') if prm.get('spaces') is not None else 1))
             tt = self.doc['text_types'].get(lab['type']) or {}
             font = self.doc['fonts'].get(tt.get('font')) or {}
             org = gfx.transform_pts([lab['origin']], R, o)[0]
-            out.append({'t': 'text', 'text': ' '.join(parts), 'origin': org[:2], 'x': [math.cos(ang), math.sin(ang)], 'size': (font.get('size') or 0.0078) * scale,
+            txt_ = ''.join((seps[k_] if k_ else '') + pt_ for k_, pt_ in enumerate(parts))      # separators between label parameters: line break or the stored number of spaces (Snowdon CW12\")
+            if lab.get('width') and not lab.get('nowrap') and txt_:           # label width (paper): Revit wraps the label text at it (rst basic beam tags: '... CHS-Circular / Hollow / Sections ...')
+                from .viewdraw import wrap_text
+                txt_ = wrap_text(txt_, lab['width'] * scale, (font.get('size') or 0.0078) * scale / 0.72, font.get('name') or 'Arial', bool(tt.get('bold')))
+            out.append({'t': 'text', 'text': txt_, 'origin': org[:2], 'x': [math.cos(ang), math.sin(ang)], 'size': (font.get('size') or 0.0078) * scale,
                         'font': font.get('name') or 'Arial', 'bold': tt.get('bold'), 'halign': SheetComposer._halign(lab['flags'] or 0), 'valign': SheetComposer._valign(lab['flags'] or 0),
                         'anchor': True, 'elem': eid, 'layer': 'text'})
+        if r['class'] == 'IndependentTag' and fl.get('m_leader') and anchor is not None:
+            # leader (2020 layout): straight line from the head to the tagged element's centre (rst basic section tags: vertical leaders down to the joist / beam)
+            try:
+                end = ((np.asarray(anchor, float) + np.asarray(fl.get('m_endOffset') or [0, 0, 0], float) - O) @ Mv.T)[:2]
+                bb_ = self.d.vis.info.bbox(tagged)
+                if bb_ is not None:                              # long thin elements (joists, beams): the leader meets the element straight below / beside the head
+                    cs_ = np.asarray([((np.asarray([x_, y_, z_], float) - O) @ Mv.T)[:2] for x_ in (bb_[0][0], bb_[1][0]) for y_ in (bb_[0][1], bb_[1][1]) for z_ in (bb_[0][2], bb_[1][2])])
+                    lo_, hi_ = cs_.min(0), cs_.max(0); wd_, ht_ = hi_ - lo_
+                    if wd_ > 2 * ht_: end = np.array([min(max(o[0], lo_[0]), hi_[0]), (lo_[1] + hi_[1]) / 2])
+                    elif ht_ > 2 * wd_: end = np.array([(lo_[0] + hi_[0]) / 2, min(max(o[1], lo_[1]), hi_[1])])
+                cat_ = self.d.vis.info.info.get(eid, {}).get('cat')
+                if np.linalg.norm(end - o[:2]) > 1e-6:
+                    out.append({'t': 'line', 'pts': [o[:2].tolist(), end.tolist()], 'style': res.line(None, cat_, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation', 'part': 'leader', '_tagged': tagged})
+            except Exception: pass
         if anchor is not None:
             for p_ in out: p_['anchor'] = anchor; p_['host'] = tagged       # anchor: world feet (a text prim's old boolean 'anchor' is replaced; both truthy)
         return out
@@ -433,7 +539,7 @@ class Markers:
         R = np.eye(3) * scale
         if g and g.get('class') == 'GElement':
             for p in gfx.Collector(self.f).collect(g):
-                if p['t'] == 'line' and p.get('gs') not in (None, -1) and self.d.drawable_gs(p['gs']): out.append({'t': 'line', 'pts': [q[:2] for q in gfx.transform_pts(p['pts'], R, c)], 'style': res.line(p.get('gs'), -2000535, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation'})
+                if p['t'] == 'line' and p.get('gs') not in (None, -1) and self.d.drawable_gs(p['gs']): out.append({'t': 'line', 'pts': [q[:2] for q in gfx.transform_pts(p['pts'], R, c)], 'style': res.line(p.get('gs'), -2000535, 'proj', eid, annotation=True), 'gs': p.get('gs'), 'elem': eid, 'layer': 'annotation'})
         rad = (af.get('m_width') or 0.041) / 2 * scale; half = af.get('m_ahAngleDouble') or math.pi / 4
         if not out:
             out.append({'t': 'line', 'pts': [(c[:2] + rad * np.array([math.cos(t), math.sin(t)])).tolist() for t in np.linspace(0, 2 * math.pi, 49)], 'style': st, 'elem': eid, 'layer': 'annotation'})
@@ -605,7 +711,7 @@ def symbol_prims(drawer, sid, R, o, eid, res, cat):
     pc = W.walk_record(sid, np.asarray(R, float), np.asarray(o, float))
     out = []
     for p in pc['curves']:
-        if p.get('pts'): out.append({'t': 'line', 'pts': [q[:2] for q in p['pts']], 'style': res.line(p.get('gs'), cat, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation'})
+        if p.get('pts'): out.append({'t': 'line', 'pts': [q[:2] for q in p['pts']], 'style': res.line(p.get('gs'), cat, 'proj', eid, annotation=True), 'gs': p.get('gs'), 'elem': eid, 'layer': 'annotation'})
     for p in pc['fills']:
         pat = drawer.doc['fill_patterns'].get(p.get('pattern'))
         if p.get('loops') and (pat is None or pat.get('solid')) and not ((p.get('fill_flags') or 0) & 4 and False):

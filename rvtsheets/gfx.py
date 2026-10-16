@@ -1,3 +1,4 @@
+import os
 """2D saved graphics (partition channel 103 GElement trees) -> drawing primitives in the element's own coordinates (feet).
 Primitive dicts:
   {'t':'line','pts':[[x,y,z],...],'gs':gstyle}            polyline (lines, arcs sampled, polylines)
@@ -140,7 +141,8 @@ class Collector:
         elif cls == 'GEllipse':
             t0, t1 = o.get('m_endParams', [0, 2 * math.pi])
             if abs(t1 - t0) < 1e-12: t1 = t0 + 2 * math.pi
-            pts = arc_pts(o['m_center'], o.get('m_radiusY', o.get('m_radius')), o['m_xVec'], o['m_yVec'], t0, t1, rx=o.get('m_radiusX'))
+            ry_ = o.get('m_radiusY', o.get('m_radius', o.get('m_yLen'))); rx_ = o.get('m_radiusX', o.get('m_xLen'))      # newer files: m_xLen / m_yLen semi axes
+            pts = arc_pts(o['m_center'], ry_, o['m_xVec'], o['m_yVec'], t0, t1, rx=rx_)
             self.prims.append(dict(p, t='line', pts=pts))
         elif cls == 'GPolyLine':
             pts = [list(map(float, q)) for q in o['m_coord']]

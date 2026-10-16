@@ -210,7 +210,7 @@ class Walker:
         # boundary edges: each edge has its own line style (GInfo category = graphics style) and m_flags bit 0 = visible (masking regions and
         # invisible boundaries: 6, drawn boundaries: 7 - 2020 Residential detail components vs Revit's DXF); edge = chord between its end points
         # in the face's (u, v) (interior points not used yet)
-        planes = {}; edge_polys = {}
+        planes = {}; edge_polys = {}; edge_gs = {}
         for fc in geo.get('m_pFaces') or []:
             fo = ob(fc) or {}
             pl = rvt_brep.plane_of(fo.get('m_pSurf')) if fo.get('m_pSurf') else None
@@ -234,6 +234,7 @@ class Walker:
             except Exception: continue
             out['curves'].append({'t': 'line', 'pts': (np.asarray(P3, float) @ R.T + o).tolist(), 'gs': gsid, 'elem': eid, 'cond': [], 'boundary': True})
             edge_polys.setdefault(refs[side], []).append(P3)
+            edge_gs.setdefault(refs[side], gsid)
         hs = [fc.get('handle') for fc in geo.get('m_pFaces') or []]
         for h, fo in zip(hs, faces):
             gf = ob(fo.get('m_pGFilling')) or {}
@@ -243,7 +244,7 @@ class Walker:
             if not loops: continue
             T = [(np.asarray(l, float) @ R.T + o).tolist() for l in loops if len(l) > 2]
             pl = gf.get('m_placer') or {}
-            out['fills'].append({'t': 'fill', 'loops': T, 'pattern': self.f.eid(gf.get('m_patternId')), 'color': gf.get('m_fillColor'),
+            out['fills'].append({'t': 'fill', 'loops': T, 'edge_gs': self.f.eid((fo.get('m_GInfo') or {}).get('m_categoryId')), 'pattern': self.f.eid(gf.get('m_patternId')), 'color': gf.get('m_fillColor'),
                                  'placer': pl, 'R': R.tolist(), 'gs': g, 'elem': eid, 'fill_flags': gf.get('m_flags')})
 
     def _colstack_restore(self, eid):

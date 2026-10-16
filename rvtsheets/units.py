@@ -32,7 +32,8 @@ def is_imperial(f):
 
 
 def _round(x, acc):
-    return round(x / acc) * acc if acc else x
+    import math
+    return math.floor(x / acc + 0.5 + 1e-9) * acc if acc else x          # Revit rounds halves up (195.625 in at 1/4" -> 195.75); Python's round() goes to even
 
 
 def fmt_length(ft, opt, project=None):
@@ -43,14 +44,14 @@ def fmt_length(ft, opt, project=None):
         inches = _round(ft * 12, acc * 12)
         f_ = int(inches // 12 + 1e-9); i = inches - f_ * 12
         fr = Fraction(i).limit_denominator(256); whole = int(fr); rem = fr - whole
-        istr = ('%d' % whole) if rem == 0 else ('%d %s' % (whole, rem) if whole else '%s' % rem)
+        istr = ('%d' % whole) if rem == 0 else ('%d %s' % (whole, rem) if (whole or (f_ > 0 and not opt.get('m_bSuppressTrailingZeros'))) else '%s' % rem)       # '4' - 0 1/2"' keeps the zero inches
         # Revit: 'suppress 0 feet' = m_bSuppressLeadingZeros, 'suppress 0 inches' = m_bSuppressTrailingZeros, 'suppress spaces'
         sep = '-' if opt.get('m_bSuppressSpaces') else ' - '
         if f_ == 0 and opt.get('m_bSuppressLeadingZeros'): s = '%s"' % istr
         elif i == 0 and opt.get('m_bSuppressTrailingZeros') and f_ > 0: s = "%d'" % f_
         else: s = '%d\'%s%s"' % (f_, sep, istr)
     elif du == 5:
-        inches = _round(ft * 12, acc * 12); fr = Fraction(inches).limit_denominator(256); whole = int(fr); rem = fr - whole
+        inches = _round(ft * 12, acc if opt.get('m_unitTypeId') else acc * 12); fr = Fraction(inches).limit_denominator(256); whole = int(fr); rem = fr - whole       # 2022+ unit ids: accuracy in inches
         s = ('%d' % whole if rem == 0 else '%d %s' % (whole, rem)) + '"'
     elif du == 3: s = _fix(_round(ft, acc), acc)
     elif du == 6: s = _fix(_round(ft * 12, acc), acc) + '"'
