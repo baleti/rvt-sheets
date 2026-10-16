@@ -240,13 +240,20 @@ class Visibility:
         if kind == '3d' and sb and sb.get('on'):
             return self._crop_test(dict(sb), use_z=True, xy=True, z='all')
         if kind in ('section', 'plan') and crop.get('basis'):
-            return self._crop_test(crop, use_z=kind == 'section', xy=crop.get('crop_active'))
+            return self._crop_test(crop, use_z=kind == 'section', xy=crop.get('crop_active'), near0=kind == 'section' and v.get('id') not in self._callout_views())
         return lambda bb: True
 
-    def _crop_test(self, crop, use_z=True, xy=True, z=True):
+    def _callout_views(self):
+        """views that are callouts (Section records with creation method 202): their crop keeps the stored near bound"""
+        if getattr(self, '_cv', None) is None:
+            self._cv = {self.dec.f.eid(r['fields'].get('m_dbViewId')) for r in self.dec.f.recs('Section') if r['fields'].get('m_sectionCreationMethod') == 202}
+        return self._cv
+
+    def _crop_test(self, crop, use_z=True, xy=True, z=True, near0=False):
         """oriented box test in the crop frame: x/y = crop region (when xy), z: near plane (bounds min) always for sections, far plane (bounds max) when active"""
         o = np.asarray(crop['origin'], float); B = np.asarray(crop['basis'], float); b = crop['bounds']
         lo = np.array([b[i][1] for i in range(3)], float); hi = np.array([b[i][0] for i in range(3)], float)
+        if use_z and near0 and os.environ.get('RVT_NEAR0', '1') == '1': lo[2] = max(lo[2], 0.0)       # the cut plane is the near clip of a section: nothing between it and the viewer is drawn (Residential building section: stairs / doors 1.5-13 ft in front, 80% of their ink absent from Revit's DXF)
         act = crop.get('active') or [[1, 1]] * 3
         use_lo = np.array([xy, xy, use_z]); use_hi = np.array([xy, xy, use_z and bool(act[2][0]) if z != 'all' else True])
         def test(bb):

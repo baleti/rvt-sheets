@@ -473,7 +473,7 @@ class ViewDrawer:
                 uvw = (tris - O) @ Mv.T
                 m = self.solid_material(T[2] if len(T) > 2 else None)
                 ov2 = dict(ov, _mat=m) if m is not None else ov
-                if v['kind'] in ('section', '3d') and len(T) > 2 and T[2] is not None: ov2 = dict(ov2, _frs=T[2])
+                if (v['kind'] in ('section', '3d') or (v['kind'] == 'plan' and cid == -2000032 and not is_rcp)) and len(T) > 2 and T[2] is not None: ov2 = dict(ov2, _frs=T[2])   # plans: floor top surface pattern (Commercial 'Sand' dots under the room colours)
                 solids.append((eid, cid, uvw, fid, s.get('gs'), ov2))
         if datum_ids:
             from .datums import Datums
@@ -633,7 +633,7 @@ class ViewDrawer:
             prims.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis], 'style': st, 'elem': eid, 'layer': 'projection'})
         # surface patterns of the visible faces (brick, shingles, block...): face material -> Material.surface_pattern, hatched on the
         # projected front-facing triangles, kept where the depth test says the face is visible (sample points of the hatch lines)
-        if v['kind'] in ('section', '3d') and scale <= 200:
+        if v['kind'] in ('section', '3d', 'plan') and scale <= 200:
             try:
                 for eid, cid, T2, uvw, fid, gs, ov in clipped:
                     if ov.get('_frs') is not None: self.surface_hatch(eid, cid, uvw, ov['_frs'], db, eps, scale, prims, ov)
@@ -1487,6 +1487,7 @@ class ViewDrawer:
                 if gl: prims.append({'t': 'segs', 'segs': [[list(g.coords[0]), list(g.coords[-1])] for g in gl], 'style': dict(st, w=max(0.08, st['w'] * 0.35)), 'elem': eid, 'layer': 'cut'})
 
     def surface_hatch(self, eid, cid, uvw, frs, db, eps, scale, prims, ov):
+        if ov.get('surf_fg_visible') is False: return                    # view override: surface pattern off (Residential first floor)
         mats = self.materials(); by = collections.defaultdict(list)
         n = np.cross(uvw[:, 1] - uvw[:, 0], uvw[:, 2] - uvw[:, 0])
         front = n[:, 2] > 1e-9                                           # facing the viewer (w towards the eye)
@@ -1497,14 +1498,15 @@ class ViewDrawer:
             if rs in mats: by[rs].append(i)
         for mid, idx in by.items():
             sp = (mats[mid].get('surface_pattern') or {})
-            pat = self.doc['fill_patterns'].get(sp.get('id')) if sp.get('id') is not None else None
+            pid_ = ov.get('surf_fg_pattern') if ov.get('surf_fg_pattern') not in (None, -1) else sp.get('id')
+            pat = self.doc['fill_patterns'].get(pid_) if pid_ is not None else None
             if not pat or pat.get('solid'): continue
             polys = [patterns.region([uvw[i][:, :2].tolist() + [uvw[i][0, :2].tolist()]]) for i in idx]
             from shapely.ops import unary_union
             reg = unary_union([p for p in polys if p is not None and p.area > 1e-6])
             if reg.is_empty: continue
             segs = patterns.hatch(reg, pat, scale)
-            if not segs or len(segs) > 20000: continue
+            if not segs or len(segs) > 80000: continue
             # depth of each hatch segment: nearest face plane under its midpoint is approximated by the buffer itself -> keep if the
             # buffer depth at the midpoint belongs to this element (|w - zb| small): sample w from the element's own triangles
             S = np.array(segs, float)                                    # (k,2,2)
@@ -1514,7 +1516,7 @@ class ViewDrawer:
             if not ok.any(): continue
             seg3 = np.concatenate([S[ok], np.repeat(w[ok][:, None, None], 2, 1)], 2)
             vis = db.visible_parts(seg3, eps * 1.5)
-            col = (sp.get('color') or [0, 0, 0])
+            col = ov.get('surf_fg_color') if isinstance(ov.get('surf_fg_color'), list) else (sp.get('color') or [0, 0, 0])
             if vis: prims.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis], 'style': {'w': 0.1, 'rgb': col, 'dash': None}, 'elem': eid, 'layer': 'surface_fill'})
 
     @staticmethod

@@ -51,3 +51,11 @@ def depth(e):
     return round(float(loc[:, 2].max()), 1), round(float(loc[:, 2].min()), 1)
 for k, v in bad.most_common(int(os.environ.get('TOPN', '15'))):
     i = info.get(k) or {}; print(k, i.get('cls'), (doc['categories'].get(i.get('cat')) or {}).get('name'), round(v, 1), '/', round(tot[k], 1), 'depth', depth(k))
+if os.environ.get('DEPTHSUM'):
+    agg = collections.defaultdict(lambda: [0.0, 0.0])
+    for k in tot:
+        dp = depth(k)
+        if dp is None: continue
+        key = 'front(all>0)' if dp[1] > 0 else 'behind(all<0)' if dp[0] < 0 else 'straddles'
+        agg[key][0] += bad.get(k, 0); agg[key][1] += tot[k]
+    print({k: (round(a, 1), round(b, 1)) for k, (a, b) in agg.items()})

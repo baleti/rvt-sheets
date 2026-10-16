@@ -620,7 +620,9 @@ def section_marker(drawer, eid, O, Mv, scale, res, vid, pts=None):
     vp = next((vp for s in doc['sheets'].values() for vp in s['viewports'] if vp['view'] == tv), None)
     sheet = next((s for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
     vals = {'Detail Number': (vp or {}).get('detail_number') or '', 'Sheet Number': (sheet or {}).get('sheetNumber') or '', 'Reference Label': ''}
-    for end, sym_key in ((0, 'm_sectionHeadFamilyTagId'), (len(P) - 1, 'm_sectionTailFamilyTagId')):
+    # jogged sections (Residential A-2, Commercial 173630: Revit DXF) carry the full head at BOTH ends; straight ones head + tail box (A-3)
+    tail_key = 'm_sectionHeadFamilyTagId' if len(pts) > 2 else 'm_sectionTailFamilyTagId'
+    for end, sym_key in ((0, 'm_sectionHeadFamilyTagId'), (len(P) - 1, tail_key)):
         sid = f.eid(af.get(sym_key))
         if sid in (None, INVALID): continue
         nb = P[1] if end == 0 else P[-2]
