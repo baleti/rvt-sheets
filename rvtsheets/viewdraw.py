@@ -139,15 +139,33 @@ def _tess_fn():
 _FONTS = {}
 
 
+class _ScaledFont:
+    """a substitute font whose advances are scaled to the missing font's (measured mean width ratio on typical Revit label strings)"""
+    def __init__(self, f, k): self.f, self.k = f, k
+    def getlength(self, t): return self.f.getlength(t) * self.k
+
+
+# Revit font -> (substitute family, weight, width ratio real / substitute) used only when fontconfig has no real match for the name (host without the Microsoft fonts);
+# ratios measured against the real files on host3 (mean over 14 label strings, spread 2-7 %).  Proprietary fonts are installed per user (~/.local/share/fonts), never committed.
+_SUBST = {'trebuchet ms': ('Noto Sans', 'regular', 1.068), 'georgia': ('Liberation Serif', 'regular', 1.045), 'arial black': ('DejaVu Sans', 'bold', 1.032),
+          'verdana': ('DejaVu Sans', 'regular', 1.013)}
+
+
 def _font(name, bold):
+    if name == 'Arial Narrow' and os.environ.get('RVT_ARIAL_NARROW', 'arial') == 'arial': name = 'Arial'      # see svg.font_stack
     k = (name, bold)
     if k not in _FONTS:
         f = None
         try:
             import subprocess
             from PIL import ImageFont
-            path = subprocess.run(['fc-match', '-f', '%{file}', '%s:%s' % (name, 'bold' if bold else 'regular')], capture_output=True, text=True, timeout=5).stdout
+            out = subprocess.run(['fc-match', '-f', '%{file}|%{family}', '%s:%s' % (name, 'bold' if bold else 'regular')], capture_output=True, text=True, timeout=5).stdout
+            path, fam = out.split('|', 1)
             f = ImageFont.truetype(path, 200)
+            sub = _SUBST.get(name.lower())
+            if sub and name.lower() not in fam.lower() and os.environ.get('RVT_FONT_SUBST', '1') == '1':      # fontconfig fell back to something else: use the measured substitute
+                p2 = subprocess.run(['fc-match', '-f', '%{file}', '%s:%s' % (sub[0], sub[1])], capture_output=True, text=True, timeout=5).stdout
+                f = _ScaledFont(ImageFont.truetype(p2, 200), sub[2])
         except Exception: f = None
         _FONTS[k] = f
     return _FONTS[k]
@@ -220,8 +238,11 @@ class ViewDrawer:
             from shapely.geometry import box
             m = 0.05 * max(cr[2] - cr[0], cr[3] - cr[1])
             patterns.CLIP = box(cr[0] - m, cr[1] - m, cr[2] + m, cr[3] + m)
+        patterns.WORLD_UV = None
+        if v and os.environ.get('RVT_PAT_ORIGIN', '1') == '1' and v.get('kind') in ('plan', 'section'):
+            O_, X_, Y_, _ = self.frame(v); patterns.WORLD_UV = (float(-O_ @ X_), float(-O_ @ Y_))       # model patterns are anchored at the world origin, not the view origin
         try: return self._draw(vid, *a, **k)
-        finally: patterns.CLIP = None
+        finally: patterns.CLIP = None; patterns.WORLD_UV = None
 
     def _draw(self, vid, px_mm=0.25, max_elems=None, skip_classes=(), skip_cats=()):
         t0 = time.time()
@@ -266,13 +287,22 @@ class ViewDrawer:
                 if self.vis.info.info[eid]['cls'] != 'StairsElement': continue
                 try: sy = self.stairs_symbol(eid, v, O, Mv, scale, res)
                 except Exception: sy = None; self.stats['stair_symbol_error'] += 1
-                if sy is not None: prims += sy[0]; stair_skip |= sy[1]; self.stats['stair_symbols'] += 1
+                if sy is not None:
+                    sp_ = sy[0]
+                    bb_ = self.vis.info.bbox(eid)
+                    if bb_ is not None and v.get('range') and v['range'].get('cut') is not None and bb_[1][2] < v['range']['cut'] - 0.01 and os.environ.get('RVT_STAIROCC', '1') == '1':
+                        try:      # a stair wholly below the cut is hidden by the floors above it (Residential site plan: the basement stair is absent from Revit's DXF)
+                            occ_ = self._underlay_occluder(v, O, Mv, elems, bb_[1][2] + 0.5)
+                            if occ_ is not None and not occ_.is_empty: sp_ = self._subtract_region(sp_, occ_)
+                        except Exception: self.stats['stair_occ_error'] += 1
+                    prims += sp_; stair_skip |= sy[1]; self.stats['stair_symbols'] += 1
         for k, eid in enumerate(elems):
             if max_elems and k >= max_elems: break
             if eid in stair_skip: continue
             info = self.vis.info.info[eid]
             if info['cls'] in skip_classes or info['cat'] in skip_cats: continue
             if info['cls'] == 'VolumeOfInterest' and os.environ.get('RVT_SCOPEBOX', '1') == '1': self.stats['scope_box_skipped'] += 1; continue      # scope boxes: not in Revit's element lists (Snowdon East / Parking: FP) nor in its DXF
+            if info['cls'] in ('Rebar', 'RebarInSystem', 'AreaReinforcement', 'PathReinforcement') and v['kind'] == 'section' and v.get('view_type') == -1 and os.environ.get('RVT_ELEV_REBAR', '0') != '1': self.stats['rebar_in_elevation_skipped'] += 1; continue      # elevations (view type -1): Revit's DXFs of the Snowdon East / West / North / South carry no rebar, sections and plans do
             if info['cls'] == 'JoistSystem': self.stats['joist_system_skipped'] += 1; continue          # the system's boundary / layout sketch (cyan dashes) is not drawn by Revit (rst basic Level 1, Snowdon L2)
             if ev.get('filters') and info['cls'] in ANNO_FILTER_CLASSES and info['cat'] != INVALID:
                 # view filters hide annotation elements too (Snowdon L2: 'Views - Sheets' = NOT Family and Type contains '_Working' hides every section marker)
@@ -451,6 +481,12 @@ class ViewDrawer:
             if info['cls'] in ('Rebar', 'RebarInSystem'):
                 try: curves_ = self.rebar_bars(eid, curves_) or curves_
                 except Exception: self.stats['rebar_error'] += 1
+            plant_c = None
+            if cid == -2001360 and info['cls'] == 'FamilyInstance' and v['kind'] == 'plan' and os.environ.get('RVT_PLANT', '1') == '1':
+                try:
+                    allp_ = np.concatenate([np.asarray(c_['pts'], float)[:, :2] for c_ in curves_ if c_.get('pts') is not None and len(c_['pts'])])
+                    plant_c = ((allp_.min(0) + allp_.max(0)) / 2, float(max(allp_.max(0) - allp_.min(0))) / 2)      # planting symbol centre / radius (world)
+                except Exception: plant_c = None
             for c in curves_:
                 if 'pts' not in c: continue                  # image placements etc. (drawn by the sheet / title block code)
                 if not self.drawable_gs(c.get('gs')): continue
@@ -458,6 +494,12 @@ class ViewDrawer:
                 if v['kind'] == 'plan' and self._elevation_swing(c.get('gs')): self.stats['elevation_swing_skipped'] += 1; continue      # door/window 'Elevation Swing' lines show only in elevations/sections (Residential plan 32: Revit DXF has none)
                 if info['cls'] in ('SiteSurface', 'TopographySurface') and v['kind'] in ('section', '3d'): continue   # contour/surface curves are not drawn in elevations (the ground profile comes from the mesh)
                 pts = (np.asarray(c['pts'], float) - O) @ Mv.T
+                if plant_c is not None and len(c['pts']) == 2:
+                    a_, b_ = np.asarray(c['pts'], float)[:, :2]; ab_ = b_ - a_; L_ = float(np.linalg.norm(ab_))
+                    if L_ > 0.5 * plant_c[1]:
+                        t_ = float((plant_c[0] - a_) @ ab_) / (L_ * L_)
+                        if 0.15 < t_ < 0.85 and float(np.linalg.norm(a_ + ab_ * t_ - plant_c[0])) < 0.05 * plant_c[1] + 0.02:
+                            self.stats['planting_diameter_skipped'] += 1; continue      # the symbol's straight lines through its centre (Revit draws the circle and the spokes from the centre, not the diameters)
                 if is_section and v['kind'] == 'section' and wf is not None and wf > -1e8 and pts[:, 2].max() < wf - 1e-6: self.stats['curves_beyond_far_clip'] += 1; continue
                 if is_section and v['kind'] == 'section' and cut_w is not None and pts[:, 2].min() > cut_w + 1e-6: self.stats['curves_before_cut'] += 1; continue      # symbol lines wholly in front of the section plane (planting 18 ft before the building section)      # family symbol lines (planting) behind the far clip are not drawn
                 if cut_w is not None and not is_section and (pts[:, 2] > cut_w + 1e-6).all() and False: continue
@@ -843,6 +885,26 @@ class ViewDrawer:
                     segs += [[list(a), list(b)] for a, b in zip(c, c[1:])]
             keep.append({'t': 'cut', 'loops': loops, 'segs': segs, 'style': ps[0]['style'], 'elem': ps[0]['elem'], 'elems': [p['elem'] for p in ps], 'cat': k[0], 'layer': 'cut'})
         return keep
+
+    @staticmethod
+    def _subtract_region(prims, region):
+        """line / segs prims with the parts inside a shapely region removed"""
+        from shapely.geometry import LineString
+        out = []
+        for p in prims:
+            if p.get('t') == 'line' and p.get('pts') and len(p['pts']) > 1:
+                d = LineString([tuple(q[:2]) for q in p['pts']]).difference(region)
+                for g in getattr(d, 'geoms', [d]):
+                    if g.geom_type == 'LineString' and not g.is_empty: out.append(dict(p, pts=[list(q) for q in g.coords]))
+            elif p.get('t') == 'segs' and p.get('segs'):
+                segs = []
+                for a, b in p['segs']:
+                    d = LineString([tuple(a[:2]), tuple(b[:2])]).difference(region)
+                    for g in getattr(d, 'geoms', [d]):
+                        if g.geom_type == 'LineString' and not g.is_empty: segs.append([list(g.coords[0]), list(g.coords[-1])])
+                if segs: out.append(dict(p, segs=segs))
+            else: out.append(p)
+        return out
 
     def _underlay_occluder(self, v, O, Mv, elems, ztop):
         """plan-space union of the floors/roofs/ceilings of the view lying above z = ztop (shapely geometry or None), cached per (view, z band)"""
@@ -1593,7 +1655,10 @@ class ViewDrawer:
             piece = reg.intersection(strip)
             if piece.is_empty: continue
             if pat is not None and not pat.get('solid'):
-                prims.append({'t': 'segs', 'segs': patterns.hatch(piece, pat, scale), 'style': {'w': 0.1, 'rgb': cp.get('color') or [0, 0, 0], 'dash': None}, 'elem': eid, 'layer': 'cut_fill'})
+                patterns.ANCHOR = (nr, float(edges[i] + (c @ nr))) if os.environ.get('RVT_PAT_ANCHOR', '1') == '1' else None
+                try: hs_ = patterns.hatch(piece, pat, scale)
+                finally: patterns.ANCHOR = None
+                prims.append({'t': 'segs', 'segs': hs_, 'style': {'w': 0.1, 'rgb': cp.get('color') or [0, 0, 0], 'dash': None}, 'elem': eid, 'layer': 'cut_fill'})
             if i:                                                       # interface line between layers
                 a = c + ax * a0 + nr * edges[i]; b = c + ax * a1 + nr * edges[i]
                 seg = reg.intersection(Polygon([a - nr * 1e-4, b - nr * 1e-4, b + nr * 1e-4, a + nr * 1e-4]).buffer(1e-6))

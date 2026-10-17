@@ -8,6 +8,9 @@ import numpy as np
 from .reader import ob, path, INVALID
 
 
+ANNOTATION_SYMBOLS = -2000150                                            # Generic Annotations
+
+
 class Schedules:
     def __init__(self, composer):
         self.sc = composer; self.f = composer.f; self.doc = composer.doc; self.dec = composer.dec
@@ -52,14 +55,33 @@ class Schedules:
         def rowh(i, d):
             try: return ob(secs[i]['m_rows'][0]).get('m_dHeight') or d
             except Exception: return d
+        def rowh_i(sec, i):
+            try: return ob(sec['m_rows'][i]).get('m_dHeight')
+            except Exception: return None
         segs = [ob(s) for s in fl.get('m_segmentRecords') or []]
+        fids = [(ob(x) or {}).get('m_id') for x in sch.get('m_fieldIds') or []]
+        # header section rows after the title row: merged note rows ('To learn more about ...' in the Commercial 'How Do I' schedule)
+        hdr_rows = []; title_size = None
+        try:
+            sd0 = ob(secs[0])
+            c00 = ob(ob(ob(sd0['m_tableCells'][0])['m_arrCells'][0]).get('m_oTableCellStyle')) or {}
+            title_size = (c00.get('m_textSize') or 0) / 100 / 12 or None
+            for ri, tc in enumerate(sd0.get('m_tableCells') or []):
+                if ri == 0: continue
+                cells = [ob(c) for c in ob(tc).get('m_arrCells') or []]
+                txt = next((str(c.get('m_text')) for c in cells if c.get('m_text')), '')
+                if not txt: continue
+                c = next(c for c in cells if c.get('m_text')); st = ob(c.get('m_oTableCellStyle')) or {}
+                hdr_rows.append({'text': txt, 'size': (st.get('m_textSize') or 12.0) / 100 / 12, 'font': st.get('m_fontName') or 'Arial',
+                                 'halign': (ob(st.get('m_oHelper')) or {}).get('m_horAlignment') or 0, 'height': rowh_i(sd0, ri)})
+        except Exception: hdr_rows = []
         return {'name': fl.get('m_viewName'), 'title': sch.get('m_altScheduleTitle') or fl.get('m_viewName'), 'fields': fields,
                 'show_title': sch.get('m_showTitle', 1), 'show_headers': sch.get('m_showHeaders', 1), 'initial_spacer': sch.get('m_showInitialSpacer'),
                 'grid_lines': sch.get('m_showGridLines', 1), 'outline': sch.get('m_showOutline', 1), 'fixed': sch.get('m_bFixedHeight'),
                 'height': (segs[0].get('m_height') if segs else None), 'title_h': rowh(0, 1 / 24), 'body_h': rowh(1, 1 / 72),
                 'category': self.f.eid(sch.get('m_categoryId')), 'instance': sch.get('m_bInstanceSchedule', 1),
                 'sort': [(path(s, 'm_fieldId', 'm_id'), (ob(s) or {}).get('m_sortOrder', 0)) for s in sch.get('m_sortFieldArr') or []],
-                'all_fields': all_fields, 'header_set': {h.get('m_id'): h.get('m_caption') or '' for h in (ob(x) for x in sch.get('m_headerSet') or []) if h},
+                'field_ids': fids, 'header_rows': hdr_rows, 'title_size': title_size, 'all_fields': all_fields, 'header_set': {h.get('m_id'): h.get('m_caption') or '' for h in (ob(x) for x in sch.get('m_headerSet') or []) if h},
                 'fonts': {k: self.font(fl.get(k)) for k in ('m_titleTextTypeId', 'm_headerTextTypeId', 'm_bodyTextTypeId')},
                 'grid_gs': self.sc.cat_gstyle(self.f.eid(sch.get('m_bodyGridCategoryId'))), 'tb_inst': self.f.eid(sch.get('m_titleBlockInstId'))}
 
@@ -68,29 +90,45 @@ class Schedules:
         cat = d['category']; out = []
         if cat == -2003100:                                              # Sheets: one row per sheet (number, name, ...)
             sheets = sorted(self.doc['sheets'].values(), key=lambda x: str(x.get('sheetNumber')))
+            from .sheet import SHEET_FIELDS
             def cell(sh, fd):
                 n = fd.get('pname') or fd['heading']
                 if n in ('Sheet Number', 'Number'): return str(sh.get('sheetNumber') or '')
                 if n in ('Sheet Name', 'Name'): return str(sh.get('name') or '')
+                if fd.get('param') in SHEET_FIELDS:                   # built-in sheet parameters live in the sheet record (Drawn By, Checked By, Approved By, ...)
+                    r = self.f.rec(sh.get('id'))
+                    v = ((r or {'fields': {}})['fields'].get(SHEET_FIELDS[fd['param']]))
+                    if v not in (None, ''): return str(v)
                 return str((sh.get('params') or {}).get(n, ''))
             return [[cell(sh, fd) for fd in d['fields']] for sh in sheets]
         for eid, e in self.sc_vis_info().items():
-            if e['cat'] != cat or e['owner'] not in (INVALID,): continue
+            if e['cat'] != cat or (e['owner'] not in (INVALID,) and cat != ANNOTATION_SYMBOLS): continue      # generic annotations (help icons) are view-owned but still listed
             if bool(e['type']) == bool(d['instance']): continue
             p = (self.params().get(eid) or {}).get('params') or {}
             sk = []
             for fid, order in d.get('sort') or []:
-                af = (d.get('all_fields') or [])
+                af = (d.get('all_fields') or []); fi = d.get('field_ids') or []
+                if fid in fi: fid = fi.index(fid)                       # sort fields name a field id (m_fieldIds order = field order), not an index
                 if isinstance(fid, int) and 0 <= fid < len(af):
                     v = self.value(eid, af[fid], p)
                     k = (0, float(v), '') if isinstance(v, (int, float)) and not isinstance(v, bool) else (1, 0.0, str(v or ''))
                     sk.append((k, order))
-            out.append((eid, sk, [self.fmt(self.value(eid, fd, p), fd['pname']) for fd in d['fields']]))
+            out.append((eid, sk, [self.cell_text(eid, fd, p) for fd in d['fields']]))
         # schedule sort fields (m_sortFieldArr: field index incl. hidden fields, m_sortOrder 1 = descending), then element order
         out.sort(key=lambda r: r[0])
         for i in reversed(range(max((len(r[1]) for r in out), default=0))):
             out.sort(key=lambda r: r[1][i][0] if i < len(r[1]) else (2, 0.0, ''), reverse=bool(out and i < len(out[0][1]) and out[0][1][i][1]))
         return [r[2] for r in out]
+
+    def cell_text(self, eid, fd, named):
+        v = self.value(eid, fd, named)
+        if v is None and fd['heading'].rstrip().endswith('?') and fd['param'] in self._raw(eid): v = False       # a Yes/No parameter stored as 0
+        if v is None and fd['heading'].rstrip().endswith('?') and self._raw_has(eid, fd['param']): v = False
+        return self.fmt(v, fd['pname'])
+
+    def _raw_has(self, eid, pid):
+        r = self.f.rec(eid)
+        return any(self.f.eid(e.get('m_paramId')) == pid for e in (ob((r or {'fields': {}})['fields'].get('m_pInstParams')) or {}).get('m_params') or [])
 
     def value(self, eid, fd, named):
         """cell value by parameter id: the element's stored values, then its type's (derived symbols -> master type, family type
@@ -111,6 +149,10 @@ class Schedules:
     def _raw(self, eid):
         out = {}
         r = self.f.rec(eid)
+        for e in (ob((r or {'fields': {}})['fields'].get('m_pInstParams')) or {}).get('m_params') or []:        # annotation symbols keep their instance values here
+            pid = self.f.eid(e.get('m_paramId'))
+            if isinstance(pid, int) and pid not in out:
+                out[pid] = e['m_str'] if e.get('m_str') else (e.get('m_int') if e.get('m_int') else (e.get('m_value') or None))
         for k in ('m_pParamValueSetAString', 'm_pParamValueSetDouble', 'm_pParamValueSetInt', 'm_pParamValueSetElementId'):
             for e in (ob((r or {'fields': {}})['fields'].get(k)) or {}).get('m_paramSet') or []:
                 pid = e.get('m_paramId')
@@ -201,10 +243,24 @@ class Schedules:
             out.append({'t': 'text', 'text': s, 'origin': [x + (w / 2 if halign == 1 else 0.004), yy - h / 2, 0], 'x': [1, 0, 0], 'size': size, 'font': name, 'bold': bold,
                         'halign': halign, 'valign': 1, 'anchor': True, 'cond': [], 'gs': None, 'elem': sched_id})
         if d['show_title']:
-            h = d['title_h']; text(d['title'], x0, y, W, h, d['fonts']['m_titleTextTypeId'])
+            h = d['title_h']
+            if d.get('title_size') and d.get('header_rows'): text(d['title'], x0, y, W, h, (d['title_size'] / (0.72 * self.em_k(d)), 'Arial', 0))   # explicit cell text size (a schedule with a styled header section) is drawn at size / 0.72
+            else: text(d['title'], x0, y, W, h, d['fonts']['m_titleTextTypeId'])
             if d.get('grid_lines', 1) and os.environ.get('RVT_SCHED_FIT', '1') == '1':          # the title row is boxed by the grid (Revit Window Schedule export: lines at the title's top, left and right edges)
                 line((x0, y), (x0 + W, y)); line((x0, y), (x0, y - h)); line((x0 + W, y), (x0 + W, y - h))
             y -= h
+        from .viewdraw import wrap_text
+        for hr in d.get('header_rows') or []:                                # merged note rows under the title (clipped to the row height with '...' like Revit)
+            em = hr['size'] / 0.72; pitch = em * 1.22; hh = hr['height'] or pitch
+            lines = wrap_text(hr['text'], W - 0.008, em, hr['font']).split('\n')
+            maxl = max(1, int(hh / pitch + 0.05))
+            if len(lines) > maxl:
+                lines = lines[:maxl]; lines[-1] = lines[-1].rstrip() + '...'
+            out.append({'t': 'text', 'text': '\n'.join(lines), 'origin': [x0 + 0.004, y - max(0.0, (hh - len(lines) * pitch) / 2) - 0.0005, 0], 'x': [1, 0, 0], 'size': hr['size'],
+                        'font': hr['font'], 'bold': False, 'halign': 0, 'valign': 0, 'anchor': True, 'cond': [], 'gs': None, 'elem': sched_id})
+            if d.get('grid_lines', 1) and os.environ.get('RVT_SCHED_FIT', '1') == '1':
+                line((x0, y - hh), (x0 + W, y - hh)); line((x0, y), (x0, y - hh)); line((x0 + W, y), (x0 + W, y - hh))
+            y -= hh
         hb = d['body_h'] or d['fonts']['m_bodyTextTypeId'][0] * 2.2
         if d.get('grid_lines') == 0: hb = max(hb, d['fonts']['m_bodyTextTypeId'][0] * 1.2 * 0.72 * 1.8)   # gridless lists: rows follow the larger text
         elif os.environ.get('RVT_SCHED_FIT', '1') == '1': hb = max(hb, 1.59 * d['fonts']['m_bodyTextTypeId'][0] * self.em_k(d))   # Revit's rows follow the text (2020 Window Schedule export: pitch 0.0199 ft vs stored 0.0139)
@@ -244,11 +300,21 @@ class Schedules:
         n = len(rows)
         if d['fixed'] and d['height']:
             n = max(n, int((d['height'] - (y0 - y)) / hb + 1e-6))
+        bsize, bname, bbold = d['fonts']['m_bodyTextTypeId']; bem = bsize * self.em_k(d)
         for i in range(n):
+            rh = hb
             if i < len(rows):
                 x = x0
-                for f, v in zip(d['fields'], rows[i]): text(v, x, y, f['width'], hb, d['fonts']['m_bodyTextTypeId'], halign=0); x += f['width']
-            y -= hb; line((x0, y), (x0 + W, y))
+                cells = [wrap_text(v, f['width'] - 0.008, bem, bname, bool(bbold)) for f, v in zip(d['fields'], rows[i])]
+                nl = max((c.count('\n') + 1 for c in cells), default=1)
+                if nl > 1: rh = hb + (nl - 1) * bem * 1.22                      # a long value wraps inside its column and the row grows (Revit 'How Do I': two-line rows)
+                for f, v, c in zip(d['fields'], rows[i], cells):
+                    if nl > 1 and c:
+                        out.append({'t': 'text', 'text': c, 'origin': [x + 0.004, y - (hb - bem) / 2 - 0.0005, 0], 'x': [1, 0, 0], 'size': bsize * 0.72 * self.em_k(d), 'font': bname,
+                                    'bold': bbold, 'halign': 0, 'valign': 0, 'anchor': True, 'cond': [], 'gs': None, 'elem': sched_id})
+                    else: text(c, x, y, f['width'], hb, d['fonts']['m_bodyTextTypeId'], halign=0)
+                    x += f['width']
+            y -= rh; line((x0, y), (x0 + W, y))
         x = x0
         for f in d['fields'] + [None]:
             # inside a header group the column line starts below the group caption

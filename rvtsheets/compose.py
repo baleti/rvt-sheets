@@ -1,4 +1,5 @@
 """Full sheet: title block + every viewport's view drawing (placed with the viewport transform, clipped to the crop region) -> SVG"""
+import os
 import numpy as np
 from .decode import FT_MM
 from .sheet import SheetComposer
@@ -59,17 +60,49 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
         if v['kind'] not in ('plan', 'section', 'drafting', 'legend', '3d'):
             o = vp['offset']; s.text({'text': '[%s view not drawn yet: %s]' % (v['kind'], v['name']), 'origin': [o[0], o[1], 0], 'size': 2.5 / FT_MM}); continue
         if v['kind'] == '3d' and (v.get('crop') or {}).get('proj_method') == 2 and not (vp.get('scale') or 0) and shaded3d.is_shaded(v):
-            # perspective 3D: shaded image placed in the viewport (size = crop tangents x 11.6 ft, empirical from Revit's Front Yard export:
-            # viewport box 1.25 x 0.58 ft for tangents 0.1077 x 0.0500; image centre = viewport offset + 11.6 x crop centre tangents)
+            # perspective 3D: shaded image placed in the viewport (size = crop tangents x D ft, image centre = viewport offset + D x crop centre
+            # tangents; D is the view's own DBView3d.m_scale: Commercial Cover Sheet 15.366, Section Perspective 10.163, Residential Front Yard 11.613,
+            # all matching Revit's sheet exports - an earlier empirical constant 11.6 came from the Front Yard export alone)
             try:
                 import base64
                 img = shaded3d.view_image(vd, v['id'], 1400)
                 if img:
-                    c = v['crop']; b = c['bounds']; D = 11.6
+                    c = v['crop']; b = c['bounds']; D = v.get('persp_scale') or 11.6
                     w = (b[0][0] - b[0][1]) * D; h = (b[1][0] - b[1][1]) * D
                     cx = vp['offset'][0] + (b[0][0] + b[0][1]) / 2 * D; cy = vp['offset'][1] + (b[1][0] + b[1][1]) / 2 * D
                     a = s.P((cx - w / 2, cy + h / 2))
                     s.raw('<image x="%.3f" y="%.3f" width="%.3f" height="%.3f" href="data:image/png;base64,%s" preserveAspectRatio="none"/>' % (a[0], a[1], w * FT_MM, h * FT_MM, base64.b64encode(img[0]).decode()))
+                    if ((v.get('display') or {}).get('m_model') or {}).get('m_edges'):          # 'show edges': thin dark lines over the shaded image
+                        try:
+                            res = shaded3d.persp_lines(vd, v['id'])
+                            if res and res[1]:
+                                segs, crop = res; F = (v.get('persp_scale') or 11.6) * (c.get('proj_dist') or 0.1)
+                                ox, oy = vp['offset'][0], vp['offset'][1]
+                                a2 = s.P((ox + crop[0] * F, oy + crop[3] * F)); b2 = s.P((ox + crop[2] * F, oy + crop[1] * F))
+                                s.raw('<clipPath id="pe%d"><rect x="%.3f" y="%.3f" width="%.3f" height="%.3f"/></clipPath>' % (k, a2[0], a2[1], b2[0] - a2[0], b2[1] - a2[1]))
+                                parts = []
+                                for p0, p1, w in segs:
+                                    q0 = s.P((ox + p0[0] * F, oy + p0[1] * F)); q1 = s.P((ox + p1[0] * F, oy + p1[1] * F))
+                                    parts.append('M%.3f %.3f L%.3f %.3f' % (q0[0], q0[1], q1[0], q1[1]))
+                                if parts: s.raw('<path d="%s" fill="none" stroke="#202020" stroke-width="0.12" stroke-linecap="round" clip-path="url(#pe%d)"/>' % (' '.join(parts), k))
+                        except Exception as ex: log('3d edges %s failed: %r' % (v['id'], ex))
+                    for p in item.get('title') or []: s.prim(p)
+                    continue
+            except Exception as ex: log('3d view %s failed: %r' % (v['id'], ex))
+        if v['kind'] == '3d' and (v.get('crop') or {}).get('proj_method') == 2 and not (vp.get('scale') or 0) and not shaded3d.is_shaded(v):
+            # perspective hidden-line 3D (a section perspective): visible edges projected through the camera, placed like the shaded image above
+            try:
+                res = shaded3d.persp_lines(vd, v['id'])
+                if res and res[1]:
+                    segs, crop = res; D = (v.get('persp_scale') or 11.6) * ((v.get('crop') or {}).get('proj_dist') or 0.1); ox, oy = vp['offset'][0], vp['offset'][1]       # tangents -> sheet feet: bounds (= tangent x proj_dist) x m_scale
+                    a = s.P((ox + crop[0] * D, oy + crop[3] * D)); bq = s.P((ox + crop[2] * D, oy + crop[1] * D))
+                    s.raw('<clipPath id="pv%d"><rect x="%.3f" y="%.3f" width="%.3f" height="%.3f"/></clipPath>' % (k, a[0], a[1], bq[0] - a[0], bq[1] - a[1]))
+                    by_w = {}
+                    for p0, p1, w in segs:
+                        q0 = s.P((ox + p0[0] * D, oy + p0[1] * D)); q1 = s.P((ox + p1[0] * D, oy + p1[1] * D))
+                        by_w.setdefault(round(w, 3), []).append('M%.3f %.3f L%.3f %.3f' % (q0[0], q0[1], q1[0], q1[1]))
+                    for w, parts in by_w.items():
+                        s.raw('<path d="%s" fill="none" stroke="#000" stroke-width="%.3f" stroke-linecap="round" clip-path="url(#pv%d)"/>' % (' '.join(parts), w, k))
                     for p in item.get('title') or []: s.prim(p)
                     continue
             except Exception as ex: log('3d view %s failed: %r' % (v['id'], ex))
@@ -98,6 +131,15 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
                 s.raw('<clipPath id="vpa%d"><rect x="%.3f" y="%.3f" width="%.3f" height="%.3f"/></clipPath>' % (k, a2[0], a2[1], b2[0] - a2[0], b2[1] - a2[1]))
                 clip3 = ' clip-path="url(#vpa%d)"' % k
         sc = v.get('scale') or 100
+        if v['kind'] == 'plan' and cr and shaded3d.is_shaded_plan(v) and os.environ.get('RVT_SHADED_PLAN', '1') == '1':
+            try:                                                            # surfaces filled with their material colours under the linework
+                import base64
+                img = shaded3d.plan_image(vd, v['id'], 2400)
+                if img:
+                    a = tx(cr[0], cr[3]); b = tx(cr[2], cr[1])
+                    s.raw('<g data-view="%s" data-shaded="1"%s><image x="%.3f" y="%.3f" width="%.3f" height="%.3f" href="data:image/png;base64,%s" preserveAspectRatio="none"/></g>'
+                          % (v['id'], clip, a[0], a[1], b[0] - a[0], b[1] - a[1], base64.b64encode(img[0]).decode()))
+            except Exception as ex: log('shaded plan %s failed: %r' % (v['id'], ex))
         s.raw('<g data-view="%s"%s>' % (v['id'], clip))
         rest = [p for p in d['prims'] if p.get('elem') not in datum_ids(d)]
         if clip3:

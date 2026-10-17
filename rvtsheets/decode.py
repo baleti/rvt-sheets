@@ -240,7 +240,7 @@ class Decoder:
         ps = self._paramset(fl)
         sc = fl.get('m_scale')
         v = {'id': r['id'], 'class': c, 'kind': self.VIEW_KIND.get(c, c), 'name': fl.get('m_viewName'), 'template': bool(fl.get('m_isTemplate')),
-             'scale': (round(1 / sc) if sc else None), 'origin': fl.get('m_origin'), 'right': fl.get('m_horzDir'), 'up': fl.get('m_vertDir'), 'dir': fl.get('m_viewDir'),
+             'scale': (round(1 / sc) if sc else None), 'persp_scale': (sc if c == 'DBView3d' else None), 'origin': fl.get('m_origin'), 'right': fl.get('m_horzDir'), 'up': fl.get('m_vertDir'), 'dir': fl.get('m_viewDir'),
              'view_template': E(fl.get('m_viewTemplateId')), 'view_type': E(fl.get('m_dbViewTypeId')), 'level': E(fl.get('m_genElemId')), 'viewer': E(fl.get('m_viewerId')),
              'drawing': E(fl.get('m_dbDrawingId')), 'primary': E(fl.get('m_primaryViewId')), 'dependents': [E(x) for x in fl.get('m_dependentViewIds') or []],
              'parts_visibility': fl.get('m_partsVisibility'), 'description': fl.get('m_viewDescription'), 'display_mode': fl.get('m_modelDisplayMode'),
@@ -277,6 +277,7 @@ class Decoder:
         ah = path(fl, 'm_oAdHocOverrides') or {}
         v['element_overrides'] = self._adhoc(ah)
         v['hidden_elements'] = sorted(set([E(x) for x in fl.get('m_explicitlyHiddenElements') or []] + [E(x) for x in path(fl, 'm_oHiddenElementsViewSettings', 'm_hiddenElements') or []]))
+        v['design_options'] = [[E(p['first']), E(p['second'])] for p in path(fl, 'm_oDesignOptionViewSettings', 'm_mOverridingOptions2') or [] if isinstance(p, dict) and 'first' in p]      # (option set, chosen option) pairs of View > Design Options; [] = automatic (primary of every set)
         v['draw_order'] = path(fl, 'm_pDetailDrawOrderMgr', 'm_aDrawOrder')
         vd = path(fl, 'm_pViewDisplayMgr') or {}
         v['display'] = {k: ob(vd.get(k)) for k in ('m_model',) if k in vd}

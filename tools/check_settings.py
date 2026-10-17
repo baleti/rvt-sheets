@@ -86,9 +86,11 @@ def main():
         if vid in o['vfilter']:
             mine = v.get('filters') or []
             T.add('filters.count', len(mine) == len(o['vfilter'][vid]), (vid, len(mine), len(o['vfilter'][vid])))
+            byid = {x['filter']: x for x in mine}
+            # the oracle lists View.GetFilters() = ascending element id, NOT the UI priority order: compare by id (priority order needs GetOrderedFilters, see NEEDS-FROM-ORACLE)
+            T.add('filters.same_set', set(byid) == {x['filter'] for x in o['vfilter'][vid]}, (vid,))
             for i, of in enumerate(o['vfilter'][vid]):
-                m = mine[i] if i < len(mine) else None
-                T.add('filters.order+id', m is not None and m['filter'] == of['filter'], (vid, i, m and m['filter'], of['filter']))
+                m = byid.get(of['filter'])
                 if m is None: continue
                 T.add('filters.visible', m['visible'] == of['visible'], (vid, of['filter']))
                 exp = ov_norm_oracle(of['ov']); got = m['overrides'] or {}

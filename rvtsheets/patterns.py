@@ -28,6 +28,8 @@ def region(loops):
     return g
 
 
+WORLD_UV = None      # (u, v) of the world origin in the current view: model patterns (target != 0) keep their phase relative to it (Commercial 'Brick' parapet: head joints fall outside the 0.3 ft layer)
+ANCHOR = None         # (unit normal, offset) set by ViewDrawer._wall_layers around the hatch of one layer strip
 CLIP = None         # shapely geometry set by ViewDrawer.draw while drawing a cropped view: hatching stops at the crop (+5%)
 
 
@@ -62,6 +64,9 @@ def hatch(geom, pattern, scale, view_rot=0.0):
         off = abs(g['offset']) * k; shift = g['shift'] * k
         if off <= 1e-12: continue
         o = np.array(g['origin'][:2], float) * k
+        if WORLD_UV is not None and pattern.get('target', 0) != 0 and not view_rot: o = o + np.array(WORLD_UV)
+        if ANCHOR is not None and pattern.get('target', 0) != 0:        # wall layer strip: the model pattern starts at the layer's face along the wall normal (Revit 'Brick' on the 0.3 ft parapet layer shows no head joints)
+            n_, e_ = ANCHOR; o = o - n_ * float(o @ n_) + n_ * e_
         # lines: o + j*(offset*nrm + shift*d) + t*d
         jc = float((np.array([cx, cy]) - o) @ nrm) / off
         n = int(R / off) + 2

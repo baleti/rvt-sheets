@@ -61,7 +61,7 @@ def render(tris, colors, alphas, eye, right, up, fwd, tan_x, tan_y, width_px, pe
     if perspective:
         px = ((X / D - centre[0]) / tan_x * 0.5 + 0.5) * W; py = (0.5 - (Y / D - centre[1]) / tan_y * 0.5) * H; iz = 1.0 / D
     else:
-        px = (X / ortho_half[0] * 0.5 + 0.5) * W; py = (0.5 - Y / ortho_half[1] * 0.5) * H; iz = 1.0 / np.maximum(D, 0.1)
+        px = ((X - centre[0]) / ortho_half[0] * 0.5 + 0.5) * W; py = (0.5 - (Y - centre[1]) / ortho_half[1] * 0.5) * H; iz = 1.0 / np.maximum(D, 0.1)
     zb = np.full((H, W), -1.0); img = np.zeros((H, W, 3), np.uint8)
     # background: sky gradient (top -> horizon), ground below the horizon when the camera is level-ish
     t = np.linspace(0, 1, H)[:, None, None]
@@ -77,8 +77,27 @@ SITE_CATS = {-2001340, -2001360}                                   # topography,
 
 
 def view_image(drawer, vid, width_px=1600, max_tris=2_000_000):
-    """shaded image of 3D view `vid` through the ViewDrawer machinery: (png, w, h, (u0, v0, u1, v1) crop extents in view coordinates)"""
+    """shaded image of 3D view `vid` through the ViewDrawer machinery: (png, w, h)"""
+    got = collect(drawer, vid, max_tris)
+    if got is None: return None
+    T, C, A, (O, X, Y, Z, c, persp), _K = got
+    b = c.get('bounds') or [[1, -1], [1, -1], [0, 0]]
+    if persp:
+        # crop bounds of a perspective view = tangents on the unit-distance plane: [[right, left], [top, bottom], ...]
+        pd = c.get('proj_dist') or 0.1                           # distance of the crop plane from the eye (feet)
+        png, w, h = render(T, C, A, O, X, Y, Z, (b[0][0] - b[0][1]) / 2 / pd, (b[1][0] - b[1][1]) / 2 / pd, width_px, True,
+                           centre=((b[0][0] + b[0][1]) / 2 / pd, (b[1][0] + b[1][1]) / 2 / pd))
+    else:
+        half = ((b[0][0] - b[0][1]) / 2, (b[1][0] - b[1][1]) / 2)
+        png, w, h = render(T, C, A, O, X, Y, Z, None, None, width_px, False, ortho_half=half)
+    return png, w, h
+
+
+def collect(drawer, vid, max_tris=2_000_000):
+    """world-space triangles of 3D view `vid` with colours, alphas and category ids, and the camera: (T, C, A, (O, X, Y, Z, crop, persp), K) or None"""
     import collections
+    cc = getattr(drawer, '_collect_cache', None)
+    if cc and cc[0] == (vid, max_tris): return cc[1]            # shaded image and edge overlay of one view share one collection
     from .scene import Walker, ViewCtx
     doc = drawer.doc; v = doc['views'][vid]; ev = drawer.vis.effective(v)
     O, X, Y, Z = drawer.frame(v)
@@ -88,7 +107,7 @@ def view_image(drawer, vid, width_px=1600, max_tris=2_000_000):
     ctx = ViewCtx(Z, detail=ev.get('detail_level') or 2, kind='3d', scale=1)
     W = Walker(drawer.f, ctx); W.is_2d = lambda e: False; W.invisible_gs = set()
     mats = drawer.materials(); elems = drawer.vis.elements(vid)
-    T = []; C = []; A = []
+    T = []; C = []; A = []; K = []
     for eid in elems:
         info = drawer.vis.info.info[eid]
         if info['cls'] in ('Grid', 'Level', 'RefPlane', 'IndependentTag', 'RoomTag', 'LinearDimString', 'TextNote', 'InteriorElev', 'InteriorElevArrow', 'Section') or info['cls'] in ('RoomElem',): continue
@@ -104,7 +123,7 @@ def view_image(drawer, vid, width_px=1600, max_tris=2_000_000):
             except Exception: tr = np.zeros((0, 3, 3))
             if len(tr):
                 col = (110, 150, 105) if cid in SITE_CATS else (base.get('color') if base.get('color') and any(base.get('color')) else (170, 170, 170))
-                T.append(tr); C.append(np.tile(np.asarray(col, float), (len(tr), 1))); A.append(np.ones(len(tr)))
+                T.append(tr); C.append(np.tile(np.asarray(col, float), (len(tr), 1))); A.append(np.ones(len(tr))); K.append(np.full(len(tr), cid))
             continue
         for s in pieces['solids']:
             if not drawer.drawable_gs(s.get('gs')): continue
@@ -131,20 +150,34 @@ def view_image(drawer, vid, width_px=1600, max_tris=2_000_000):
                 if tr: al[i] = max(0.15, 1 - float(tr))
             keep = al > 0
             if not keep.any(): continue
-            T.append(tris[keep]); C.append(cols[keep]); A.append(al[keep])
+            T.append(tris[keep]); C.append(cols[keep]); A.append(al[keep]); K.append(np.full(int(keep.sum()), cid))
     if not T: return None
-    T = np.concatenate(T); C = np.concatenate(C); A = np.concatenate(A)
-    if len(T) > max_tris: sel = np.random.default_rng(0).choice(len(T), max_tris, replace=False); T, C, A = T[sel], C[sel], A[sel]
-    b = c.get('bounds') or [[1, -1], [1, -1], [0, 0]]
-    if persp:
-        # crop bounds of a perspective view = tangents on the unit-distance plane: [[right, left], [top, bottom], ...]
-        pd = c.get('proj_dist') or 0.1                           # distance of the crop plane from the eye (feet)
-        png, w, h = render(T, C, A, O, X, Y, Z, (b[0][0] - b[0][1]) / 2 / pd, (b[1][0] - b[1][1]) / 2 / pd, width_px, True,
-                           centre=((b[0][0] + b[0][1]) / 2 / pd, (b[1][0] + b[1][1]) / 2 / pd))
-    else:
-        half = ((b[0][0] - b[0][1]) / 2, (b[1][0] - b[1][1]) / 2)
-        png, w, h = render(T, C, A, O, X, Y, Z, None, None, width_px, False, ortho_half=half)
+    T = np.concatenate(T); C = np.concatenate(C); A = np.concatenate(A); K = np.concatenate(K)
+    if len(T) > max_tris: sel = np.random.default_rng(0).choice(len(T), max_tris, replace=False); T, C, A, K = T[sel], C[sel], A[sel], K[sel]
+    res = (T, C, A, (O, X, Y, Z, c, persp), K)
+    drawer._collect_cache = ((vid, max_tris), res)
+    return res
+
+
+def plan_image(drawer, vid, width_px=2400, max_tris=2_000_000):
+    """shaded top view of a plan with a shaded visual style (Revit fills surfaces with their material colours, e.g. the Commercial site plan):
+    (png, w, h) covering the view's crop rectangle, or None"""
+    got = collect(drawer, vid, max_tris)
+    if got is None: return None
+    T, C, A, (O, X, Y, Z, c, persp), K = got
+    b = c.get('bounds')
+    if not b or not len(T): return None
+    # collect() flips the stored direction for 3D views (which point at the eye); a plan's already looks down -Z after the same flip
+    eye = np.array([O[0], O[1], float(T[:, :, 2].max()) + 10.0]); fwd = np.array([0.0, 0.0, -1.0])
+    half = ((b[0][0] - b[0][1]) / 2, (b[1][0] - b[1][1]) / 2); ctr = ((b[0][0] + b[0][1]) / 2, (b[1][0] + b[1][1]) / 2)
+    png, w, h = render(T, C, A, eye, X, Y, fwd, None, None, width_px, False, ortho_half=half, centre=ctr,
+                       sky=((255, 255, 255), (255, 255, 255)))
     return png, w, h
+
+
+def is_shaded_plan(v):
+    """plan drawn with a shaded style (ViewDisplayMgr.m_model.m_surfaces 3..6)"""
+    return v.get('kind') == 'plan' and ((v.get('display') or {}).get('m_model') or {}).get('m_surfaces') in (3, 4, 5, 6)
 
 
 def is_shaded(v):
@@ -160,3 +193,52 @@ def view_svg(drawer, vid, width_px=1600):
     png, w, h = r; mm = 200.0; hh = mm * h / w
     return ('<svg xmlns="http://www.w3.org/2000/svg" width="%.1fmm" height="%.1fmm" viewBox="0 0 %.3f %.3f"><rect width="100%%" height="100%%" fill="#fff"/>'
             '<image x="0" y="0" width="%.3f" height="%.3f" href="data:image/png;base64,%s" preserveAspectRatio="none"/></svg>\n' % (mm, hh, mm, hh, mm, hh, base64.b64encode(png).decode()))
+
+
+def persp_lines(drawer, vid, width_px=1600, max_tris=2_000_000):
+    """hidden-line drawing of a perspective 3D view (Revit's 'Hidden Line' style, e.g. a section perspective): the visible feature and
+    silhouette edges of the view's geometry, clipped by an active section box. Returns (segments, crop) with segments = [(p0, p1, pen)] in the
+    tangent plane (x / depth, y / depth), crop = (xmin, ymin, xmax, ymax) of the crop region in the same units, or None.
+    Hidden-line removal is the ordinary depth buffer with w = 1 / depth: perspective maps planes to planes and lines to lines in (x/d, y/d, 1/d)."""
+    from .viewdraw import _feature_edges, _silhouette_edges, _clip_tris_halfspace
+    from .hlr import DepthBuffer
+    got = collect(drawer, vid, max_tris)
+    if got is None: return None
+    T, _C, _A, (O, X, Y, Z, c, persp), K = got
+    v = drawer.doc['views'][vid]
+    sb = v.get('section_box') or {}
+    if sb.get('on'):                                              # section box: keep what lies inside it (triangles are cut at its planes)
+        o = np.asarray(sb['origin'], float); B = np.asarray(sb['basis'], float)
+        for i in range(3):
+            hi, lo = sb['bounds'][i]
+            n = B[i]
+            T = _clip_tris_halfspace(T, n, float(o @ n + hi)); T = _clip_tris_halfspace(T, -n, float(-(o @ n + lo)))
+            if not len(T): return [], None
+        K = np.zeros(len(T), int)                                  # (clipping loses the per-triangle category: pens fall back to the default)
+    rel = T - O
+    Xc = rel @ X; Yc = rel @ Y; Dc = rel @ Z
+    keep = (Dc > 0.1).all(1)
+    Xc, Yc, Dc, Tw = Xc[keep], Yc[keep], Dc[keep], T[keep]
+    if not len(Tw): return [], None
+    P = np.stack([Xc / Dc, Yc / Dc, 1.0 / Dc], axis=2)            # (n,3,3): tangent x, tangent y, 1/depth
+    b = c['bounds']; pd = c.get('proj_dist') or 0.1
+    crop = (b[0][1] / pd, b[1][1] / pd, b[0][0] / pd, b[1][0] / pd)
+    # edge candidates: B-rep / sharp edges (world space, mapped through the same projection) plus silhouettes (opposite facing in the image)
+    def proj(E):
+        r = E - O
+        d = r @ Z
+        return np.stack([(r @ X) / d, (r @ Y) / d, 1.0 / d], axis=-1)
+    Ew = _feature_edges(Tw)
+    ok = ((Ew - O) @ Z > 0.1).all(1) if len(Ew) else np.zeros(0, bool)
+    E1 = proj(Ew[ok]) if ok.any() else np.zeros((0, 2, 3))
+    E2 = _silhouette_edges(P)
+    E = np.concatenate([E1, E2]) if len(E2) else E1
+    if not len(E): return [], crop
+    px = max((crop[2] - crop[0]), (crop[3] - crop[1])) / width_px
+    db = DepthBuffer(crop[0], crop[1], crop[2], crop[3], px)
+    db.add(P)
+    eps = 0.5e-4
+    vis = db.visible_parts(E, eps)
+    pens = (drawer.doc.get('pens') or {}).get('perspective') or []
+    pen_mm = pens[1] if len(pens) > 1 else 0.18
+    return [(p0[:2], p1[:2], pen_mm) for p0, p1 in vis], crop

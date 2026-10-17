@@ -650,6 +650,9 @@ class Tags:
                 # 'Structural Framing Tag' (Left/Right/Top/Bottom text margins): its only geometry is the label frame rectangle; Revit's sheets show the bare text
                 xs = sorted({round(q[0], 5) for p in lines_ for q in p['pts']}); ys = sorted({round(q[1], 5) for p in lines_ for q in p['pts']})
                 frame = len(xs) == 2 and len(ys) == 2
+            if r['class'] == 'SpanDirectionSymbol' and os.environ.get('RVT_SPAN_TAGS', '1') == '1':
+                # the 8 lines tagged 11..18 (flags 0xE0 set) are the family's margin marks (Left/Right/Top/Bottom bounds): Revit's DXF shows only the arrows
+                coll = [p for p in coll if not (p['t'] == 'line' and p.get('tag') not in (None, 0xFFFFFFFF) and 11 <= p['tag'] <= 18)]
             for p in coll:
                 if p['t'] == 'line' and not frame:
                     pts = gfx.transform_pts(p['pts'], R, o)

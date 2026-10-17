@@ -2,6 +2,7 @@
 import html
 import numpy as np
 from .decode import FT_MM, color
+from .svg import font_stack
 
 
 def _rgb(c): return '#%02x%02x%02x' % tuple(int(a) for a in (c or [0, 0, 0])[:3])
@@ -118,8 +119,8 @@ def text_svg(p, tx, scale):
     import math
     from .decode import FT_MM
     x, y = tx(*p['origin'][:2])
-    from .svg import EM, LINE_PITCH
-    size_mm = (p.get('size') or 0.01) * FT_MM / scale * EM
+    from .svg import EM, LINE_PITCH, revit_pt
+    size_mm = revit_pt((p.get('size') or 0.01) * FT_MM / scale * EM)
     ang = -math.degrees(math.atan2(p['x'][1], p['x'][0])) if p.get('x') else 0.0
     if 85 < abs(ang) < 95 or ang < -95 or ang > 95:
         pass
@@ -136,4 +137,4 @@ def text_svg(p, tx, scale):
     wt = ' font-weight="bold"' if p.get('bold') else ''
     c = p.get('color'); fill = ''
     if isinstance(c, int) and 0 < c < 1 << 24: fill = ' fill="#%02x%02x%02x"' % (c & 255, (c >> 8) & 255, (c >> 16) & 255)       # text colour (BGR int): the Help Button '?' is light grey on blue
-    return '<text xml:space="preserve" transform="translate(%.3f %.3f) rotate(%.3f)" font-family="%s, sans-serif" font-size="%.3f" text-anchor="%s"%s%s data-e="%s">%s</text>' % (x, y, ang, html.escape(p.get('font') or 'Arial'), size_mm, ha, wt, fill, p.get('elem'), tsp)
+    return '<text xml:space="preserve" transform="translate(%.3f %.3f) rotate(%.3f)" font-family="%s" font-size="%.3f" text-anchor="%s"%s%s data-e="%s">%s</text>' % (x, y, ang, html.escape(font_stack(p.get('font'))), size_mm, ha, wt, fill, p.get('elem'), tsp)

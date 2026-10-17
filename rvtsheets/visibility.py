@@ -1,3 +1,4 @@
+import os
 """Which elements a view shows (stage 1 validation target: Revit's FilteredElementCollector(doc, viewId)).
 Returns ids plus, for every element, the phase status (for phase graphic overrides) and the reason when excluded."""
 import json, os
@@ -51,9 +52,21 @@ class Visibility:
         ph = doc['phases']; self.phase_index = {p['id']: i for i, p in enumerate(ph)}
         self.pfilters = {p['id']: p for p in doc['phase_filters']}
         self.primary_options = self._primary_options()
+        self.option_set = {r['id']: self.dec.f.eid(r['fields'].get('m_DesignOptionSetId')) for r in self.dec.f.recs('DesignOption')}
+
+    def shown_options(self, v):
+        """design options visible in view v: the primary option of every set, replaced by the view's own choice per set (View > Design Options)"""
+        chosen = set(self.primary_options)
+        for st, opt in v.get('design_options') or []:
+            chosen = {o for o in chosen if self.option_set.get(o) != st}
+            if opt not in (None, INVALID): chosen.add(opt)
+        return chosen
 
     def _primary_options(self):
         out = set()
+        for r in self.dec.f.recs('DesignOptionSet'):             # DesignOptionSet.m_mainDesignOption = the primary option (2020 rst_basic: option 1)
+            m = self.dec.f.eid(r['fields'].get('m_mainDesignOption'))
+            if m not in (None, INVALID): out.add(m)
         for r in self.dec.f.recs('DesignOption'):
             fl = r['fields']
             if fl.get('m_bPrimary') or fl.get('m_isPrimary') or fl.get('m_primary'): out.add(r['id'])
@@ -159,7 +172,8 @@ class Visibility:
         r = self.section_plane_line(eid, v)
         if r is None: return False
         pts, t, bo = r
-        if not (min(bo[0]) - 1e-6 <= t <= max(bo[0]) + 1e-6) and v.get('id') not in self._elevation_views(): return False      # elevations list every section line crossing their plane (2020 Residential east/north/south)
+        tol = float(os.environ.get('RVT_SECTION_TOL', '9.5'))       # the plane may miss the section's own extent by up to ~8.3 ft and still list the marker (Residential A-2 in east/west: 8.3 ft out, Snowdon Longitudinal marker in 'Longitudinal': 8.3 ft out) but not by 10.9 ft (Snowdon Sawtooth in Cross Section) nor by 100+ ft (Snowdon elevations)
+        if not (min(bo[0]) - tol <= t <= max(bo[0]) + tol): return False      # elevations list every section line crossing their plane (2020 Residential east/north/south)
         from .compose import crop_rect_uv
         cr = crop_rect_uv(v)
         if cr is not None:
@@ -214,6 +228,15 @@ class Visibility:
                 flags = {k: df.get(k) for k in ('m_annotationsExcluded', 'm_modelsExcluded', 'm_analyticalModelsExcluded', 'm_importsExcluded')}
         return s, flags
 
+    def _template_keys(self, tv):
+        """view settings taken from the template: only the groups it controls (TPLCTL; a parameter excluded from the template keeps the view's own value)"""
+        from .vg import template as T
+        ks = []
+        if all(T.controls(tv, g) for g in ('model', 'annotation', 'analytical', 'import')): ks += ['draw_filters', 'category_overrides']       # the exclusion set and the overrides mix all four tabs: copied only when the template controls all of them
+        for g, keys in (('filters', ('filters',)), ('detail_level', ('detail_level',)), ('phase_filter', ('phase_filter',)), ('discipline', ('discipline',))):
+            if T.controls(tv, g): ks += [k for k in keys if k not in ks]
+        return ks
+
     def effective(self, v):
         """view settings with the view template applied (template controls V/G, phase filter, detail level... when assigned): first approximation
         = take V/G (hidden categories, category overrides, filters) from the template when one is assigned"""
@@ -221,7 +244,7 @@ class Visibility:
         tv = self.doc['views'].get(t) or self.doc['views'].get(str(t)) if t not in (None, INVALID) else None
         if not tv: return v
         w = dict(v)
-        for k in ('draw_filters', 'category_overrides', 'filters', 'detail_level', 'phase_filter', 'discipline'):
+        for k in self._template_keys(tv):
             if tv.get(k) is not None: w[k] = tv[k]
         return w
 
@@ -251,6 +274,32 @@ class Visibility:
                 near = float((np.asarray(cu['origin'], float) - np.asarray(crop['origin'], float)) @ np.asarray(crop['basis'][2], float))       # the view's own cut plane (callouts of a jogged section sit on different pieces)
             return self._crop_test(crop, use_z=kind == 'section', xy=crop.get('crop_active'), near0=kind == 'section' and near is None and v.get('id') not in self._callout_views(), near=near)
         return lambda bb: True
+
+    def _datum_perpendicular(self, eid, v):
+        """sections / elevations list only datum planes perpendicular to the view plane (|n.dir| <= 0.05; Snowdon 7.5 degree grid, rst_basic angled section 'Section Wall2': 21 reference planes + 16 grids unlisted)"""
+        r = self.dec.f.rec(eid)
+        srf = ob((r or {}).get('fields', {}).get('m_pSurface')) or {}
+        if not srf.get('m_xVec') or not srf.get('m_yVec'): return True
+        n = np.cross(np.asarray(srf['m_xVec'], float), np.asarray(srf['m_yVec'], float)); Z = np.asarray(v['dir'], float)
+        nn = np.linalg.norm(n) * np.linalg.norm(Z)
+        return nn < 1e-9 or abs(float(n @ Z)) / nn <= 0.05
+
+    def _datum_meets_crop(self, eid, v):
+        """a grid / reference plane in a section with an active crop is listed only where its (finite) plane meets the view plane inside the crop rectangle
+        (Commercial detail 'Typ. Canopy/Flat Roof' 1:8: 52 reference planes + 11 grids predicted, none in Revit's list)"""
+        from .compose import crop_rect_uv
+        cr = crop_rect_uv(v)
+        if cr is None or os.environ.get('RVT_DATUM_CROP', '1') != '1': return True
+        r = self.dec.f.rec(eid); srf = ob((r or {}).get('fields', {}).get('m_pSurface')) or {}
+        env = path(srf, 'm_Envelope', 'm_corners')
+        if not (srf.get('m_origin') and srf.get('m_xVec') and env): return True
+        o = np.asarray(srf['m_origin'], float); x = np.asarray(srf['m_xVec'], float); y = np.asarray(srf['m_yVec'], float)
+        O = np.asarray(v['origin'], float); Z = np.asarray(v['dir'], float); X = np.asarray(v['right'], float); Y = np.asarray(v['up'], float)
+        (a0, b0), (a1, b1) = env
+        c = [o + x * a0 + y * b0, o + x * a1 + y * b0, o + x * a1 + y * b1, o + x * a0 + y * b1]
+        pts = c                                        # perpendicular planes project onto the view plane: a line (end-on when it runs along the view direction), in front or behind
+        uv = np.array([[(q - O) @ X, (q - O) @ Y] for q in pts]); tol = 0.25
+        return bool(uv[:, 0].max() >= cr[0] - tol and uv[:, 0].min() <= cr[2] + tol and uv[:, 1].max() >= cr[1] - tol and uv[:, 1].min() <= cr[3] + tol)
 
     def _callout_views(self):
         """views that are callouts (Section records with creation method 202): their crop keeps the stored near bound"""
@@ -285,7 +334,7 @@ class Visibility:
     def elements(self, vid, explain=False):
         v0 = self.doc['views'].get(vid) or self.doc['views'].get(str(vid))
         v = self.effective(v0); self._cur_view = v0
-        hid, xflags = self.hidden_categories(v)
+        hid, xflags = self.hidden_categories(v); shown_opts = self.shown_options(v0)
         hidden_el = set(v0.get('hidden_elements') or [])
         pf = self.pfilters.get(v.get('phase_filter'))
         vol = self.volume(v)
@@ -322,6 +371,9 @@ class Visibility:
             if e['cls'] == 'Level' and v['kind'] in ('plan', '3d'): why[eid] = 'level_in_plan_or_3d'; continue
             if e['cls'] in ('Grid', 'RefPlane') and v['kind'] == '3d': why[eid] = 'datum_in_3d'; continue
             if eid in hidden_el: why[eid] = 'hidden_element'; continue
+            if e['cls'] == 'RefPlane' and self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_designOptionId')) == -4: why[eid] = 'refplane_dopt4'; continue       # reference planes with design option id -4 (Commercial 52, Residential 8) are in no Revit list; those with -1 are (rst_basic 21, Snowdon 16, Residential 2)
+            if v['kind'] == 'section' and e['cls'] in DATUM_CLASSES and v.get('dir') and not self._datum_perpendicular(eid, v): why[eid] = 'datum_not_perpendicular'; continue
+            if v['kind'] == 'section' and e['cls'] in ('Grid', 'RefPlane') and not self._datum_meets_crop(eid, v): why[eid] = 'datum_outside_crop'; continue
             c = e['cat']
             if v.get('filters') and (e['cls'] in ('Section', 'InteriorElev') or c != INVALID) and self._filter_hidden(v, eid, self._filter_cat(eid, e)):
                 why[eid] = 'filter_hidden'; continue
@@ -353,7 +405,7 @@ class Visibility:
             if st in ('past', 'future'): why[eid] = 'phase_' + st; continue
             if st and pf and pf.get('presentation'):
                 if pf['presentation'][PHASE_IDX[st]] == DONT_SHOW: why[eid] = 'phase_filter_' + st; continue
-            if e['dopt'] not in (INVALID,) and e['dopt'] != -4 and self.primary_options and e['dopt'] not in self.primary_options: why[eid] = 'design_option'; continue
+            if e['dopt'] not in (INVALID,) and e['dopt'] != -4 and self.primary_options and e['dopt'] not in shown_opts: why[eid] = 'design_option'; continue
             if e['owner'] == INVALID:
                 bb = self.info.bbox(eid)
                 if bb is not None and not vol(bb): why[eid] = 'outside_view_volume'; continue
@@ -373,4 +425,9 @@ class Visibility:
                 except Exception: continue
                 if h not in (None, INVALID) and h in self.info.info and self.info.info[h]['owner'] == INVALID and h not in out:
                     del out[eid]; why[eid] = 'tagged_element_not_in_view'
+        if os.environ.get('RVT_CGL_HOST', '1') == '1':
+            for eid in [k for k in out if self.info.info[k]['cls'] == 'CurtainGridLine']:       # a curtain grid line is listed only with its curtain wall (Commercial detail views: 18 grid lines of walls outside the view)
+                try: h = self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_hostId'))
+                except Exception: continue
+                if h in self.info.info and h not in out: del out[eid]; why[eid] = 'host_not_in_view'
         return (out, why) if explain else out

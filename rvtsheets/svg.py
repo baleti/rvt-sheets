@@ -4,7 +4,27 @@ from .decode import FT_MM, color
 
 LINE_PITCH = 1.22      # baseline-to-baseline distance in em (measured on the 2026 rosetta sheet export)
 EM = 1 / 0.72          # Revit 'Text Size' -> font em size (RTF \fs of 229 notes = 1.388 x type size)
-FONT_MAP = {'Arial': 'Arial, Liberation Sans, Helvetica, sans-serif', 'Arial Narrow': "'Arial Narrow', 'Liberation Sans Narrow', sans-serif"}
+FONT_MAP = {'Arial': "Arial, 'Liberation Sans', Arimo, Helvetica, sans-serif", 'Arial Narrow': "'Arial Narrow', 'Liberation Sans Narrow', 'Nimbus Sans Narrow', sans-serif",
+            'Arial Black': "'Arial Black', Arial, 'Liberation Sans', sans-serif",
+            'Trebuchet MS': "'Trebuchet MS', 'Noto Sans', 'Open Sans', Arial, sans-serif", 'Verdana': "Verdana, 'DejaVu Sans', sans-serif",
+            'Georgia': "Georgia, 'Liberation Serif', Tinos, 'Times New Roman', serif", 'Times New Roman': "'Times New Roman', 'Liberation Serif', Tinos, serif",
+            'Swis721 Lt BT': "'Swis721 Lt BT', Arial, 'Liberation Sans', sans-serif", 'ARchitxt': "ARchitxt, Arial, 'Liberation Sans', sans-serif"}     # explicit fallback stacks (metric-compatible open fonts after the Revit font); proprietary fonts are never shipped
+
+
+def revit_pt(size_mm):
+    """rendered font size (paper mm) as Revit's PDF export prints it: the em (type size x EM) in points snapped half-up to 0.5 pt below 30 pt and to 1 pt above
+    (Snowdon PDFs: 3/32\" -> 9.375 pt printed 9.5, 3/16\" 18.75 -> 19.0, 3/8\" 37.5 -> 38.0, 1/8\" 12.5 and 1/4\" 25.0 unchanged)"""
+    import math, os
+    if os.environ.get('RVT_PTSNAP', '1') != '1' or not size_mm: return size_mm
+    pt = size_mm / (25.4 / 72)
+    q = 0.5 if pt < 30 else 1.0
+    return math.floor(pt / q + 0.5 + 1e-9) * q * 25.4 / 72
+
+
+def font_stack(name):
+    import os
+    if name == 'Arial Narrow' and os.environ.get('RVT_ARIAL_NARROW', 'arial') == 'arial': name = 'Arial'      # the Revit machines that exported the reference PDFs have no Arial Narrow and print Arial (dimension texts of Snowdon L4: widths equal Arial Bold Italic, not the 18 % narrower Narrow); RVT_ARIAL_NARROW=real keeps the narrow face
+    return FONT_MAP.get(name or 'Arial') or ("'%s', Arial, 'Liberation Sans', sans-serif" % name)
 
 
 def _rgb(c):
@@ -50,7 +70,7 @@ class SVG:
 
     def text(self, p, da=''):
         if not p.get('text') or p.get('origin') is None: return
-        size_mm = (p.get('size') or 0.0098) * FT_MM * EM
+        size_mm = revit_pt((p.get('size') or 0.0098) * FT_MM * EM)
         x, y = self.P(p['origin'])
         ang = 0.0
         if p.get('x'): ang = -math.degrees(math.atan2(p['x'][1], p['x'][0]))
@@ -71,7 +91,7 @@ class SVG:
                 # rich text in a layout box (title block labels): lines wrap at the box width like Revit's text
                 from .viewdraw import wrap_text
                 lines = wrap_text('\n'.join(lines), bw, size_mm, p.get('font') or 'Arial', bool(p.get('bold'))).split('\n')
-        fam = FONT_MAP.get(p.get('font') or 'Arial', "'%s', sans-serif" % p.get('font'))
+        fam = font_stack(p.get('font'))
         wt = ' font-weight="bold"' if p.get('bold') else ''
         it = ' font-style="italic"' if p.get('italic') else ''
         tsp = ''.join('<tspan x="%.3f" dy="%.3f">%s</tspan>' % (dx, (first if i == 0 else lh), html.escape(l)) for i, l in enumerate(lines))
