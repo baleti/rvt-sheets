@@ -27,7 +27,7 @@ NOT_DRAWING = {'server.py', 'warm.py', 'cache.py', 'drawings.py', 'pdf.py', '__i
 
 
 def code_version():
-    return _hash_files([f for f in glob.glob(os.path.join(HERE, '*.py')) if os.path.basename(f) not in NOT_DRAWING]
+    return _hash_files([f for f in glob.glob(os.path.join(HERE, '*.py')) + glob.glob(os.path.join(HERE, 'vg', '*.py')) if os.path.basename(f) not in NOT_DRAWING]
                        + glob.glob(os.path.join(HERE, 'data', '*.json')))
 
 

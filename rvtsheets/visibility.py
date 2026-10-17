@@ -7,6 +7,7 @@ from .reader import ob, path, INVALID
 
 CAT_TYPES = {int(k): v for k, v in json.load(open(os.path.join(os.path.dirname(__file__), 'data', 'category_types.json'))).items()}
 NEVER_CLASSES = {'GStyleElem', 'PipeSegment', 'Alignment', 'ReferencePoint', 'FormElem', 'ProfileRefPlane'}     # styles / data / constraint elements (ProfileRefPlane: sketch planes of railings/stairs): never drawn in a view
+NOT_IN_3D = {'BasePoint', 'CoordinateSystemDisplayElem', 'CurveElem'}      # project base / survey point, coordinate display and these curves are in no Snowdon 3D list (0 of 13 views, Revit 2024)
 PLAN_MARKERS = {'InteriorElev', 'InteriorElevArrow', 'Section'}
 OWNED_ONLY_KINDS = {'drafting', 'anon_drafting', 'legend', 'rendering', 'schedule', 'graphical_column_schedule', 'sheet'}
 MARKER_CLASSES = {'Section', 'InteriorElevArrow', 'InteriorElev', 'CalloutTag'}
@@ -301,6 +302,27 @@ class Visibility:
         uv = np.array([[(q - O) @ X, (q - O) @ Y] for q in pts]); tol = 0.25
         return bool(uv[:, 0].max() >= cr[0] - tol and uv[:, 0].min() <= cr[2] + tol and uv[:, 1].max() >= cr[1] - tol and uv[:, 1].min() <= cr[3] + tol)
 
+    def _is22(self):
+        if getattr(self, '_i22', None) is None:
+            from .units import is_2022_plus
+            self._i22 = bool(is_2022_plus(self.dec.f))
+        return self._i22
+
+    def _datum_bbox(self, eid):
+        """world bbox [[min],[max]] of a datum plane's finite envelope"""
+        r = self.dec.f.rec(eid); srf = ob((r or {}).get('fields', {}).get('m_pSurface')) or {}
+        env = path(srf, 'm_Envelope', 'm_corners')
+        if not (srf.get('m_origin') and srf.get('m_xVec') and srf.get('m_yVec') and env): return None
+        o = np.asarray(srf['m_origin'], float); x = np.asarray(srf['m_xVec'], float); y = np.asarray(srf['m_yVec'], float); (a0, b0), (a1, b1) = env
+        P = np.array([o + x * a + y * b for a in (a0, a1) for b in (b0, b1)])
+        return np.array([P.min(0), P.max(0)])
+
+    def _active_clip_boxes(self):
+        """clip boxes of 3D views whose section box is switched on: listed in every model view (Snowdon: the 6 'Structure Only ...' boxes with sb on, none of the 7 off ones; Residential 157965)"""
+        if getattr(self, '_acb', None) is None:
+            self._acb = {(vv.get('section_box') or {}).get('id') for vv in self.doc['views'].values() if (vv.get('section_box') or {}).get('on')}
+        return self._acb
+
     def _callout_views(self):
         """views that are callouts (Section records with creation method 202): their crop keeps the stored near bound"""
         if getattr(self, '_cv', None) is None:
@@ -350,10 +372,12 @@ class Visibility:
             if not e['has_header'] and e['cls'] in ('Level', 'Grid') and not e['type']:
                 # some datums (2020 Residential level 'first floor') have no element header: category from the class, shown by default
                 e = dict(e, cat={'Level': -2000240, 'Grid': -2000220}[e['cls']], vflags=1, has_header=True)
+            if e['cls'] == 'ExtentElem' and e['owner'] == vid and os.environ.get('RVT_VIEW_META', '1') == '1': out[eid] = None; continue      # the view's own datum-extent element is in its list in every view (Residential 25/25, Commercial 24/24)
             if e['type'] or not e['has_header']: continue
             if e['owner'] not in (INVALID, vid): continue
             if v['kind'] in OWNED_ONLY_KINDS and e['owner'] != vid: continue
             if v['kind'] == '3d' and e['cls'] in MARKER_CLASSES: why[eid] = 'marker_in_3d'; continue
+            if e['cls'] == 'ModelClipBox' and eid in self._active_clip_boxes() and e['cat'] not in hid and v['kind'] not in OWNED_ONLY_KINDS and os.environ.get('RVT_VIEW_META', '1') == '1': out[eid] = None; continue      # one project-wide clip box (lowest id) is listed in every model view
             if e['cls'] == 'ModelClipBox' and (v.get('section_box') or {}).get('id') != eid: why[eid] = 'other_views_section_box'; continue
             if e['cls'] == 'Level' and v['kind'] == 'section' and crop_v is not None:
                 lz = self._level_z(eid)
@@ -368,9 +392,14 @@ class Visibility:
                     sch_ = self.dec.f.eid(vt_['fields'].get('m_areaMeasureElemId')); cr_ = self.dec.f.rec(eid)
                     ok_ = ok_ or (cr_ is not None and self.dec.f.eid(cr_['fields'].get('m_areaSchemeId')) == sch_)
                 if not ok_: why[eid] = 'area_boundary_outside_area_plan'; continue
-            if e['cls'] == 'Level' and v['kind'] in ('plan', '3d'): why[eid] = 'level_in_plan_or_3d'; continue
-            if e['cls'] in ('Grid', 'RefPlane') and v['kind'] == '3d': why[eid] = 'datum_in_3d'; continue
+            if e['cls'] == 'Level' and (v['kind'] == 'plan' or (v['kind'] == '3d' and (os.environ.get('RVT_3D_DATUMS', '1') != '1' or not self._is22()))): why[eid] = 'level_in_plan_or_3d'; continue
+            if v['kind'] == '3d' and e['cls'] in ('Grid', 'RefPlane', 'Level'):
+                if e['cls'] == 'RefPlane' or os.environ.get('RVT_3D_DATUMS', '1') != '1' or not self._is22(): why[eid] = 'datum_in_3d'; continue         # 3D views list grids and levels (Snowdon 'Structure Only' 34), never reference planes
+                if e['cls'] == 'Grid' and (v.get('section_box') or {}).get('on') and os.environ.get('RVT_BOX_GRIDS', '0') != '1': why[eid] = 'grid_in_section_box_view'; continue       # Snowdon: the 6 boxed 3D views list their 2-4 levels, never a grid (grids are 2D-extent datums: their 3D line is outside the box)
+                bb_ = self._datum_bbox(eid)
+                if bb_ is not None and not vol(bb_): why[eid] = 'datum_outside_section_box'; continue
             if eid in hidden_el: why[eid] = 'hidden_element'; continue
+            if v['kind'] == '3d' and e['cls'] in NOT_IN_3D and os.environ.get('RVT_NOT_IN_3D', '1') == '1' and self._is22(): why[eid] = 'not_in_3d'; continue
             if e['cls'] == 'RefPlane' and self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_designOptionId')) == -4: why[eid] = 'refplane_dopt4'; continue       # reference planes with design option id -4 (Commercial 52, Residential 8) are in no Revit list; those with -1 are (rst_basic 21, Snowdon 16, Residential 2)
             if v['kind'] == 'section' and e['cls'] in DATUM_CLASSES and v.get('dir') and not self._datum_perpendicular(eid, v): why[eid] = 'datum_not_perpendicular'; continue
             if v['kind'] == 'section' and e['cls'] in ('Grid', 'RefPlane') and not self._datum_meets_crop(eid, v): why[eid] = 'datum_outside_crop'; continue
@@ -425,6 +454,17 @@ class Visibility:
                 except Exception: continue
                 if h not in (None, INVALID) and h in self.info.info and self.info.info[h]['owner'] == INVALID and h not in out:
                     del out[eid]; why[eid] = 'tagged_element_not_in_view'
+        if os.environ.get('RVT_DIM_REFS', '1') == '1':
+            rgp = v.get('range') or {}
+            for eid in [k for k in out if self.info.info[k]['cls'] == 'LinearDimString']:       # same rules as annot.dimension: Revit lists no dimension whose references are all dangling / whose referenced element is not in the view / whose plane lies below a plan's range
+                fl = self.dec.f.rec(eid)['fields']; wr = fl.get('m_witnessRefs') or []; refs = []
+                for w in wr:
+                    try: refs.append(self.dec.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId')))
+                    except Exception: refs.append(None)
+                if wr and all(x in (None, INVALID, -1) for x in refs): del out[eid]; why[eid] = 'dim_dangling_refs'; continue
+                if os.environ.get('RVT_DIM_REFVIEW', '1') == '1' and any(x not in (None, INVALID, -1) and x in self.info.info and self.info.info[x]['owner'] == INVALID and x not in out for x in refs): del out[eid]; why[eid] = 'dim_ref_not_in_view'; continue
+                dl = ob(fl.get('m_pDimLine')) or {}
+                if v['kind'] == 'plan' and dl.get('m_origin') and rgp.get('bottom') is not None and dl['m_origin'][2] < rgp['bottom'] - 0.5: del out[eid]; why[eid] = 'dim_below_range'
         if os.environ.get('RVT_CGL_HOST', '1') == '1':
             for eid in [k for k in out if self.info.info[k]['cls'] == 'CurtainGridLine']:       # a curtain grid line is listed only with its curtain wall (Commercial detail views: 18 grid lines of walls outside the view)
                 try: h = self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_hostId'))

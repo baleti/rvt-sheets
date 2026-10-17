@@ -191,3 +191,14 @@ def scene_text(m, vid, opts):
     s = json.dumps(scene(m, vid, opts), default=j, separators=(',', ':'))
     m.cache.write(name, s)
     return s
+
+
+def vg_text(m, vid, full=False):
+    """cached compact graphics resolution JSON of a view (rvtsheets.vg: V/G stack per element, styles table, fill patterns, materials); runs on the drawing thread"""
+    name = 'vg_%d%s.json' % (vid, '_full' if full else '')
+    if m.cache.has(name): return m.cache.read(name)
+    from .vg.api import compact_text
+    dec, doc = m.decoder()
+    s = compact_text(dec, doc, vid, vis=m._drawer.vis, full=full)
+    m.cache.write(name, s)
+    return s

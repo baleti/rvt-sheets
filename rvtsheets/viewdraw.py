@@ -246,7 +246,7 @@ class ViewDrawer:
 
     def _draw(self, vid, px_mm=0.25, max_elems=None, skip_classes=(), skip_cats=()):
         t0 = time.time()
-        self._cur_vid = vid
+        self._cur_vid = vid; self._rep_region = None; self._rep_ids = set()
         v = self.doc['views'].get(vid) or self.doc['views'].get(str(vid))
         ev = self.vis.effective(v)
         scale = v.get('scale') or 100
@@ -258,6 +258,7 @@ class ViewDrawer:
         wc, wf, _ = self.planes(v, O, Z)
         is_section = v['kind'] == 'section' and v.get('class') == 'DBViewSection'
         cut_w = wc
+        self._cut_w = cut_w
         ctx = ViewCtx(Z, detail=ev.get('detail_level') or 2, cut_origin=(O + Z * wc) if wc is not None else None, cut_normal=Z if wc is not None else None, kind=v['kind'], scale=scale)
         W = Walker(self.f, ctx)
         from .annot import Annotations
@@ -431,12 +432,19 @@ class ViewDrawer:
                     if ip is not None: prims += ip; self.stats['insulation'] += 1; continue
                 except Exception: self.stats['insulation_error'] += 1
             if info['cls'] in NO_SOLID_CLASSES: self.stats['spatial_skipped'] += 1; continue     # rooms/spaces/areas: drawn through their sub-categories (interior fill, reference), stage 5
-            try: pieces = W.walk_record(eid)
+            try: pieces = (self.repeating_detail(eid, W) if info['cls'] == 'CurveElem' and os.environ.get('RVT_REPDETAIL', '1') == '1' else None) or W.walk_record(eid)
             except Exception as ex:
                 self.stats['walk_error'] += 1
                 if os.environ.get('RVT_DEBUG'): import traceback; traceback.print_exc()
                 continue
             cid = info['cat']
+            if info['cls'] == 'CurveElem' and pieces.get('fills') and getattr(self, '_rep_ids', None) is not None and eid in self._rep_ids:
+                try:      # the area the repeating detail components cover replaces the wall layer's own surface pattern (Commercial parapet bricks)
+                    from shapely.geometry import Polygon
+                    from shapely.ops import unary_union
+                    pg_ = [Polygon([q[:2] for q in ((np.asarray(l, float) - O) @ Mv.T)]).buffer(0) for fl_ in pieces['fills'] for l in fl_.get('loops') or [] if l is not None and len(l) > 2]
+                    self._rep_region = unary_union([self._rep_region] + pg_) if getattr(self, '_rep_region', None) is not None else unary_union(pg_)
+                except Exception: self.stats['rep_region_error'] += 1
             fvis, fovs = self.fe.view_filters(ev, eid, cid, (self.doc['categories'].get(cid) or {}).get('parent', INVALID)) if ev.get('filters') else (True, [])
             if not fvis: self.stats['hidden_by_filter'] += 1; continue
             st_ = elems.get(eid) if isinstance(elems, dict) else None
@@ -475,7 +483,7 @@ class ViewDrawer:
                 if bb_ is not None and rg.get('top') is not None and bb_[1][2] < zlo_ - 1e-6 and not anno:
                     under_occ = self._underlay_occluder(v, O, Mv, elems, bb_[1][2])
                 elif (bb_ is not None and rg.get('top') is not None and not anno and cid == -2001320 and v.get('discipline') != 2 and rg.get('cut') is not None
-                      and bb_[1][2] < rg['cut'] - 0.01 and os.environ.get('RVT_FRAME_OCC', '1') == '1'):
+                      and bb_[1][2] < rg['cut'] - 0.01 and os.environ.get('RVT_FRAME_OCC', '1') == '1' and not (os.environ.get('RVT_OCC_BOTTOM', '1') == '1' and rg.get('bottom') is not None and bb_[0][2] <= rg['bottom'] + float(os.environ.get('RVT_OCC_BOT_TOL', '0.2')))):      # beams at / crossing the view range's bottom plane stay visible (Snowdon L2 / L3: recall .35 / .25 -> .86 / .75)
                     under_occ = self._underlay_occluder(v, O, Mv, elems, bb_[1][2])      # framing under a floor in a non-structural plan: the floor hides its symbolic lines (Snowdon L4 / L5: Revit's DXF has none)
             curves_ = pieces['curves']
             if info['cls'] in ('Rebar', 'RebarInSystem'):
@@ -491,6 +499,8 @@ class ViewDrawer:
                 if 'pts' not in c: continue                  # image placements etc. (drawn by the sheet / title block code)
                 if not self.drawable_gs(c.get('gs')): continue
                 if self._gs_hidden(ev, c.get('gs')): self.stats['hidden_subcategory_lines'] += 1; continue
+                if v['kind'] == 'section' and v.get('view_type') != -1 and (res.gs.get(c.get('gs')) or {}).get('cat') == -2001335 and os.environ.get('RVT_COLLOC', '1') == '1':
+                    self.stats['column_location_line_skipped'] += 1; continue      # structural column subcategory -2001335 (thick centre line): not in Revit's DXF of sections (Commercial canopy detail 195606: S-COLS has only the edge pair)
                 if v['kind'] == 'plan' and self._elevation_swing(c.get('gs')): self.stats['elevation_swing_skipped'] += 1; continue      # door/window 'Elevation Swing' lines show only in elevations/sections (Residential plan 32: Revit DXF has none)
                 if info['cls'] in ('SiteSurface', 'TopographySurface') and v['kind'] in ('section', '3d'): continue   # contour/surface curves are not drawn in elevations (the ground profile comes from the mesh)
                 pts = (np.asarray(c['pts'], float) - O) @ Mv.T
@@ -501,7 +511,7 @@ class ViewDrawer:
                         if 0.15 < t_ < 0.85 and float(np.linalg.norm(a_ + ab_ * t_ - plant_c[0])) < 0.05 * plant_c[1] + 0.02:
                             self.stats['planting_diameter_skipped'] += 1; continue      # the symbol's straight lines through its centre (Revit draws the circle and the spokes from the centre, not the diameters)
                 if is_section and v['kind'] == 'section' and wf is not None and wf > -1e8 and pts[:, 2].max() < wf - 1e-6: self.stats['curves_beyond_far_clip'] += 1; continue
-                if is_section and v['kind'] == 'section' and cut_w is not None and pts[:, 2].min() > cut_w + 1e-6: self.stats['curves_before_cut'] += 1; continue      # symbol lines wholly in front of the section plane (planting 18 ft before the building section)      # family symbol lines (planting) behind the far clip are not drawn
+                if is_section and v['kind'] == 'section' and cut_w is not None and pts[:, 2].min() > cut_w + 1e-6 and not (cid == -2002000 and info['cls'] == 'CurveElem'): self.stats['curves_before_cut'] += 1; continue      # symbol lines wholly in front of the section plane (planting 18 ft before the building section)      # family symbol lines (planting) behind the far clip are not drawn
                 if cut_w is not None and not is_section and (pts[:, 2] > cut_w + 1e-6).all() and False: continue
                 lay = 'symbolic'
                 if v['kind'] == 'plan' and not anno and info['cls'] == 'FamilyInstance' and cid not in (-2001330, -2001320, -2001300) and cut_w is not None and (c.get('flags') or 0) & 0x80000 and not (c.get('flags') or 0) & 0x2a0 and (pts[:, 2] > cut_w + 1e-6).all():
@@ -623,6 +633,7 @@ class ViewDrawer:
                     T2 = _clip_tris_halfspace(T2, np.array([0, 0, -1.0]), -wf)
             if len(T2): clipped.append((eid, cid, T2, uvw, fid, gs, ov)); allp.append(T2.reshape(-1, 3))
         if not allp:
+            self._apply_draw_order(v, vid, prims)
             for p in prims: p.pop('_w', None)
             return {'prims': self._finish(prims, O, Mv), 'stats': dict(self.stats)}
         P = np.concatenate(allp)
@@ -659,6 +670,23 @@ class ViewDrawer:
                         Lp = np.asarray(l, float)[:, :2]; per = float(np.linalg.norm(np.diff(Lp, axis=0), axis=1).sum())
                         if np.linalg.norm(Lp[0] - Lp[-1]) < 0.2 * per: l.append(list(l[0]))
                 closed2 = [l for l in loops2 if len(l) > 3 and np.allclose(l[0], l[-1], atol=1e-6)]
+                if not closed2 and len(loops2) > 1 and scale <= 24 and os.environ.get('RVT_CUTPOLY', '1') == '1':      # detail views only (building sections at 1:96 lose recall: Residential 228085 R .865 -> .858)
+                    # a wall solid missing several faces gives open chains that together bound the section (Commercial 'Typ. Wall at Grade' CMU wall: three chains):
+                    # polygonize their union into closed faces and take the union of the faces as the cut region
+                    try:
+                        from shapely.geometry import LineString
+                        from shapely.ops import unary_union, polygonize
+                        faces = list(polygonize(unary_union([LineString([q[:2] for q in l]) for l in loops2 if len(l) > 1])))
+                        if faces:
+                            u_ = unary_union(faces); nl = []
+                            for pg in getattr(u_, 'geoms', [u_]):
+                                if pg.geom_type != 'Polygon' or pg.area < 1e-6: continue
+                                nl.append([list(q) for q in pg.exterior.coords]); nl += [[list(q) for q in r_.coords] for r_ in pg.interiors]
+                            if nl:
+                                keep_segs_ = [(np.array(a_[:2]), np.array(b_[:2])) for l in loops2 for a_, b_ in zip(l, l[1:])]
+                                closed2 = loops2 = nl; self.stats['cut_polygonized'] += 1
+                                segs = keep_segs_ if os.environ.get('RVT_CUTPOLY') == '2' else [(np.array(a_), np.array(b_)) for l in loops2 for a_, b_ in zip(l, l[1:])]
+                    except Exception: self.stats['cut_polygonize_error'] += 1
                 if closed2:                     # open fragments next to closed loops come from faces touching the plane: drop them
                     loops2 = closed2
                     segs = [(np.array(a), np.array(b)) for l in loops2 for a, b in zip(l, l[1:])]
@@ -720,6 +748,30 @@ class ViewDrawer:
                                 if vis_: prims.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis_], 'style': res.line(None, cid, 'proj', eid, ov=ov), 'elem': eid, 'layer': 'projection'})
                     except Exception: self.stats['topo_silhouette_error'] += 1
         prims = self.merge_cut_outlines(prims)
+        if v['kind'] == 'section' and os.environ.get('RVT_WALLWINS', '1') == '1':
+            # joined cut regions: where a wall's cut overlaps a floor / foundation sweep, the wall wins (Revit 'Typ. Wall at Grade': the CMU wall runs through the slab and footing
+            # without the slab's outline or concrete stipple across it)
+            try:
+                from shapely.geometry import LineString
+                from shapely.ops import unary_union
+                inf_ = self.vis.info.info
+                wr = [patterns.region([l for l in p_['loops'] if len(l) > 3]) for p_ in prims if p_.get('t') == 'cut' and p_.get('cat') == -2000011 and p_.get('loops')]
+                wr = [g for g in wr if g is not None and not g.is_empty]
+                if wr:
+                    wall_reg = unary_union(wr).buffer(-1e-3)
+                    for p_ in prims:
+                        if p_.get('layer') not in ('cut', 'cut_fill') or p_.get('t') not in ('cut', 'segs') or not p_.get('segs'): continue
+                        if (inf_.get(p_.get('elem')) or {}).get('cat') not in (-2000032, -2001392, -2001263, -2001340): continue
+                        ns = []
+                        for a_, b_ in p_['segs']:
+                            ls = LineString([a_, b_])
+                            if not ls.intersects(wall_reg): ns.append([a_, b_]); continue
+                            d_ = ls.difference(wall_reg)
+                            for g in getattr(d_, 'geoms', [d_]):
+                                if g.geom_type == 'LineString' and not g.is_empty and g.length > 1e-6:
+                                    c_ = list(g.coords); ns.append([list(c_[0]), list(c_[-1])])
+                        p_['segs'] = ns
+            except Exception: self.stats['wall_wins_error'] += 1
         # cut caps (the cut faces at the cut plane) hide what lies below them
         for loops2 in caps:
             reg = patterns.region([l for l in loops2 if len(l) > 3 and np.allclose(l[0], l[-1], atol=1e-6)])
@@ -752,18 +804,7 @@ class ViewDrawer:
                 for eid, cid, T2, uvw, fid, gs, ov in clipped:
                     if ov.get('_frs') is not None: self.surface_hatch(eid, cid, uvw, ov['_frs'], db, eps, scale, prims, ov)
             except Exception: self.stats['surface_error'] += 1
-        dord = v.get('draw_order') or []
-        unlisted = -1
-        if not dord:
-            # no draw order stored (every 2020 Commercial view): view-specific elements still paint over the model in creation (id) order,
-            # so their masking regions hide model lines (parapet detail: wall/insulation below the break line); other elements stay model
-            owned = sorted({p.get('elem') for p in prims if p.get('elem') is not None and self.vis.info.info.get(p.get('elem'), {}).get('owner') == vid})
-            if any(p.get('layer') == 'mask' and p.get('elem') in set(owned) for p in prims): dord = owned; unlisted = -2
-        if dord:
-            rank = {e: i for i, e in enumerate(dord)}; top = len(dord)
-            for p in prims:
-                if p.get('layer') in ('cut', 'cut_fill', 'projection'): continue        # model content stays below detail items
-                p['order'] = rank.get(p.get('elem'), top if p.get('layer') in ('text', 'annotation', 'annotation_fill', 'datum') else unlisted)
+        self._apply_draw_order(v, vid, prims)
         # family symbolic lines in sections/elevations (door swings, window and furniture elevation symbols) are hidden by what is in
         # front of them like model edges (2020 Residential elevations showed every interior door through the walls); tolerance 3"
         eps_s = max(eps, 0.25)
@@ -778,6 +819,20 @@ class ViewDrawer:
         for k_, v_ in gfx.UNKNOWN_CLASSES.items(): self.stats['unknown_gnode ' + k_] = v_
         self.stats['seconds'] = round(time.time() - t0, 1)
         return {'prims': self._finish(prims, O, Mv), 'stats': dict(self.stats), 'conds_unknown': {str(k): v for k, v in W.unknown_conds.items()}}
+
+    def _apply_draw_order(self, v, vid, prims):
+        dord = v.get('draw_order') or []
+        unlisted = -1
+        if not dord:
+            # no draw order stored (every 2020 Commercial view): view-specific elements still paint over the model in creation (id) order,
+            # so their masking regions hide model lines (parapet detail: wall/insulation below the break line); other elements stay model
+            owned = sorted({p.get('elem') for p in prims if p.get('elem') is not None and self.vis.info.info.get(p.get('elem'), {}).get('owner') == vid})
+            if any(p.get('layer') == 'mask' and p.get('elem') in set(owned) for p in prims): dord = owned; unlisted = -2
+        if dord:
+            rank = {e: i for i, e in enumerate(dord)}; top = len(dord)
+            for p in prims:
+                if p.get('layer') in ('cut', 'cut_fill', 'projection'): continue        # model content stays below detail items
+                p['order'] = rank.get(p.get('elem'), top if p.get('layer') in ('text', 'annotation', 'annotation_fill', 'datum') else unlisted)
 
     def insulation(self, eid, O, Mv, res):
         """batt insulation (CurveElem, 'Insulation Batting Lines', m_data.m_oUserData: m_width W, m_scale = bulge ratio): Revit's export
@@ -920,6 +975,7 @@ class ViewDrawer:
             if inf.get('cat') not in (-2000032, -2000035, -2000038): continue          # floors, roofs, ceilings
             bb = self.vis.info.bbox(e)
             if bb is None or bb[0][2] < ztop - 1e-6 or bb[0][2] > (v['range'].get('top') or 1e9): continue
+            if os.environ.get('RVT_OCC_CUT', '1') == '1' and v['range'].get('cut') is not None and bb[0][2] > v['range']['cut'] + 0.01: continue      # a floor wholly above the cut plane is not displayed, so it cannot hide the beams below (Snowdon L2 / L3 recall .35 / .25 -> back to .86 / .75 without losing L4 / L5)
             try: T = np.asarray(E.element_mesh(self.f.g, e).get('tris') or [], float).reshape(-1, 3, 3)
             except Exception: continue
             for t in ((T - O) @ Mv.T)[:, :, :2]:
@@ -927,6 +983,36 @@ class ViewDrawer:
                 if pg.is_valid and pg.area > 1e-6: polys.append(pg)
         cache[key] = unary_union(polys).buffer(0.01) if polys else None
         return cache[key]
+
+    def repeating_detail(self, eid, W):
+        """repeating detail component (a detail curve whose user data names a RepeatingDetailAttributes type: spacing, the detail family, m_number copies along the
+        curve; Commercial 'Brick' = family 224202 at 0.21875 ft along the parapet wall): the family's graphics placed at curve start + i * spacing, local x along the
+        boundary's first edge, local y along the curve (None when the curve is not a repeating detail)"""
+        r = self.f.rec(eid, 'CurveElem')
+        if not r: return None
+        u = ob_(ob_(r['fields'].get('m_data') or {}).get('m_oUserData') or {}) if r['fields'].get('m_data') else None
+        if not u or not u.get('m_symbolId'): return None
+        at = self.f.rec(self.f.eid(u.get('m_symbolId')), 'RepeatingDetailAttributes')
+        if not at: return None
+        af = at['fields']; sym = self.f.eid(af.get('m_detail')); sp = float(af.get('m_spacing') or 0); n = int(u.get('m_number') or 0)
+        crv = ob_(ob_(r['fields'].get('m_pCurveDriver') or {}).get('m_pCrv') or {})
+        if sym in (None, INVALID) or not sp or n < 1 or not crv.get('m_origin'): return None
+        d = np.asarray(crv['m_dirVec'], float); d /= np.linalg.norm(d)
+        p0 = np.asarray(crv['m_origin'], float) + d * float((crv.get('m_endParams') or [0.0])[0])
+        bx = None
+        for b in u.get('m_oBoundary') or []:
+            bo = ob_(b)
+            if bo.get('m_dirVec') and abs(float(np.dot(np.asarray(bo['m_dirVec'], float), d))) < 0.5: bx = np.asarray(bo['m_dirVec'], float); break
+        if bx is None: return None
+        bx /= np.linalg.norm(bx)
+        if u.get('m_bMirrored'): bx = -bx
+        Rm = np.stack([bx, d, np.cross(bx, d)], axis=1)           # columns: local x, y, z in world
+        out = {'curves': [], 'solids': [], 'texts': [], 'fills': [], 'instances': []}
+        for i in range(n):
+            W.walk_record(sym, Rm, p0 + d * (i * sp), 1, out)
+        self.stats['repeating_detail_copies'] += n
+        self.__dict__.setdefault('_rep_ids', set()).add(eid)
+        return out
 
     def _gs_hidden(self, ev, gs):
         """graphics style whose (sub)category is hidden in the view's V/G (Snowdon L2: structural framing 'Location Lines')"""
@@ -1654,11 +1740,15 @@ class ViewDrawer:
             strip = Polygon([c + ax * a0 + nr * edges[i], c + ax * a1 + nr * edges[i], c + ax * a1 + nr * edges[i + 1], c + ax * a0 + nr * edges[i + 1]])
             piece = reg.intersection(strip)
             if piece.is_empty: continue
+            if ov.get('cut_fg_visible') is False and getattr(self, '_rep_region', None) is not None and not self._rep_region.is_empty:
+                piece = piece.difference(self._rep_region)
+                if piece.is_empty: continue
             if pat is not None and not pat.get('solid'):
                 patterns.ANCHOR = (nr, float(edges[i] + (c @ nr))) if os.environ.get('RVT_PAT_ANCHOR', '1') == '1' else None
                 try: hs_ = patterns.hatch(piece, pat, scale)
                 finally: patterns.ANCHOR = None
-                prims.append({'t': 'segs', 'segs': hs_, 'style': {'w': 0.1, 'rgb': cp.get('color') or [0, 0, 0], 'dash': None}, 'elem': eid, 'layer': 'cut_fill'})
+                hw_ = st['w'] if pat.get('target', 0) != 0 and os.environ.get('RVT_MODELPAT_W', '1') == '1' else 0.1      # model patterns (Brick courses) are drawn at the category's cut line weight, drafting patterns at pen 1 (Revit Typ. Parapet: bricks outlined as heavily as the wall)
+                prims.append({'t': 'segs', 'segs': hs_, 'style': {'w': hw_, 'rgb': cp.get('color') or [0, 0, 0], 'dash': None}, 'elem': eid, 'layer': 'cut_fill'})
             if i:                                                       # interface line between layers
                 a = c + ax * a0 + nr * edges[i]; b = c + ax * a1 + nr * edges[i]
                 seg = reg.intersection(Polygon([a - nr * 1e-4, b - nr * 1e-4, b + nr * 1e-4, a + nr * 1e-4]).buffer(1e-6))
@@ -1693,6 +1783,8 @@ class ViewDrawer:
             mids = S.mean(1)
             w = self._depth_at(uvw[idx], mids)
             ok = ~np.isnan(w)
+            cw_ = getattr(self, '_cut_w', None)
+            if cw_ is not None: ok &= ~(w > cw_ + 1e-6)             # the part of the face in front of the cut plane is removed (Revit shows the roof beyond a section cut without its surface pattern: Commercial canopy detail)
             if not ok.any(): continue
             seg3 = np.concatenate([S[ok], np.repeat(w[ok][:, None, None], 2, 1)], 2)
             vis = db.visible_parts(seg3, eps * 1.5)

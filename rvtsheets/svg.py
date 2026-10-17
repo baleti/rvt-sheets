@@ -1,8 +1,9 @@
 """drawing dict (sheet feet coordinates, y up) -> SVG in paper millimetres (y down)."""
-import html, math
+import html, math, os
 from .decode import FT_MM, color
 
 LINE_PITCH = 1.22      # baseline-to-baseline distance in em (measured on the 2026 rosetta sheet export)
+SHEET_MIN_W = float(os.environ.get('RVT_SHEET_MIN_W', '0.13'))      # sheet-level hairlines (titleblock grids, schedule rules) never thinner than ~0.13 mm: Revit's PNG shows them 1 px black, 0.076 mm pens anti-alias to light grey
 EM = 1 / 0.72          # Revit 'Text Size' -> font em size (RTF \fs of 229 notes = 1.388 x type size)
 FONT_MAP = {'Arial': "Arial, 'Liberation Sans', Arimo, Helvetica, sans-serif", 'Arial Narrow': "'Arial Narrow', 'Liberation Sans Narrow', 'Nimbus Sans Narrow', sans-serif",
             'Arial Black': "'Arial Black', Arial, 'Liberation Sans', sans-serif",
@@ -19,6 +20,30 @@ def revit_pt(size_mm):
     pt = size_mm / (25.4 / 72)
     q = 0.5 if pt < 30 else 1.0
     return math.floor(pt / q + 0.5 + 1e-9) * q * 25.4 / 72
+
+
+# baseline of the first text line relative to the anchor, in em, as Revit's PDF export places it (Snowdon sheet / view PDFs vs the SVG anchor, per vertical alignment):
+# top: baseline 0.98 em below the anchor, middle: 0.337 em ((ascent - descent) / 2), bottom: the descent above the anchor (Arial 0.225, Trebuchet 0.247)
+BASE_OFF = {'trebuchet': (0.98, 0.335, 0.247), 'arial': (0.90, 0.338, 0.225)}      # absolute registration (sheet pages coincide): view titles Arial bottom 0.225, grid bubble digits middle 0.338, titleblock labels top 0.98
+
+
+def first_baseline(valign, n, lh, em, font=None):
+    """dy of the first line (mm) for an anchored text block: valign 0 top, 1 middle, 2 bottom"""
+    import os
+    if os.environ.get('RVT_TEXTBASE', '1') != '1':
+        asc = em * 0.9
+        return {0: asc, 1: asc - ((n - 1) * lh + asc) / 2, 2: -(n - 1) * lh}.get(valign or 0, asc)
+    top, mid, bot = BASE_OFF['trebuchet' if 'trebuchet' in (font or '').lower() else 'arial']
+    if (valign or 0) == 1: return mid * em - (n - 1) * lh / 2
+    if valign == 2: return -(n - 1) * lh - bot * em
+    return top * em
+
+
+def rtf_first(em, font=None):
+    """first baseline (mm) below the top of a saved-graphics rich-text box: Arial 0.90 em (Commercial cover sheet PDF), Trebuchet 0.99 em (Snowdon)"""
+    import os
+    if os.environ.get('RVT_TEXTBASE', '1') != '1': return em
+    return em * (0.99 if 'trebuchet' in (font or '').lower() else 0.90)
 
 
 def font_stack(name):
@@ -52,7 +77,7 @@ class SVG:
         if t == 'line':
             st = style or (self.sty.line(p.get('gs')) if self.sty else {'w': 0.18, 'rgb': [0, 0, 0], 'dash': None})
             dash = ' stroke-dasharray="%s"' % ','.join('%.2f' % d for d in st['dash']) if st.get('dash') else ''
-            self.parts.append('<path d="%s" fill="none" stroke="%s" stroke-width="%.3f"%s stroke-linecap="round" stroke-linejoin="round"%s/>' % (self.path_d(p['pts']), _rgb(st['rgb']), max(st['w'], 0.05), dash, da))
+            self.parts.append('<path d="%s" fill="none" stroke="%s" stroke-width="%.3f"%s stroke-linecap="round" stroke-linejoin="round"%s/>' % (self.path_d(p['pts']), _rgb(st['rgb']), max(st['w'], SHEET_MIN_W), dash, da))
         elif t == 'fill':
             d = ' '.join(self.path_d(l, True) for l in (p.get('loops') or []) if l)
             if not d: return
@@ -80,13 +105,13 @@ class SVG:
         if p.get('anchor') and 'rtf' not in p:           # (a list-valued anchor = the control API's world point, not the alignment flag; saved-graphics rich text carries 'rtf')
             # notes/labels: origin is the anchor point on the alignment side; vertical: top / middle / bottom of the text block
             dx = 0.0
-            n = len(lines); asc = size_mm * 0.9
-            first = {0: asc, 1: asc - ((n - 1) * lh + asc) / 2, 2: -(n - 1) * lh}.get(p.get('valign') or 0, asc)
+            n = len(lines)
+            first = first_baseline(p.get('valign'), n, lh, size_mm, p.get('font'))
         else:
             # saved-graphics rich text: origin = top-left of the layout box (?), alignment inside the box
             bw = (p.get('box') or [0, 0])[0] * FT_MM
             dx = {0: 0, 1: bw / 2, 2: bw}.get(p.get('halign') or 0, 0) if bw else 0
-            first = size_mm
+            first = rtf_first(size_mm, p.get('font'))
             if bw > 1.0 and not p.get('nowrap') and p['text'].count(' ') >= 3:      # short labels ('Drawn By') overflow in a fallback font like Revit's does not wrap them
                 # rich text in a layout box (title block labels): lines wrap at the box width like Revit's text
                 from .viewdraw import wrap_text

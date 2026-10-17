@@ -107,6 +107,17 @@ def make_app(resolver):
             traceback.print_exc(); return web.json_response({'error': '%s: %s' % (type(ex).__name__, ex)}, status=500)
         return web.Response(text=txt, content_type='application/json', headers={'X-Rvt-Cache-Key': m.key})
 
+    async def vg_json(req):
+        """/api/{mid}/view/{id}/vg.json[?full=1] : graphics resolution of a view for the hidden-line renderer / control panel (CONTROL-API.md 'Graphics resolution')"""
+        from .drawings import vg_text
+        m = model(req.match_info['mid']); vid = int(req.match_info['id'])
+        if m.status()['state'] != 'ready': return web.json_response(m.status(), status=202)
+        try: txt = await _pool.run(0, vg_text, m, vid, req.query.get('full') == '1')
+        except KeyError: raise web.HTTPNotFound(text='unknown view %d' % vid)
+        except Exception as ex:
+            traceback.print_exc(); return web.json_response({'error': '%s: %s' % (type(ex).__name__, ex)}, status=500)
+        return web.Response(text=txt, content_type='application/json', headers={'X-Rvt-Cache-Key': m.key})
+
     async def cache_json(req):
         """cache state without decoding: {cached, sheets, total, views, views_total, key, failed}"""
         m = model(req.match_info['mid'])
@@ -146,6 +157,7 @@ def make_app(resolver):
     app.router.add_get('/api/{mid}/sheet/{id}.svg', lambda r: drawing(r, 'sheet'))
     app.router.add_get('/api/{mid}/view/{id}.svg', lambda r: drawing(r, 'view'))
     app.router.add_get('/api/{mid}/view/{id}.json', scene_json)
+    app.router.add_get('/api/{mid}/view/{id}/vg.json', vg_json)
     app.router.add_get('/api/{mid}/thumb/{kind}/{id}.png', thumb)
     app.router.add_get('/api/{mid}/cache.json', cache_json)
     app.router.add_get('/api/{mid}/sheet/{id}.pdf', pdf)

@@ -36,3 +36,19 @@ class Layers(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+class Links(unittest.TestCase):
+    def test_view_links(self):
+        from rvtsheets.vg import links as L
+        class F:
+            byid = {1: 1}
+            @staticmethod
+            def eid(x): return x
+            def recs(self, c): return [{'id': 10}, {'id': 11}] if c == 'RvtLinkSymbol' else []
+        fl = {'m_pRvtLinkOverrides': {'m_invisibleSet': [10], 'm_halftoneSet': [10, 11], 'm_underlaySet': [], 'm_displaySettingsMap': [
+            {'first': 11, 'second': {'m_overallHLE': 2, 'm_modelHLE': 2, 'm_graphicSettingsMap': [{'first': {'m_id64': -2000011}, 'second': {'m_bVisible': 0, 'm_bHalftone': 1}}], 'm_linkedView': {'m_id64': -1}}}]}}
+        r = L.view_links(F(), fl)
+        self.assertFalse(r[10]['visible']); self.assertTrue(r[11]['visible']); self.assertTrue(r[11]['halftone'])
+        self.assertEqual(r[11]['custom']['overall'], 'custom'); self.assertEqual(r[11]['custom']['categories'][-2000011], {'visible': False, 'halftone': True, 'transparency': 0})
+        self.assertIsNone(r[10]['custom'])

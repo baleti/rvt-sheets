@@ -26,3 +26,12 @@ GET /sheets/api/{mid}/view/{id}.json?scale=&detail=&template=0&filters=0&cut=&ph
 - Tag leaders (`part: leader`) are now 3-point polylines (shelf start at the label block edge, elbow = head + m_elbowOffset, target); consumers must not assume 2 points.
 - Wall / floor / roof layer lines and surface patterns carry `elem` of the host and layer `cut` / `cut_fill`; roof chevron cuts are layered per piece.
 - Datum planes not perpendicular to a section / elevation view are not emitted (Revit omits them).
+
+## Graphics resolution (c3-vg, 2026-10-17) for the hidden-line renderer and the control panel
+`rvtsheets.vg.api.report_text(dec, doc, view_id)` (JSON; route proposal for server.py: `GET /api/{mid}/view/{id}/vg.json`) =
+`{view, name, kind, scale, template {id,name,controlled[groups]}|null, detail_level, phase_filter, discipline, filters [{id,name,visible,enabled,overrides}] (view list order),
+hidden_categories [ids], links [{instance, symbol, name, visible, halftone, underlay, custom{overall, modes, categories}}], excluded {reason: n}, excluded_ids {id: reason},
+elements {eid: {cls, cat, phase, filters [ids matched, priority order], overrides {merged members: proj_weight/proj_color/proj_pattern/cut_*/surf_fg_pattern/surf_fg_color/surf_bg_*/cut_fg_*/cut_bg_*/*_visible/halftone/transparency/detail_level},
+source {member: "category:ID"|"filter:ID"|"phase"|"element"}, proj {w (mm at the view scale), rgb, dash [mm]|null, pen, halftone}, cut {same}, halftone, transparency (0-100), phase}}}`.
+Order of precedence per member: element override > filters (earlier in the view's list win) > phase-status override > category (sub-category falls back to parent) > object style.
+Members absent from `overrides` come from the object style (`proj`/`cut` already contain the resolved line style). Fill patterns: `overrides.surf_fg_pattern` etc. are fill pattern ids (doc fill_patterns); when absent the material's surface pattern applies (reader materials).

@@ -34,6 +34,7 @@ CLIP = None         # shapely geometry set by ViewDrawer.draw while drawing a cr
 
 
 MAX_DASHES = 600000
+DOT_MM = 0.15          # a zero-length dash (stipple dot) is drawn as a 0.15 mm paper dash: with the round cap of the 0.1 mm pen Revit's dots (~0.3 mm) are matched; 1e-4 model ft made faint 0.1 mm specks
 SKIPPED = __import__('collections').Counter()
 
 
@@ -92,7 +93,7 @@ def hatch(geom, pattern, scale, view_rot=0.0):
                     for i, s_ in enumerate(segs):
                         L = abs(s_)
                         if i % 2 == 0:                                  # dash (a zero-length dash is a dot)
-                            ends.append((base + t * d, base + (t + max(L, 1e-4 * k)) * d))
+                            ends.append((base + t * d, base + (t + (L if L > 1e-6 * k else DOT_MM / 304.8 * scale)) * d))
                         t += L
             lines_arr = np.asarray(ends, float).reshape(-1, 2, 2)
         if not len(lines_arr): continue

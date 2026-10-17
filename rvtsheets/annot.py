@@ -76,6 +76,9 @@ def label_str(v):
     return str(v)
 
 
+DIM_TXT_OFF = 0.0 if os.environ.get('RVT_TEXTBASE', '1') == '1' else 0.3      # dimension text sits on the dimension line: its bottom-aligned baseline is the descent above (Revit PDF: baseline 0.227 em above the line)
+
+
 class Annotations:
     def __init__(self, drawer):
         self.d = drawer; self.f = drawer.f; self.doc = drawer.doc
@@ -411,7 +414,7 @@ class Annotations:
             if eq: txt = tf.get('m_equalityText') or 'EQ'
             org = sg.get('m_origin')
             pos = P(org) if org and any(org) else o + d * (ts[i] + ts[i + 1]) / 2
-            out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * 0.3).tolist(), 'x': d_txt.tolist(), 'size': size,
+            out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * DIM_TXT_OFF).tolist(), 'x': d_txt.tolist(), 'size': size,
                         'font': font.get('name') or 'Arial', 'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
             if not eq and tf.get('m_alternateUnits') == 2:                  # alternate units below the primary text (rst basic 3000 / 9' - 10": 2.27 ft = 2.91 text heights at 1:100)
                 aopt = ob(tf.get('m_oLinFormatOptionsAlternate')) or {}
@@ -420,12 +423,12 @@ class Annotations:
                     am = ('%.4f' % (val * k_)).rstrip('0').rstrip('.')
                 else: am = units.fmt_length(val, aopt, self.proj_len)
                 atxt = (tf.get('m_alternateUnitsPrefix') or '') + am + (tf.get('m_alternateUnitsSuffix') or '')
-                out.append({'t': 'text', 'text': atxt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * (0.3 - (1.73 if (aopt.get('m_accuracy') or 1) < 1e-6 else 2.91))).tolist(), 'x': d_txt.tolist(), 'size': size,
+                out.append({'t': 'text', 'text': atxt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * (DIM_TXT_OFF - (1.73 if (aopt.get('m_accuracy') or 1) < 1e-6 else 2.91))).tolist(), 'x': d_txt.tolist(), 'size': size,
                             'font': font.get('name') or 'Arial', 'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text', 'part': 'alt_text'})
         if not segs:
             txt = units.fmt_length(t1 - t0, ob(tf.get('m_oLinFormatOptions')) or {}, self.proj_len)
             pos = o + d * (t0 + t1) / 2
-            out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * 0.3).tolist(), 'x': d_txt.tolist(), 'size': size,
+            out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * DIM_TXT_OFF).tolist(), 'x': d_txt.tolist(), 'size': size,
                         'font': font.get('name') or 'Arial', 'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
         return out
 

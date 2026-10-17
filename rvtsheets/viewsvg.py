@@ -119,7 +119,7 @@ def text_svg(p, tx, scale):
     import math
     from .decode import FT_MM
     x, y = tx(*p['origin'][:2])
-    from .svg import EM, LINE_PITCH, revit_pt
+    from .svg import EM, LINE_PITCH, revit_pt, first_baseline, rtf_first
     size_mm = revit_pt((p.get('size') or 0.01) * FT_MM / scale * EM)
     ang = -math.degrees(math.atan2(p['x'][1], p['x'][0])) if p.get('x') else 0.0
     if 85 < abs(ang) < 95 or ang < -95 or ang > 95:
@@ -127,12 +127,12 @@ def text_svg(p, tx, scale):
     lines = p['text'].split('\n'); lh = size_mm * LINE_PITCH
     ha = {0: 'start', 1: 'middle', 2: 'end'}.get(p.get('halign') or 0, 'start')
     asc = size_mm * 0.9; n = len(lines); dx = 0.0
-    if p.get('anchor') and 'rtf' not in p: first = {0: asc, 1: asc - ((n - 1) * lh + asc) / 2, 2: -(n - 1) * lh}.get(p.get('valign') or 0, asc)
+    if p.get('anchor') and 'rtf' not in p: first = first_baseline(p.get('valign'), n, lh, size_mm, p.get('font'))
     else:
         # saved-graphics rich text (family labels such as the Help Button '?'): origin = top-left of the layout box, alignment inside the box
         bw = (p.get('box') or [0, 0])[0] * FT_MM / scale
         dx = {0: 0.0, 1: bw / 2, 2: bw}.get(p.get('halign') or 0, 0.0) if bw else 0.0
-        first = size_mm
+        first = rtf_first(size_mm, p.get('font'))
     tsp = ''.join('<tspan x="%.3f" dy="%.3f">%s</tspan>' % (dx, (first if i == 0 else lh), html.escape(l)) for i, l in enumerate(lines))
     wt = ' font-weight="bold"' if p.get('bold') else ''
     c = p.get('color'); fill = ''
