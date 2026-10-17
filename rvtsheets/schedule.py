@@ -22,10 +22,20 @@ class Schedules:
             except Exception: self._params = {}
         return self._params
 
+    def old_em(self, d):
+        """True for 2020-2021 style files: text em = type size / 0.72 and row pitch 1.917 x type size (Commercial PDFs); False for 2022+ (Snowdon calibration kept)"""
+        if os.environ.get('RVT_SCHED_EM', 'new') != 'new': return False
+        try:
+            from .units import is_2022_plus
+            return not is_2022_plus(self.f)
+        except Exception: return True
+
     def em_k(self, d):
         """text em / type size in a schedule: Revit 2022+ files draw schedule text at size / 0.72 like notes (Snowdon PDF: header 15.6 pt vs 3/32in note 11.85 pt = 1.32 ~ 1.33), 2020 files at 1.2 x (Window Schedule PNG: 'x\' - x\"' ink width)"""
         if os.environ.get('RVT_SCHED_FIT', '1') != '1': return 0.8 if d.get('grid_lines', 1) else 1.2
-        if d.get('grid_lines') == 0: return 1 / 0.72 if (d['fonts']['m_bodyTextTypeId'][0] or 0) > 0.015 else 1.2      # Commercial Sheet List (1/4in body text) PDF: em 8.93 mm = size / 0.72; Residential's 1/8in list fits 1.2
+        if d.get('grid_lines') == 0 and os.environ.get('RVT_SCHED_GL', '1') != '1': return 1.2
+        if d.get('grid_lines') == 0: return 1 / 0.72      # gridless lists: em = type size / 0.72 (Commercial cover sheet PDF, Sheet List: 1/4in type printed 25 pt = 8.82 mm)
+        if os.environ.get('RVT_SCHED_EM', 'new') == 'new': return 1 / 0.72      # Commercial 2020 PDFs: Door Schedule header 4.41 mm / body 3.35 mm, How Do I table 4.41 mm = type size / 0.72 as in 2022+ files
         try:
             from .units import is_2022_plus
             if is_2022_plus(self.f): return 1 / 0.72
@@ -263,12 +273,13 @@ class Schedules:
                 line((x0, y - hh), (x0 + W, y - hh)); line((x0, y), (x0, y - hh)); line((x0 + W, y), (x0 + W, y - hh))
             y -= hh
         hb = d['body_h'] or d['fonts']['m_bodyTextTypeId'][0] * 2.2
-        if d.get('grid_lines') == 0: hb = max(hb, d['fonts']['m_bodyTextTypeId'][0] * (1.9 if d['fonts']['m_bodyTextTypeId'][0] > 0.015 else 1.2 * 0.72 * 1.8))   # gridless lists: rows follow the larger text (Commercial Sheet List PDF pitch 12.07 mm = 1.9 x the 1/4in type size)
-        elif os.environ.get('RVT_SCHED_FIT', '1') == '1': hb = max(hb, 1.597 * d['fonts']['m_bodyTextTypeId'][0] * self.em_k(d))   # Revit's rows follow the text (2020 Window Schedule export: pitch 0.0199 ft vs stored 0.0139)
+        if d.get('grid_lines') == 0: hb = max(hb, d['fonts']['m_bodyTextTypeId'][0] * (1.917 if os.environ.get('RVT_SCHED_GL', '1') == '1' else 1.2 * 0.72 * 1.8))   # gridless lists: rows follow the larger text
+        elif os.environ.get('RVT_SCHED_FIT', '1') == '1': hb = max(hb, d['fonts']['m_bodyTextTypeId'][0] * (1.917 if self.old_em(d) else 1.597 * self.em_k(d)))      # Door Schedule PDF: body pitch 4.565 mm = 1.917 x 3/32in, header rows 6.09 mm = 1.917 x 1/8in, Sheet List 12.17 mm = 1.917 x 1/4in   # Revit's rows follow the text (2020 Window Schedule export: pitch 0.0199 ft vs stored 0.0139)
         hh = hb
         if d.get('grid_lines') != 0 and os.environ.get('RVT_SCHED_FIT', '1') == '1' and os.environ.get('RVT_SCHED_HDR', '1') == '1':
             bs_, hs_ = d['fonts']['m_bodyTextTypeId'][0], d['fonts']['m_headerTextTypeId'][0]
             if bs_ and hs_ and hs_ > bs_: hh = hb * hs_ / bs_      # heading rows follow the (larger) heading text like the body rows follow theirs (Commercial Door Schedule PDF: 2 x 6.09 mm heading rows vs 4.57 mm body rows)
+        if d.get('grid_lines') == 0 and not d['show_headers'] and d['show_title'] and os.environ.get('RVT_SCHED_GL', '1') == '1': y -= hb      # hidden heading row keeps its height (Commercial Sheet List PDF: first row 2 pitches below the title)
         top_grid = y
         inner = set()                                    # x of column boundaries inside a header group (no line through the group row)
         if d['show_headers'] and any(f.get('groups') for f in d['fields']):

@@ -13,13 +13,16 @@ FONT_MAP = {'Arial': "Arial, 'Liberation Sans', Arimo, Helvetica, sans-serif", '
 
 
 def revit_pt(size_mm):
-    """rendered font size (paper mm) as Revit's PDF export prints it: the em (type size x EM) in points snapped half-up to 0.5 pt below 30 pt and to 1 pt above
-    (Snowdon PDFs: 3/32\" -> 9.375 pt printed 9.5, 3/16\" 18.75 -> 19.0, 3/8\" 37.5 -> 38.0, 1/8\" 12.5 and 1/4\" 25.0 unchanged)"""
+    """rendered font size (paper mm) as Revit's PDF export prints it: the em (type size x EM) in points rounded UP to the next 0.5 pt (3/32" 9.375 -> 9.5,
+    3/16" 18.75 -> 19.0), exact half points stay (1/8" 12.5, 1/4" 25.0, Arial 3/8" 37.5) except from 45 pt up where they move up by 0.5 (1/2" 50 -> 50.5,
+    5/8" 62.5 -> 63.0, 1" 100 -> 100.5): measured on the Snowdon and Commercial PDFs (likely single-precision noise in Revit's conversion)"""
     import math, os
     if os.environ.get('RVT_PTSNAP', '1') != '1' or not size_mm: return size_mm
     pt = size_mm / (25.4 / 72)
-    q = 0.5 if pt < 30 else 1.0
-    return math.floor(pt / q + 0.5 + 1e-9) * q * 25.4 / 72
+    x2 = pt * 2
+    if abs(x2 - round(x2)) < 2e-3: q = round(x2) / 2 + (0.5 if pt >= 45 else 0.0)
+    else: q = math.ceil(x2) / 2
+    return q * 25.4 / 72
 
 
 # baseline of the first text line relative to the anchor, in em, as Revit's PDF export places it (Snowdon sheet / view PDFs vs the SVG anchor, per vertical alignment):
