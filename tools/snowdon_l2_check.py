@@ -23,7 +23,7 @@ chk('lettered grid heads east', len(east) == 5, '%d/5' % len(east))
 cols = sum(1 for p in P if info.get(p['elem'], {}).get('cat') == -2001330 and p['t'] == 'line' and p['layer'] == 'symbolic')
 chk('column symbol lines', cols >= 150, str(cols))
 dims = {p['elem'] for p in P if info.get(p['elem'], {}).get('cls') == 'LinearDimString'}
-chk('one linear dimension', len(dims) == 1, str(len(dims)))
+chk('no dimension referencing off-view elements (Revit DXF has none)', len(dims) == 0, str(len(dims)))
 cw = [p['text'] for p in P if p['t'] == 'text' and p['text'].startswith('CW')]
 chk('CW wall tags', len(cw) == 8 and set(cw) == {'CW12"', 'CW10"'}, str(sorted(set(cw))))
 chk('no joist system sketch', not any(info.get(p['elem'], {}).get('cls') == 'JoistSystem' for p in P))

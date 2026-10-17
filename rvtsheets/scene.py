@@ -30,6 +30,7 @@ class Walker:
     def __init__(self, f, ctx, max_depth=4):
         self.f = f; self.ctx = ctx; self.max_depth = max_depth
         self.unknown_conds = {}
+        self._ctx_dir = None
         self.annotation_scale = False          # annotation instance transforms already carry the view scale (verified: m_3x3 = 4*I in a 1:4 drafting view)
         self.is_annotation = lambda eid: False
         self.invisible_gs = set()                                       # graphics styles of '<Invisible lines>'
@@ -47,9 +48,15 @@ class Walker:
             return True                                  # other int params (selection / highlight states): drawn
         if cls == 'GConditionSelected': return False         # drawn only while the element is selected (camera frusta, grips)
         if cls in ('GConditionDir', 'GConditionCut'):
-            d = np.asarray(R, float) @ np.asarray(x['m_dir'], float)      # condition direction in world
-            n = np.linalg.norm(d); d = d / n if n else d
-            dv = float(np.dot(d, ctx.dir))
+            Rl = R.tolist() if hasattr(R, 'tolist') else R              # 3x3 on Python floats: this runs ~300k times per Structural render
+            m = x['m_dir']; m0, m1, m2 = float(m[0]), float(m[1]), float(m[2])
+            d0 = Rl[0][0] * m0 + Rl[0][1] * m1 + Rl[0][2] * m2; d1 = Rl[1][0] * m0 + Rl[1][1] * m1 + Rl[1][2] * m2; d2 = Rl[2][0] * m0 + Rl[2][1] * m1 + Rl[2][2] * m2
+            n = (d0 * d0 + d1 * d1 + d2 * d2) ** 0.5
+            if n: d0, d1, d2 = d0 / n, d1 / n, d2 / n
+            cd = self._ctx_dir
+            if cd is None or cd[0] is not ctx.dir: cd = self._ctx_dir = (ctx.dir, [float(t) for t in ctx.dir])
+            dv = d0 * cd[1][0] + d1 * cd[1][1] + d2 * cd[1][2]
+            d = np.array([d0, d1, d2]) if comp in (6, 7) else None
             if comp == 10:   r = dv > 1 - 1e-3                             # (?) view direction equals d
             elif comp == 0:
                 # (?) view direction perpendicular to d; in 2D family content (drafting views: detail components, symbols) these are the

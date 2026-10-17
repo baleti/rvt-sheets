@@ -74,6 +74,8 @@ class Datums:
             if not r: continue
             fl = r['fields']; srf = ob(fl.get('m_pSurface')) or {}
             if not srf.get('m_origin'): continue
+            uo_ = self.f.eid(fl.get('m_unplacedOwnerId'))
+            if uo_ not in (None, INVALID, -1): continue                       # datum owned by another element (Snowdon Facades duplicate 'L3' levels): not an independent datum, Revit shows one L3
             o = np.asarray(srf['m_origin'], float); x = np.asarray(srf['m_xVec'], float); y = np.asarray(srf['m_yVec'], float)
             env = path(srf, 'm_Envelope', 'm_corners') or [[-50, -50], [50, 50]]
             (a0, b0), (a1, b1) = env
@@ -81,7 +83,17 @@ class Datums:
             # datum line in this view = intersection of the datum plane with the view plane: direction perpendicular to both normals
             dline = np.cross(n, Z)
             if np.linalg.norm(dline) < 1e-6: continue                   # datum plane parallel to the view: not shown
+            if v.get('kind') == 'section' and abs(float(n @ Z)) / (np.linalg.norm(n) or 1.0) > 0.05: continue      # sections / elevations show only datum planes perpendicular to the view (Snowdon Structural: the 7.5 degree grid 598948 is absent from Revit's North / Longitudinal DXF, the 82 degree one from East)
             dline /= np.linalg.norm(dline)
+            if v.get('kind') == 'section' and (v.get('crop') or {}).get('far_clip_active'):
+                # datum planes are finite (envelope): with an active far clip only those that reach the view's depth slab are shown (Snowdon Facades Block 43 elevation:
+                # the 'Block 39' levels end 24 ft in front of the 3 ft slab and are not in Revit's picture)
+                try:
+                    far = float(((v['crop'].get('bounds') or [[0, 0]] * 3)[2])[0]); tol = 0.5
+                    cs = np.array([o + x * u + y * w for u in (a0, a1) for w in (b0, b1)])
+                    sd = (cs - O) @ Z
+                    if sd.max() < -far - tol or sd.min() > tol: continue
+                except Exception: pass
             # parameterise along whichever datum axis is the line direction
             if abs(dline @ x) > abs(dline @ y): ax, lo, hi = x, a0, a1
             else: ax, lo, hi = y, b0, b1
@@ -113,6 +125,8 @@ class Datums:
                 # in the building section = Revit's -84.6..97.7, same as the Finished Floor line; north elevation mirrored)
                 t_b = e.get('m_bubbleEnd') or e.get('m_bubbleEnd3d') or 0.0
                 t_f = e.get('m_freeEnd') or e.get('m_freeEnd3d') or 0.0
+                if e.get('m_bubbleEnd') and e.get('m_freeEnd') and e.get('m_bubbleEnd3d') and e.get('m_freeEnd3d') and e['m_bubbleEnd'] < e['m_freeEnd'] and e['m_bubbleEnd3d'] > e['m_freeEnd3d']:
+                    t_b, t_f = e['m_bubbleEnd3d'], e['m_freeEnd3d']           # 2D ends stored with the head on the left while the 3D ends put it on the right (Snowdon Facades 'Block 37 - Parapet': Revit's head is on the right)
                 if t_b or t_f:
                     Xr = Mv[0]
                     lvl_ext = (((o + Xr * t_b - O) @ Mv.T)[:2], ((o + Xr * t_f - O) @ Mv.T)[:2])

@@ -4,6 +4,7 @@ witness lines (gap / extension), tick marks (LeaderStyle of the dimension type),
 Sizes are paper sizes (feet of paper) x view scale. Defaults where the type does not store a value are Revit's out-of-the-box
 type values (?): witness gap 1/16", extension 3/32", tick 3/64" diagonal, text offset 1/32"."""
 import math
+import os
 import numpy as np
 from .reader import ob, path, INVALID
 from . import units
@@ -13,6 +14,40 @@ IN = 1 / 12.0
 
 def typ_params(a, tf):
     return ob(tf.get('m_pParamValueSetElementId')) or {}
+
+
+def f_isarea(tags, tr):
+    return tags.f.eid(tr['fields'].get('m_areaSchemeId')) not in (None, INVALID, -1)
+
+
+def _area_of_scheme_region(drawer, area_rec):
+    """area (square feet) of an Area element: the region of its area scheme's boundary lines (CurveElem category -2000079, m_areaSchemeId) that
+    contains the Area's point (Residential area plan: 1310 SF)"""
+    try:
+        from shapely.geometry import Point
+        from shapely.ops import unary_union, polygonize
+        from shapely.geometry import LineString
+        f = drawer.f; sch = f.eid(area_rec['fields'].get('m_areaSchemeId'))
+        c = getattr(drawer, '_area_cache', None)
+        if c is None: c = drawer._area_cache = {}
+        if sch not in c:
+            segs = []
+            for e, i in drawer.vis.info.info.items():
+                if i['cls'] != 'CurveElem' or i['cat'] != -2000079: continue
+                r = f.rec(e)
+                if f.eid(r['fields'].get('m_areaSchemeId')) != sch: continue
+                cr = ob(path(ob(r['fields'].get('m_pCurveDriver')) or {}, 'm_pCrv')) or {}
+                o = np.asarray(cr.get('m_origin') or [], float); d = np.asarray(cr.get('m_dirVec') or [], float); ep = cr.get('m_endParams')
+                if len(o) < 2 or len(d) < 2 or not ep: continue
+                segs.append(LineString([tuple(np.round((o + d * ep[0])[:2], 5)), tuple(np.round((o + d * ep[1])[:2], 5))]))
+            c[sch] = list(polygonize(unary_union(segs))) if segs else []
+        pt = area_rec['fields'].get('m_point')
+        if not pt: return None
+        P = Point(pt[0], pt[1])
+        for poly in c[sch]:
+            if poly.contains(P): return float(poly.area)
+    except Exception: return None
+    return None
 
 
 def _property_line_value(tr, pid):
@@ -225,6 +260,12 @@ class Annotations:
         wr = fl.get('m_witnessRefs') or []
         if wr and all(self.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId')) in (None, INVALID, -1) for w in wr):
             return []            # every witness reference points at no element (Snowdon L2 dimension 595385): Revit does not draw it
+        vs = getattr(self.d, '_vis_elems', None)
+        if vs is not None:           # Revit omits a dimension when a referenced element is not in the view (Snowdon L2 38'-7" dim: its wall 587033 lies outside the view volume)
+            for w in wr:
+                e_ = self.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId'))
+                if e_ not in (None, INVALID, -1) and e_ not in vs and self.f.rec(e_):
+                    self.d.stats['dim_hidden_ref'] += 1; return []
         dl = ob(fl.get('m_pDimLine')) or {}
         if not dl.get('m_origin'): return []
         P = lambda p: ((np.asarray(p, float) - O) @ Mv.T)[:2]
@@ -298,17 +339,21 @@ class Annotations:
             org = sg.get('m_origin')
             pos = P(org) if org and any(org) else o + d * (ts[i] + ts[i + 1]) / 2
             out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * 0.3).tolist(), 'x': d_txt.tolist(), 'size': size,
-                        'font': font.get('name') or 'Arial', 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
-            if not eq and tf.get('m_alternateUnits') == 2 and (ob(tf.get('m_oLinFormatOptionsAlternate')) or {}).get('m_accuracy', 1) >= 1e-4:                  # alternate units below the primary text (rst basic 3000 / 9' - 10": 2.27 ft = 2.91 text heights at 1:100)
+                        'font': font.get('name') or 'Arial', 'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
+            if not eq and tf.get('m_alternateUnits') == 2:                  # alternate units below the primary text (rst basic 3000 / 9' - 10": 2.27 ft = 2.91 text heights at 1:100)
                 aopt = ob(tf.get('m_oLinFormatOptionsAlternate')) or {}
-                atxt = (tf.get('m_alternateUnitsPrefix') or '') + units.fmt_length(val, aopt, self.proj_len) + (tf.get('m_alternateUnitsSuffix') or '')
-                out.append({'t': 'text', 'text': atxt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * (0.3 - 2.91)).tolist(), 'x': d_txt.tolist(), 'size': size,
-                            'font': font.get('name') or 'Arial', 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text', 'part': 'alt_text'})
+                if (aopt.get('m_accuracy') or 1) < 1e-6 and units.du_of(aopt) in (0, 1, 2, 3, 6):      # unrestricted accuracy (Snowdon '_Working' styles: '236.5' under 19'-8 1/2"): all decimals, trailing zeros dropped, no unit symbol
+                    k_ = {0: 0.3048, 1: 30.48, 2: 304.8, 3: 1.0, 6: 12.0}[units.du_of(aopt)]
+                    am = ('%.4f' % (val * k_)).rstrip('0').rstrip('.')
+                else: am = units.fmt_length(val, aopt, self.proj_len)
+                atxt = (tf.get('m_alternateUnitsPrefix') or '') + am + (tf.get('m_alternateUnitsSuffix') or '')
+                out.append({'t': 'text', 'text': atxt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * (0.3 - (1.73 if (aopt.get('m_accuracy') or 1) < 1e-6 else 2.91))).tolist(), 'x': d_txt.tolist(), 'size': size,
+                            'font': font.get('name') or 'Arial', 'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text', 'part': 'alt_text'})
         if not segs:
             txt = units.fmt_length(t1 - t0, ob(tf.get('m_oLinFormatOptions')) or {}, self.proj_len)
             pos = o + d * (t0 + t1) / 2
             out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * 0.3).tolist(), 'x': d_txt.tolist(), 'size': size,
-                        'font': font.get('name') or 'Arial', 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
+                        'font': font.get('name') or 'Arial', 'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
         return out
 
 
@@ -477,6 +522,7 @@ class Tags:
                     if t_ not in (None, INVALID, -1): tagged = t_; break
         else:
             pos = fl.get('m_point'); tagged = self.f.eid(path(fl, 'm_taggedRoomElemId', 'm_linkInstOrHostId'))
+            if pos is None: pos = (ob(fl.get('m_oTagOrientationCell')) or {}).get('m_headLocation')      # 2024 layout (Snowdon area tags)
             off = fl.get('m_tagOffset')
             if off and pos: pos = (np.asarray(pos, float) + np.asarray(off, float)).tolist()
         if pos is None: return []
@@ -558,6 +604,7 @@ class Tags:
                 v = raw.get(prm.get('param')) if isinstance(prm.get('param'), int) and prm.get('param') < 0 else None
                 if v is None: v = vals.get(nm)
                 if prm.get('param') == -1002001 and not v and tsym not in (None, INVALID): v = self.type_name(tsym)       # Type Name: the (master) symbol's own name
+                if v is None and nm == 'Area' and tr and tr['class'] == 'RoomElem' and f_isarea(self, tr) and os.environ.get('RVTSHEETS_AREA_POLY'): v = _area_of_scheme_region(self.d, tr)      # off by default: polygon of the boundary lines gives 1277 SF where Revit prints 1310 (Residential area plan)
                 if v is None and nm == 'Area' and tr and tr['class'] == 'RoomElem':      # room area: Revit computes it from the boundary; here the floor face of the room volume
                     try:
                         import rvt_elemmesh as E
@@ -581,7 +628,7 @@ class Tags:
                     if (ob(prm['fmt'].get('m_symbolTypeId') if isinstance(prm['fmt'].get('m_symbolTypeId'), dict) else {}) or {}).get('m_typeId', '') == '': pass
                 if isinstance(v, float):
                     if any(w in nm for w in ('Length', 'Width', 'Height', 'Elevation', 'Offset', 'Thickness', 'Depth', 'Perimeter')): v = units.fmt_length(v, {'m_bUseDefault': 1}, units.length_format(self.f))
-                    elif 'Area' in nm: v = ('%d SF' % round(v)) if units.is_imperial(self.f) else ('%.2f m²' % (v * 0.09290304))
+                    elif 'Area' in nm: v = ('{:,} SF'.format(int(round(v)))) if units.is_imperial(self.f) else ('%.2f m²' % (v * 0.09290304))
                     else: v = '%g' % v
                 parts.append((prm.get('prefix') or '') + str(v) + (prm.get('suffix') or ''))
                 seps.append('\n' if prm.get('linebreak') else ' ' * int(prm.get('spaces') if prm.get('spaces') is not None else 1))
@@ -597,6 +644,7 @@ class Tags:
                         'anchor': True, 'elem': eid, 'layer': 'text'})
         if r['class'] in ('IndependentTag', 'BeamSystemTag', 'SpanDirectionSymbol') and fl.get('m_leader') and anchor is not None:
             # leader (2020 layout): straight line from the head to the tagged element's centre (rst basic section tags: vertical leaders down to the joist / beam)
+            exact_ = False
             try:
                 end = ((np.asarray(anchor, float) + np.asarray(fl.get('m_endOffset') or [0, 0, 0], float) - O) @ Mv.T)[:2]
                 bb_ = self.d.vis.info.bbox(tagged)
@@ -604,10 +652,33 @@ class Tags:
                     cs_ = np.asarray([((np.asarray([x_, y_, z_], float) - O) @ Mv.T)[:2] for x_ in (bb_[0][0], bb_[1][0]) for y_ in (bb_[0][1], bb_[1][1]) for z_ in (bb_[0][2], bb_[1][2])])
                     lo_, hi_ = cs_.min(0), cs_.max(0); wd_, ht_ = hi_ - lo_
                     if wd_ > 2 * ht_: end = np.array([min(max(o[0], lo_[0]), hi_[0]), (lo_[1] + hi_[1]) / 2])
-                    elif ht_ > 2 * wd_: end = np.array([(lo_[0] + hi_[0]) / 2, min(max(o[1], lo_[1]), hi_[1])])
+                    elif ht_ > 2 * wd_:
+                        end = np.array([(lo_[0] + hi_[0]) / 2, min(max(o[1], lo_[1]), hi_[1])])
+                        if (self.d.vis.info.info.get(tagged) or {}).get('cat') in (-2001330, -2000100) and not np.any(fl.get('m_endOffset') or [0]): end = np.array([(lo_[0] + hi_[0]) / 2, hi_[1]]); exact_ = True      # columns: the leader meets the top of the column (rst basic detail 1253612: Revit target at the parapet level)
                 cat_ = self.d.vis.info.info.get(eid, {}).get('cat')
+                start = o[:2]; pts_ = None
+                tp_ = next((q for q in reversed(out) if q.get('t') == 'text' and q.get('text') and q.get('layer') == 'text'), None)
+                if tp_ is not None and abs(math.sin(ang)) < 1e-6 and os.environ.get('RVT_SHELF', '1') == '1':
+                    # elbow leader (rst basic detail 1253612 vs Revit's DXF): a horizontal shelf at the vertical middle of the label block, from the block edge facing
+                    # the target (shelf length ~ 8.8 mm of paper), then a straight line to the target
+                    from .viewdraw import _font
+                    sz_ = float(tp_['size']); em_ = sz_ / 0.72; lines_ = tp_['text'].split('\n'); n_ = len(lines_)
+                    fo_ = _font(tp_.get('font') or 'Arial', bool(tp_.get('bold')))
+                    wd_l = [(fo_.getlength(l_) / 200.0 * em_) if fo_ else len(l_) * 0.5 * em_ for l_ in lines_]
+                    W_ = max(wd_l); ox_, oy_ = tp_['origin'][:2]; ha_ = tp_.get('halign') or 0
+                    xl_ = {0: ox_, 1: ox_ - W_ / 2, 2: ox_ - W_}[ha_]; xr_ = xl_ + W_
+                    H_ = (n_ - 1) * em_ * 1.22 + 0.9 * em_
+                    yc_ = {0: oy_ - H_ / 2, 1: oy_, 2: oy_ + H_ / 2}[tp_.get('valign') or 0]
+                    side_ = 1.0 if end[0] > (xl_ + xr_) / 2 else -1.0
+                    sx_ = xr_ if side_ > 0 else xl_
+                    ex_ = sx_ + side_ * 0.0290 * scale
+                    eo_ = fl.get('m_elbowOffset')
+                    if eo_ is not None and not fl.get('m_bLeaderIsStraight') and pos is not None:
+                        eb_ = (((np.asarray(pos, float) + np.asarray(eo_, float)) - O) @ Mv.T)[:2]          # the elbow stored in the tag: head + m_elbowOffset (world feet)
+                        if abs(eb_[1] - o[1]) < 1e-3 * max(scale, 1): ex_ = float(eb_[0]); side_ = 1.0 if ex_ > o[0] else -1.0; sx_ = xr_ if side_ > 0 else xl_
+                    start = np.array([sx_, yc_]); pts_ = [start.tolist(), [ex_, yc_], end.tolist()]
                 if np.linalg.norm(end - o[:2]) > 1e-6:
-                    out.append({'t': 'line', 'pts': [o[:2].tolist(), end.tolist()], 'style': res.line(None, cat_, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation', 'part': 'leader', '_tagged': tagged})
+                    out.append({'t': 'line', 'pts': pts_ or [o[:2].tolist(), end.tolist()], 'style': res.line(None, cat_, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation', 'part': 'leader', '_tagged': None if exact_ else tagged})
             except Exception: pass
         if anchor is not None:
             for p_ in out: p_['anchor'] = anchor; p_['host'] = tagged       # anchor: world feet (a text prim's old boolean 'anchor' is replaced; both truthy)
@@ -717,7 +788,8 @@ def section_marker(drawer, eid, O, Mv, scale, res, vid, pts=None):
     look = look / (np.linalg.norm(look) or 1)
     vp = next((vp for s in doc['sheets'].values() for vp in s['viewports'] if vp['view'] == tv), None)
     sheet = next((s for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
-    vals = {'Detail Number': (vp or {}).get('detail_number') or '', 'Sheet Number': (sheet or {}).get('sheetNumber') or '', 'Reference Label': ''}
+    vals = {'Detail Number': (vp or {}).get('detail_number') or '', 'Sheet Number': (sheet or {}).get('sheetNumber') or '',
+            'Reference Label': ((vt or {'fields': {}})['fields'].get('m_refLabelStr') or '') if fl.get('m_bIsViewerReference') else ''}      # reference sections ('Reference Other View') show their view type's label ('typ.')
     # jogged sections (Residential A-2, Commercial 173630: Revit DXF) carry the full head at BOTH ends; straight ones head + tail box (A-3)
     tail_key = 'm_sectionHeadFamilyTagId' if len(pts) > 2 else 'm_sectionTailFamilyTagId'
     for end, sym_key in ((0, 'm_sectionHeadFamilyTagId'), (len(P) - 1, tail_key)):
@@ -892,7 +964,8 @@ def callout(drawer, eid, O, Mv, scale, res, vid):
     if L > 1e-6 and L > 0: out.append({'t': 'line', 'pts': [a.tolist(), (h - dv / L * hr).tolist()], 'style': st, 'elem': eid, 'layer': 'annotation'})
     vp = next((x for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
     sheet = next((s for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
-    vals = {'Detail Number': (vp or {}).get('detail_number') or '', 'Sheet Number': (sheet or {}).get('sheetNumber') or '', 'Reference Label': ''}
+    vals = {'Detail Number': (vp or {}).get('detail_number') or '', 'Sheet Number': (sheet or {}).get('sheetNumber') or '',
+            'Reference Label': (((f.rec(f.eid((f.rec(tv) or {'fields': {}})['fields'].get('m_dbViewTypeId'))) or {'fields': {}})['fields'].get('m_refLabelStr') or '') if fl.get('m_bIsViewerReference') else '')}      # reference callouts show their view type's label ('typ.')
     for lab in (drawer.dec.titleblock_symbol(sid) or {}).get('labels', []):
         txt = ' '.join(str(vals.get(prm.get('name'), '')) for prm in lab.get('params') or []).strip()
         if not txt: continue

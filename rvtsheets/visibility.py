@@ -88,7 +88,9 @@ class Visibility:
                 o = np.asarray(bs['m_orig'], float); B = np.asarray(bs['m_basis'], float); bo = bs['m_boundOffset']
                 zs = [float((o + B[0] * x + B[1] * y)[2]) for x in bo[0] for y in bo[1]]
                 rg = v['range']; top = rg.get('top'); bot = rg.get('bottom')
-                if top is not None and bot is not None and (top < min(zs) - 0.01 or bot > max(zs) + 0.01): return False
+                if os.environ.get('RVT_SECCUT', '1') == '1' and rg.get('cut') is not None and rg.get('plan_view_type') != 2:
+                    if not (min(zs) - 0.01 <= rg['cut'] <= max(zs) + 0.01): return False          # the plan's CUT plane must lie in the section's vertical extent (2026 rosetta: 'Level 2' cut 17.1 / 'Site' cut 32.8 against 18..30 hide the marker, 'VR plan' cut 24 shows it)
+                elif top is not None and bot is not None and (top < min(zs) - 0.01 or bot > max(zs) + 0.01): return False
             # an active plan crop must contain part of the section line
             cp = (v.get('crop') or {})
             pts = fl.get('m_frontCut') or []
@@ -268,13 +270,29 @@ class Visibility:
             return bool(np.all((~use_hi | (mn <= hi + 1e-6)) & (~use_lo | (mx >= lo - 1e-6))))
         return test
 
+    def _level_z(self, eid):
+        """a level's view-vertical coordinate (along the view's up axis from the view origin)"""
+        r = self.dec.f.rec(eid, 'Level')
+        if not r: return None
+        srf = ob(r['fields'].get('m_pSurface')) or {}
+        if not srf.get('m_origin'): return None
+        v = self._cur_view
+        return float((np.asarray(srf['m_origin'], float) - np.asarray(v['origin'], float)) @ np.asarray(v['up'], float))
+
     def elements(self, vid, explain=False):
         v0 = self.doc['views'].get(vid) or self.doc['views'].get(str(vid))
-        v = self.effective(v0)
+        v = self.effective(v0); self._cur_view = v0
         hid, xflags = self.hidden_categories(v)
         hidden_el = set(v0.get('hidden_elements') or [])
         pf = self.pfilters.get(v.get('phase_filter'))
         vol = self.volume(v)
+        crop_v = None
+        if v['kind'] == 'section' and (v.get('crop') or {}).get('crop_active'):
+            try:
+                from .compose import crop_rect_uv
+                cr_ = crop_rect_uv(v)
+                if cr_ is not None: crop_v = (float(cr_[1]), float(cr_[3]))
+            except Exception: crop_v = None
         out = {}; why = {}
         for eid, e in self.info.info.items():
             if not e['has_header'] and e['cls'] in ('Level', 'Grid') and not e['type']:
@@ -285,10 +303,19 @@ class Visibility:
             if v['kind'] in OWNED_ONLY_KINDS and e['owner'] != vid: continue
             if v['kind'] == '3d' and e['cls'] in MARKER_CLASSES: why[eid] = 'marker_in_3d'; continue
             if e['cls'] == 'ModelClipBox' and (v.get('section_box') or {}).get('id') != eid: why[eid] = 'other_views_section_box'; continue
+            if e['cls'] == 'Level' and v['kind'] == 'section' and crop_v is not None:
+                lz = self._level_z(eid)
+                if lz is not None and not (crop_v[0] - 1e-6 <= lz <= crop_v[1] + 1e-6): why[eid] = 'level_outside_crop'; continue     # a level appears in a section / elevation only when its elevation lies in the crop's vertical range (all views of 4 samples)
             if e['cls'] in NEVER_CLASSES: why[eid] = 'never_drawn_class'; continue
             if e['cls'] in ('Viewport', 'GCSViewport') and e['owner'] != vid: why[eid] = 'viewport_not_on_this_sheet'; continue
             if e['cat'] in SKETCH_CATS: why[eid] = 'sketch_line'; continue
-            if e['cat'] == AREA_BOUNDARY and v.get('class') != 'DBViewPlan' or (e['cat'] == AREA_BOUNDARY and (v.get('range') or {}).get('plan_view_type') != 4): why[eid] = 'area_boundary_outside_area_plan'; continue
+            if e['cat'] == AREA_BOUNDARY:
+                ok_ = v.get('class') == 'DBViewPlan' and (v.get('range') or {}).get('plan_view_type') == 4
+                vt_ = self.dec.f.rec(v.get('view_type')) if v.get('view_type') not in (None, INVALID, -1) else None
+                if vt_ is not None and vt_['class'] == 'DBViewTypeAreaPlan':       # area plan (Residential 'first floor' area plan): the boundaries of its own area scheme
+                    sch_ = self.dec.f.eid(vt_['fields'].get('m_areaMeasureElemId')); cr_ = self.dec.f.rec(eid)
+                    ok_ = ok_ or (cr_ is not None and self.dec.f.eid(cr_['fields'].get('m_areaSchemeId')) == sch_)
+                if not ok_: why[eid] = 'area_boundary_outside_area_plan'; continue
             if e['cls'] == 'Level' and v['kind'] in ('plan', '3d'): why[eid] = 'level_in_plan_or_3d'; continue
             if e['cls'] in ('Grid', 'RefPlane') and v['kind'] == '3d': why[eid] = 'datum_in_3d'; continue
             if eid in hidden_el: why[eid] = 'hidden_element'; continue
@@ -333,4 +360,11 @@ class Visibility:
                     if cz is not None and bb[0][2] >= cz - 1e-6: why[eid] = 'above_cut_lighting'; continue
                 if bb is None and e['cls'] not in DATUM_CLASSES and e['cls'] not in ('Viewer3d', 'ExtentElem', 'ModelClipBox'): why[eid] = 'no_graphics_no_bbox'; continue
             out[eid] = st
+        if os.environ.get('RVT_TAG_HOST', '1') == '1':
+            for eid in [k for k in out if self.info.info[k]['cls'] == 'IndependentTag']:           # a tag whose tagged element is not in the view is not listed either
+                try:
+                    h = self.dec.f.eid(ob((self.dec.f.rec(eid)['fields'].get('m_taggedElementId')) or {}).get('m_linkInstOrHostId'))
+                except Exception: continue
+                if h not in (None, INVALID) and h in self.info.info and self.info.info[h]['owner'] == INVALID and h not in out:
+                    del out[eid]; why[eid] = 'tagged_element_not_in_view'
         return (out, why) if explain else out

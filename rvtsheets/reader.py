@@ -116,6 +116,11 @@ class File:
         except Exception: return None
 
     def params(self):
+        m = self.__dict__.get('_params_memo')
+        if m is None: m = self._params_memo = self._params_load()           # the filters and the schedules both ask: one walk of the whole file (7 s on Structural)
+        return m
+
+    def _params_load(self):
         try:
             import rvt_fast
             return rvt_fast.params(self.fn)                 # identical output to the reference, Rust kernels

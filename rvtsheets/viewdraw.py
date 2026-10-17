@@ -272,7 +272,7 @@ class ViewDrawer:
                     prims += sp
                 except Exception: self.stats['spot_error'] += 1
                 continue
-            if info['cls'] == 'FamilyInstance' and v['kind'] == 'plan':
+            if info['cls'] == 'FamilyInstance' and v['kind'] == 'plan' and (ev.get('detail_level') or 2) >= 2:       # family text labels only at medium / fine detail (Residential area plan and attic at coarse detail show none: REF. / DW / W)
                 try: prims += self.family_label(eid, O, Mv, scale)
                 except Exception as ex_: self.stats['family_label_error'] += 1; self.__dict__.setdefault('_fle', repr(ex_))
             if info['cls'] == 'InteriorElev':
@@ -564,6 +564,7 @@ class ViewDrawer:
         # cut regions
         if cut_w is not None:
             for eid, cid, T2, uvw, fid, gs, ov in clipped:
+                if cid == -2003500 and v['kind'] in ('section', 'plan') and os.environ.get('RVT_STACKCUT', '0') == '0': continue      # stacked-wall parents duplicate their child walls: their cut outlines are not drawn (Commercial Typ. Parapet precision .688 -> .966, Typ. Wall at Grade .621 -> .804; plans: Level 1 .933 -> .988, plan 36 .757 -> .953, Mezzanine .943 -> .984)
                 segs = _plane_section(uvw, np.array([0, 0, 1.0]), cut_w)
                 if not segs: continue
                 st = res.line(gs, cid, 'cut', eid, ov=ov)
@@ -610,7 +611,7 @@ class ViewDrawer:
                     if reg is not None and pat:
                         if pat.get('solid'): prim['fill'] = fill['color']
                         else: prims.append({'t': 'segs', 'segs': patterns.hatch(reg, pat, scale), 'style': {'w': 0.1, 'rgb': fill['color'], 'dash': None}, 'elem': eid, 'layer': 'cut_fill'})
-                if cid in (-2000011, -2000032, -2000035) and closed2 and (ov.get('cut_fg_visible') is not False) and (ev.get('detail_level') or 2) != 1:
+                if cid in (-2000011, -2000032, -2000035) and closed2 and (ev.get('detail_level') or 2) != 1 and (ov.get('cut_fg_visible') is not False or os.environ.get('RVT_CUTSURF', '1') == '1'):
                     try: self.wall_layers(eid, closed2, Mv, scale, res, ov, prims, st, cid)
                     except Exception: self.stats['layer_error'] += 1
                 prims.append(prim)
@@ -873,6 +874,8 @@ class ViewDrawer:
         paper (sizes are paper sizes: grow with the view scale), part (sub-part of the element: text | line | leader | arrow | witness | head | frame ...),
         anchor (world feet point the annotation sits at: its first point)"""
         info = self.vis.info.info; first = {}
+        for p in prims:
+            if '_tagged' in p and p['_tagged'] is None: del p['_tagged']
         lead = [p for p in prims if p.get('_tagged') is not None]
         if lead:                                                  # tag leaders end on the tagged element's drawn geometry, nearest to the tag head
             byel = {}
@@ -882,7 +885,7 @@ class ViewDrawer:
             for p in lead:
                 tg = p.pop('_tagged'); pl = byel.get(tg)
                 if not pl: continue
-                h = np.asarray(p['pts'][0], float); best = None
+                h = np.asarray(p['pts'][-2], float); best = None
                 for q in pl:
                     for sg in ([q['pts']] if q['t'] == 'line' else q['segs']):
                         A = np.asarray(sg, float)[:, :2]
@@ -891,7 +894,7 @@ class ViewDrawer:
                             t_ = 0.0 if L2 < 1e-12 else min(max(float((h - a_) @ ab) / L2, 0.0), 1.0)
                             c_ = a_ + ab * t_; dd = float(np.linalg.norm(c_ - h))
                             if best is None or dd < best[0]: best = (dd, c_)
-                if best is not None: p['pts'][1] = best[1].tolist()
+                if best is not None: p['pts'][-1] = best[1].tolist()
         for p in prims:
             e = p.get('elem')
             if e is None: continue
@@ -1454,6 +1457,30 @@ class ViewDrawer:
         return self._tg
 
     def wall_layers(self, eid, loops, Mv, scale, res, ov, prims, st, cid=-2000011):
+        if self._wall_layers(eid, loops, Mv, scale, res, ov, prims, st, cid) is not False or cid == -2000011: return
+        # roofs / floors whose cut is a chevron or a stepped slab (Commercial typ. canopy: slope, flat top, slope): split at the vertices where the top boundary
+        # turns and layer every piece on its own (Revit draws the layer lines in all of them)
+        try:
+            from shapely.geometry import Polygon, box
+            pg = Polygon([q[:2] for q in loops[0]])
+            if not pg.is_valid or len(loops) != 1: return
+            C = np.asarray(pg.exterior.coords)[:-1]; n = len(C); xs = set()
+            for i in range(n):
+                a, b, c = C[i - 1], C[i], C[(i + 1) % n]
+                u, w = b - a, c - b
+                if abs(u[0]) < 1e-6 or abs(w[0]) < 1e-6: continue
+                if abs(math.atan2(u[1], u[0]) - math.atan2(w[1], w[0])) > math.radians(5): xs.add(round(float(b[0]), 4))
+            xs = sorted(xs)
+            if len(xs) < 2: return
+            xs = [C[:, 0].min() - 1] + xs + [C[:, 0].max() + 1]
+            for x0, x1 in zip(xs[:-1], xs[1:]):
+                pc = pg.intersection(box(x0, C[:, 1].min() - 1, x1, C[:, 1].max() + 1))
+                for g in getattr(pc, 'geoms', [pc]):
+                    if g.geom_type == 'Polygon' and g.area > 1e-6:
+                        self._wall_layers(eid, [[list(q) for q in g.exterior.coords]], Mv, scale, res, ov, prims, st, cid)
+        except Exception: self.stats['layer_split_error'] += 1
+
+    def _wall_layers(self, eid, loops, Mv, scale, res, ov, prims, st, cid=-2000011):
         """compound wall cut: strips of the cut region along the wall normal, one per layer of the wall type
         (CompoundStructure m_layers: width, material; exterior first = the side the wall's orientation points to, m_isFlipped swaps it),
         hatched with the layer material's cut pattern and separated by thin lines. Only straight cut regions (rectangular loops)."""
@@ -1475,11 +1502,26 @@ class ViewDrawer:
         ax = np.array([math.cos(math.radians(best)), math.sin(math.radians(best))]); nr = np.array([-ax[1], ax[0]])   # long axis, wall normal
         tot = sum(l['m_layerWidth'] for l in layers)
         d = (P - c) @ nr; lo, hi = d.min(), d.max()
-        if abs((hi - lo) - tot) > 0.15 * tot + 0.02: return             # not a plain straight cut of this wall type
+        if abs((hi - lo) - tot) > 0.15 * tot + 0.02: return False       # not a plain straight cut of this wall type
         # which side is the exterior: wall orientation vs view: use the wall's world normal from its curve driver is not decoded yet;
         # layer 0 (exterior) on the side away from the building = the side with lower |view-depth| of the wall centre... fall back: +nr
         flip = bool(r['fields'].get('m_isFlipped'))
-        order = layers if not flip else layers[::-1]
+        if not slab:
+            # exterior (layer 0) = left of the location line direction (Revit draws walls left to right: exterior on top), m_isFlipped = right;
+            # layers run from lo to hi along nr, so layer 0 sits at lo when the exterior side points to -nr
+            try:
+                cd = ob_(r['fields'].get('m_pCurveDriver')) or {}
+                dv = ob_(cd.get('m_pCrv'))['m_dirVec']
+                dw = np.asarray(dv, float)
+                if cd.get('m_flip'): dw = -dw
+                ext = np.array([-dw[1], dw[0], 0.0]) * (-1.0 if flip else 1.0)
+                ev_ = (Mv @ ext)[:2]
+                if np.linalg.norm(ev_) > 1e-3:
+                    order = layers if float(ev_ @ nr) < 0 else layers[::-1]
+                    flip = None
+            except Exception:
+                pass
+        if flip is not None: order = layers if not flip else layers[::-1]
         if slab:
             if nr[1] < 0: nr = -nr; d = (P - c) @ nr; lo, hi = d.min(), d.max()
             order = layers[::-1]                  # edges run from the bottom (lo) up, so the bottom layer first
@@ -1492,6 +1534,8 @@ class ViewDrawer:
         for i, l in enumerate(order):
             m = mats.get(self.f.eid(l.get('m_materialId'))) or {}
             cp = (m.get('cut_pattern') or {}); pat = self.doc['fill_patterns'].get(cp.get('id')) if cp.get('id') is not None else None
+            if ov.get('cut_fg_visible') is False:        # cut pattern switched off by the view: Revit still prints the material's surface (model) pattern in the layer (Commercial typ. parapet 196813: 'Brick' courses)
+                cp = (m.get('surface_pattern') or {}); pat = self.doc['fill_patterns'].get(cp.get('id')) if cp.get('id') is not None else None
             # strip polygon in (ax, nr) coordinates then back to view coordinates
             L = (P - c) @ ax; a0, a1 = L.min() - 1, L.max() + 1
             strip = Polygon([c + ax * a0 + nr * edges[i], c + ax * a1 + nr * edges[i], c + ax * a1 + nr * edges[i + 1], c + ax * a0 + nr * edges[i + 1]])

@@ -15,3 +15,8 @@ element properties table, /view/{id}.json in the sheets server (c5-sheets owns s
 
 ## Served by the sheets server (c5-sheets, dev)
 GET /sheets/api/{mid}/view/{id}.json?scale=&detail=&template=0&filters=0&cut=&phase=&phaseFilter= -> {view, prims, elements, options, stats, seconds, key} (same shape as vscene_worker; cached next to the SVGs as scene_<vid>_<opts-hash>.json; 200 ready, 202 model still loading).
+
+## Update 2026-10-16 (c5-annot) answers to ANNOT-FINDINGS item 2 / 3
+- Joist system notes ('18LH04 @ Max 4'-0"') ARE stored: class `BeamSystemTag` (cat -2005130, 7 in L2); span direction symbols ('2VLI-6" / TOS(5'-6")' + arrows) are class `SpanDirectionSymbol` (cat -2005110, 3 in L2). Both are drawn now (annot commits 'beam system tags' / 'span direction symbols'); their prims carry elem ids, cls in the elements table (PROP_CLASSES includes both), part head/text.
+- Spot elevations in plans read the picked element's face under the point (Revit 7'-4 1/2" vs stored 7'-7"): 'SpotElevation' elements in L2 / L1 are those '4'-7"' / '7'-4 1/2"' strings; the 80'-1" dimension rule is still unknown.
+- New element classes drawn with ids: property line segment tags (IndependentTag, rotated along the segment), ContourLabelingElem (one prim per label, `elem` = the labelling element), equality dimensions ('EQ' text, part text).
