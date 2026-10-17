@@ -31,6 +31,10 @@ def region(loops):
 CLIP = None         # shapely geometry set by ViewDrawer.draw while drawing a cropped view: hatching stops at the crop (+5%)
 
 
+MAX_DASHES = 600000
+SKIPPED = __import__('collections').Counter()
+
+
 def hatch(geom, pattern, scale, view_rot=0.0):
     """pattern dict (decode.fill_patterns) -> list of segments [[u0,v0],[u1,v1]] in view coordinates"""
     if geom is None or geom.is_empty or not pattern or pattern.get('solid'): return []
@@ -73,6 +77,8 @@ def hatch(geom, pattern, scale, view_rot=0.0):
         else:
             per = sum(abs(s_) for s_ in segs)
             if per <= 1e-12: continue
+            if len(js) * (2 * R / per + 2) * ((len(segs) + 1) // 2) > MAX_DASHES:        # a fine stipple over a big region (1:16 plan floor: 'Sand' millions of dots, 6 GB): not generated
+                SKIPPED['dashes'] += 1; return []
             for j in js:
                 base = o + j * (off * nrm + shift * d)
                 tc = float((np.array([cx, cy]) - base) @ d)

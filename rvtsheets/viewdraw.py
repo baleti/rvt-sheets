@@ -225,6 +225,7 @@ class ViewDrawer:
 
     def _draw(self, vid, px_mm=0.25, max_elems=None, skip_classes=(), skip_cats=()):
         t0 = time.time()
+        self._cur_vid = vid
         v = self.doc['views'].get(vid) or self.doc['views'].get(str(vid))
         ev = self.vis.effective(v)
         scale = v.get('scale') or 100
@@ -271,6 +272,7 @@ class ViewDrawer:
             if eid in stair_skip: continue
             info = self.vis.info.info[eid]
             if info['cls'] in skip_classes or info['cat'] in skip_cats: continue
+            if info['cls'] == 'VolumeOfInterest' and os.environ.get('RVT_SCOPEBOX', '1') == '1': self.stats['scope_box_skipped'] += 1; continue      # scope boxes: not in Revit's element lists (Snowdon East / Parking: FP) nor in its DXF
             if info['cls'] == 'JoistSystem': self.stats['joist_system_skipped'] += 1; continue          # the system's boundary / layout sketch (cyan dashes) is not drawn by Revit (rst basic Level 1, Snowdon L2)
             if ev.get('filters') and info['cls'] in ANNO_FILTER_CLASSES and info['cat'] != INVALID:
                 # view filters hide annotation elements too (Snowdon L2: 'Views - Sheets' = NOT Family and Type contains '_Working' hides every section marker)
@@ -280,7 +282,7 @@ class ViewDrawer:
                 elif info['cls'] == 'InteriorElev': fcat = -2000535
                 if not self.fe.view_filters(ev, eid, fcat, (self.doc['categories'].get(fcat) or {}).get('parent', INVALID))[0]:
                     self.stats['hidden_by_filter'] += 1; continue
-            if v['kind'] == 'plan' and v.get('discipline') == 2 and info['cat'] == -2001320 and (v.get('range') or {}).get('cut') is not None:
+            if v['kind'] == 'plan' and (v.get('discipline') == 2 or os.environ.get('RVT_ABOVECUT_ALL', '1') == '1') and info['cat'] == -2001320 and (v.get('range') or {}).get('cut') is not None:
                 # structural plans: framing wholly above the cut plane is not drawn (Snowdon L2: beam 640539 z 13.7..18.3 vs cut 10.1, absent in Revit's sheet)
                 bb_ = self.vis.info.bbox(eid)
                 if bb_ is not None and bb_[0][2] > v['range']['cut'] + 0.01: self.stats['above_cut_hidden'] += 1; continue
@@ -479,8 +481,9 @@ class ViewDrawer:
                         if part.geom_type == 'LineString' and len(part.coords) > 1:
                             prims.append({'t': 'line', 'pts': [list(q) for q in part.coords], 'style': st, 'elem': eid, 'layer': lay})
                     continue
-                if os.environ.get('RVT_FRAMEGATE', '1') == '1' and self._rvt22() and v['kind'] == 'section' and cid == -2001320 and (c.get('flags') or 0) in (0x1088004, 0x1088204, 0x10880e0) and ((v.get('display') or {}).get('m_model') or {}).get('m_showHiddenLinesVal') != 2:
+                if os.environ.get('RVT_FRAMEGATE', '1') == '1' and self._rvt22() and (v['kind'] == 'section' or (v['kind'] == 'plan' and v.get('discipline') != 2)) and cid == -2001320 and (c.get('flags') or 0) in (0x1088004, 0x1088204, 0x10880e0) and ((v.get('display') or {}).get('m_model') or {}).get('m_showHiddenLinesVal') != 2:
                     self.stats['framing_hidden_style_skipped'] += 1; continue      # the family's hidden-line geometry (S-BEAM-HDLN in Revit's DXF) is only drawn when the view shows hidden lines (m_showHiddenLinesVal 2: Snowdon Longitudinal); Cross Section P .837 -> .958
+                if v['kind'] == 'plan' and cid == -2000151 and info['cls'] == 'FamilyInstance' and ((c.get('flags') or 0) & 0x1088000) == 0x1088000 and not (c.get('flags') or 0) & 0x8000000 and ((v.get('display') or {}).get('m_model') or {}).get('m_showHiddenLinesVal') != 2: continue      # generic-model families' hidden-line geometry in plans (Snowdon L4 precision .974 -> .998, L2 .959 -> .971, recall -0.2..-0.7)
                 pr = {'t': 'line', 'pts': pts[:, :2].tolist(), 'style': st, 'elem': eid, 'layer': lay}
                 if is_section and not anno and len(pts) > 1 and cid not in UNOBSCURED_CATS:
                     pr['_w'] = pts             # depth-tested below (elevations/sections)
@@ -525,6 +528,9 @@ class ViewDrawer:
                 if T is None or not len(T[0]): continue
                 tris, fid = T[0], T[1]
                 uvw = (tris - O) @ Mv.T
+                if s.get('cutnode') and cut_w is not None and v['kind'] == 'plan' and os.environ.get('RVT_CUTNODE', '1') == '1':
+                    z0_, z1_ = float(uvw[:, :, 2].min()), float(uvw[:, :, 2].max())
+                    if not (z0_ <= cut_w <= z1_): uvw[:, :, 2] += cut_w - (z0_ + z1_) / 2      # the family's cut-profile extrusion follows the cut plane (Snowdon steel columns in L4: base-level slab moved to the cut)
                 m = self.solid_material(T[2] if len(T) > 2 else None)
                 ov2 = dict(ov, _mat=m) if m is not None else ov
                 if (v['kind'] in ('section', '3d') or (v['kind'] == 'plan' and cid == -2000032 and not is_rcp)) and len(T) > 2 and T[2] is not None: ov2 = dict(ov2, _frs=T[2])   # plans: floor top surface pattern (Commercial 'Sand' dots under the room colours)
@@ -650,7 +656,7 @@ class ViewDrawer:
                     except Exception: self.stats['layer_error'] += 1
                 prims.append(prim)
                 self.stats['cut_elements'] += 1
-        if topo and v['kind'] == 'plan' and not is_rcp:
+        if topo and v['kind'] == 'plan' and not is_rcp and os.environ.get('RVT_TOPO_OUTLINE', '1') == '1':
             for eid, cid, ov in topo:
                 try: self.topo_boundary(eid, cid, ov, O, Mv, res, prims)
                 except Exception: self.stats['topo_boundary_error'] += 1

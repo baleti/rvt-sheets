@@ -121,6 +121,14 @@ class Walker:
                 k = (c.get('ptr'), (c.get('obj') or {}).get('m_comp'), (c.get('obj') or {}).get('m_param'))
                 groups.setdefault(k, []).append(c)
             if not all(any(self.cond_ok(c, R, o) for c in g) for g in groups.values()): return
+            if any(self.f.tagname(c.get('ptr')) == 'GConditionCut' and (c.get('obj') or {}).get('m_comp') == 6 and not (c.get('obj') or {}).get('m_negateDirCondition') for c in conds):
+                self._cutdepth = getattr(self, '_cutdepth', 0) + 1
+                try: self._node_body(n, x, cls, gi, g, R, o, depth, out, eid)
+                finally: self._cutdepth -= 1
+                return
+        self._node_body(n, x, cls, gi, g, R, o, depth, out, eid)
+
+    def _node_body(self, n, x, cls, gi, g, R, o, depth, out, eid):
         if cls in ('GElement', 'GFilter', 'GGroup', 'GNode') or (x.get('m_subNodes') is not None and cls not in ('Geometry',)):
             for s in x.get('m_subNodes') or []: self.node(s, R, o, depth, out, g, eid)
             return
@@ -131,7 +139,7 @@ class Walker:
                 # filled region inside a family / detail component: planar faces carrying a fill (pattern, colour, placer)
                 self._fills_from_faces(x, faces, R, o, g, eid, out)
                 return
-            if x.get('m_pFaces'): out['solids'].append({'geo': x, 'R': R, 'o': o, 'gs': g, 'elem': eid, 'flags': gi.get('m_flags')})
+            if x.get('m_pFaces'): out['solids'].append({'geo': x, 'R': R, 'o': o, 'gs': g, 'elem': eid, 'flags': gi.get('m_flags'), 'cutnode': getattr(self, '_cutdepth', 0) > 0})
             return
         if cls == 'GInstance':
             ii = ob(x.get('m_instanceInfo')) or {}

@@ -333,6 +333,10 @@ class Annotations:
                     self.d.stats['dim_hidden_ref'] += 1; return []
         dl = ob(fl.get('m_pDimLine')) or {}
         if not dl.get('m_origin'): return []
+        vv_ = self.d.doc['views'].get(getattr(self.d, '_cur_vid', None)) or {}
+        rg_ = vv_.get('range') or {}
+        if vv_.get('kind') == 'plan' and rg_.get('bottom') is not None and rg_.get('top') is not None and dl['m_origin'][2] < rg_['bottom'] - 0.5 and os.environ.get('RVT_DIMZ', '1') == '1':
+            self.d.stats['dim_below_range'] += 1; return []      # a dimension whose plane lies below the plan's view range (Residential first floor dim 382006 at z -8: not in Revit's collector)
         P = lambda p: ((np.asarray(p, float) - O) @ Mv.T)[:2]
         o = P(dl['m_origin']); d = (Mv @ np.asarray(dl['m_dirVec'], float))[:2]
         if np.linalg.norm(d) < 1e-9: return []
@@ -377,9 +381,13 @@ class Annotations:
         for i_, (p, t) in enumerate(zip(refs, ts)):
             q = o + d * t                       # foot on the dimension line
             v = q - p; L = np.linalg.norm(v)
-            if L > gap:
+            gap_i = gap
+            if len(wr) == len(refs) and os.environ.get('RVT_WGAP', '1') == '1':
+                g_ = wr[i_].get('m_gapToElt') if isinstance(wr[i_], dict) else None      # each witness reference stores its own gap (paper feet): windows / doors 0.027-0.030 vs 0.0052 for walls (Residential plan 32: Revit's witness lines start ~1 ft farther at 1:48)
+                if isinstance(g_, (int, float)) and 0 < g_ < 0.2: gap_i = g_ * scale
+            if L > gap_i:
                 u = v / L
-                out.append({'t': 'line', 'pts': [(p + u * gap).tolist(), (q + u * ext).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'witness'})
+                out.append({'t': 'line', 'pts': [(p + u * gap_i).tolist(), (q + u * ext).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'witness'})
             if i_ in cen:
                 th = np.linspace(0, 2 * math.pi, 25)
                 out.append({'t': 'line', 'pts': [(q + (d * math.cos(x) + n * math.sin(x)) * cdia / 2).tolist() for x in th], 'style': dict(tickst, w=line['w']), 'elem': eid, 'layer': 'annotation', 'part': 'arrow'})

@@ -41,6 +41,9 @@ class ElementInfo:
         return bb
 
 
+ABOVE_CUT_CATS = {-2001320, -2001330, -2009000, -2001300, -2009030, -2000032}
+
+
 class Visibility:
     def __init__(self, dec, doc, info=None):
         self.dec = dec; self.doc = doc; self.info = info or ElementInfo(dec)
@@ -354,6 +357,9 @@ class Visibility:
             if e['owner'] == INVALID:
                 bb = self.info.bbox(eid)
                 if bb is not None and not vol(bb): why[eid] = 'outside_view_volume'; continue
+                if bb is not None and e['cat'] in ABOVE_CUT_CATS and v['kind'] == 'plan' and v.get('range') and v['range'].get('plan_view_type') != 2 and os.environ.get('RVT_FRAME_ABOVE', '1') == '1':
+                    cz_ = v['range'].get('cut')
+                    if cz_ is not None and bb[0][2] > cz_ + 0.01: why[eid] = 'above_cut'; continue          # wholly above the plan's cut plane: never in Revit's list (framing 468 / columns 48 / rebar 30 / foundations 6 / connections 16 / floors 12 predicted, 0 listed, over every oracle plan of 4 files; walls are mixed and stay)
                 if bb is not None and e['cat'] == -2001120 and v['kind'] == 'plan' and v.get('range') and (v['range'].get('plan_view_type') != 2):
                     # ceiling-hosted lighting fixtures wholly above the cut plane are not in a floor plan (Residential plans 32 / 180203 / basement: collector lists none; the ceiling plan, whose cut plane is at the ceiling, lists them)
                     cz = v['range'].get('cut')

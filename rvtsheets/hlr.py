@@ -96,11 +96,14 @@ class DepthBuffer:
         allv = vis.all(1); anyv = vis.any(1)
         part = np.nonzero(anyv & ~allv)[0]
         runs = {}
-        if len(part):                                   # run starts / ends of the partially visible segments in one pass
-            pad = np.zeros((len(part), n + 2), dtype=np.int8); pad[:, 1:-1] = vis[part]
-            dd = np.diff(pad, axis=1)
-            rs, cs = np.nonzero(dd == 1); re_, ce = np.nonzero(dd == -1)
-            for r_, c0, c1 in zip(rs.tolist(), cs.tolist(), ce.tolist()): runs.setdefault(r_, []).append((c0, c1))
+        if len(part):                                   # run starts / ends of the partially visible segments, in row chunks (a 1:16 plan has millions of edges x 400 samples)
+            CH = 4096
+            for c0 in range(0, len(part), CH):
+                rows_ = part[c0:c0 + CH]
+                pad = np.zeros((len(rows_), n + 2), dtype=np.int8); pad[:, 1:-1] = vis[rows_]
+                dd = np.diff(pad, axis=1)
+                rs, cs = np.nonzero(dd == 1); re_, ce = np.nonzero(dd == -1)
+                for r_, c_a, c_b in zip((rs + c0).tolist(), cs.tolist(), ce.tolist()): runs.setdefault(r_, []).append((c_a, c_b))
         pidx = {int(sg): k for k, sg in enumerate(part)}
         for s in range(len(segs)):
             if allv[s]: out.append((segs[s, 0], segs[s, 1])); continue
