@@ -3,6 +3,7 @@ Definition (DBViewSchedule): m_pSchema {m_pFields [heading, column width, param 
 m_bInstanceSchedule, m_showTitle, m_showHeaders, m_bFixedHeight, m_altScheduleTitle}, m_pData (section row heights), m_segmentRecords
 (fixed height), title/header/body text types. Rows are computed from the elements of the category (instances or types), values from the
 reader's parameter values by parameter name. Layout: ScheduleInstance origin = top-left corner (checked against the oracle bbox)."""
+import os
 import numpy as np
 from .reader import ob, path, INVALID
 
@@ -17,6 +18,16 @@ class Schedules:
             try: self._params = self.f.params()
             except Exception: self._params = {}
         return self._params
+
+    def em_k(self, d):
+        """text em / type size in a schedule: Revit 2022+ files draw schedule text at size / 0.72 like notes (Snowdon PDF: header 15.6 pt vs 3/32in note 11.85 pt = 1.32 ~ 1.33), 2020 files at 1.2 x (Window Schedule PNG: 'x\' - x\"' ink width)"""
+        if os.environ.get('RVT_SCHED_FIT', '1') != '1': return 0.8 if d.get('grid_lines', 1) else 1.2
+        if d.get('grid_lines') == 0: return 1.2
+        try:
+            from .units import is_2022_plus
+            if is_2022_plus(self.f): return 1 / 0.72
+        except Exception: pass
+        return 1.2
 
     def font(self, tid):
         tt = self.doc['text_types'].get(self.f.eid(tid)) or {}
@@ -43,7 +54,7 @@ class Schedules:
             except Exception: return d
         segs = [ob(s) for s in fl.get('m_segmentRecords') or []]
         return {'name': fl.get('m_viewName'), 'title': sch.get('m_altScheduleTitle') or fl.get('m_viewName'), 'fields': fields,
-                'show_title': sch.get('m_showTitle', 1), 'show_headers': sch.get('m_showHeaders', 1),
+                'show_title': sch.get('m_showTitle', 1), 'show_headers': sch.get('m_showHeaders', 1), 'initial_spacer': sch.get('m_showInitialSpacer'),
                 'grid_lines': sch.get('m_showGridLines', 1), 'outline': sch.get('m_showOutline', 1), 'fixed': sch.get('m_bFixedHeight'),
                 'height': (segs[0].get('m_height') if segs else None), 'title_h': rowh(0, 1 / 24), 'body_h': rowh(1, 1 / 72),
                 'category': self.f.eid(sch.get('m_categoryId')), 'instance': sch.get('m_bInstanceSchedule', 1),
@@ -186,13 +197,17 @@ class Schedules:
             out.append({'t': 'line', 'pts': [[a[0], a[1], 0], [b[0], b[1], 0]], 'gs': d['grid_gs'], 'cond': [], 'elem': sched_id})
         def text(s, x, yy, w, h, font, halign=1):
             size, name, bold = font
-            size *= 0.72 * (0.8 if d.get('grid_lines', 1) else 1.2)      # cell-fitted sizes with grid (Window Schedule export); gridless sheet lists use the type size
+            size *= 0.72 * self.em_k(d)
             out.append({'t': 'text', 'text': s, 'origin': [x + (w / 2 if halign == 1 else 0.004), yy - h / 2, 0], 'x': [1, 0, 0], 'size': size, 'font': name, 'bold': bold,
                         'halign': halign, 'valign': 1, 'anchor': True, 'cond': [], 'gs': None, 'elem': sched_id})
         if d['show_title']:
-            h = d['title_h']; text(d['title'], x0, y, W, h, d['fonts']['m_titleTextTypeId']); y -= h
+            h = d['title_h']; text(d['title'], x0, y, W, h, d['fonts']['m_titleTextTypeId'])
+            if d.get('grid_lines', 1) and os.environ.get('RVT_SCHED_FIT', '1') == '1':          # the title row is boxed by the grid (Revit Window Schedule export: lines at the title's top, left and right edges)
+                line((x0, y), (x0 + W, y)); line((x0, y), (x0, y - h)); line((x0 + W, y), (x0 + W, y - h))
+            y -= h
         hb = d['body_h'] or d['fonts']['m_bodyTextTypeId'][0] * 2.2
         if d.get('grid_lines') == 0: hb = max(hb, d['fonts']['m_bodyTextTypeId'][0] * 1.2 * 0.72 * 1.8)   # gridless lists: rows follow the larger text
+        elif os.environ.get('RVT_SCHED_FIT', '1') == '1': hb = max(hb, 1.59 * d['fonts']['m_bodyTextTypeId'][0] * self.em_k(d))   # Revit's rows follow the text (2020 Window Schedule export: pitch 0.0199 ft vs stored 0.0139)
         top_grid = y
         inner = set()                                    # x of column boundaries inside a header group (no line through the group row)
         if d['show_headers'] and any(f.get('groups') for f in d['fields']):
@@ -202,7 +217,13 @@ class Schedules:
             while i < len(fs):
                 g = fs[i]['groups'][0] if fs[i].get('groups') else None
                 if g is None:
-                    text(fs[i]['heading'], x, y - h / 2, fs[i]['width'], h, hf); x += fs[i]['width']; i += 1; continue
+                    hd = fs[i]['heading']; fit = os.environ.get('RVT_SCHED_FIT', '1') == '1'
+                    est = len(hd) * 0.5 * hf[0] * self.em_k(d)                        # Arial average advance ~0.5 em
+                    if fit and ' ' in hd and est > fs[i]['width'] - 0.004:            # a heading wider than its column wraps: two lines, one per heading row (Revit: 'Head' / 'Height')
+                        a_, b_ = hd.split(' ', 1) if hd.count(' ') == 1 else (hd[:hd.rfind(' ')], hd[hd.rfind(' ') + 1:])
+                        text(a_, x, y, fs[i]['width'], h, hf); text(b_, x, y - h, fs[i]['width'], h, hf)
+                    else: text(hd, x, (y - h) if fit else (y - h / 2), fs[i]['width'], h, hf)                       # a single line sits in the lower heading row (Revit 'Type Mark')
+                    x += fs[i]['width']; i += 1; continue
                 j = i; gw = 0.0
                 while j < len(fs) and (fs[j]['groups'][:1] == [g]): gw += fs[j]['width']; j += 1
                 text(d['header_set'].get(g, ''), x, y, gw, h, hf)
@@ -217,6 +238,9 @@ class Schedules:
             h = hb; x = x0
             for f in d['fields']: text(f['heading'], x, y, f['width'], h, d['fonts']['m_headerTextTypeId']); x += f['width']
             line((x0, y), (x0 + W, y)); y -= h; line((x0, y), (x0 + W, y))
+        gap = None
+        if d['show_headers'] and d.get('grid_lines', 1) and d.get('initial_spacer') and os.environ.get('RVT_SCHED_FIT', '1') == '1':
+            gap = y; y -= hb; line((x0, y), (x0 + W, y))                  # 'blank row before data': one body-height row without grid between the headings and the first row (Revit Window Schedule export)
         n = len(rows)
         if d['fixed'] and d['height']:
             n = max(n, int((d['height'] - (y0 - y)) / hb + 1e-6))
@@ -228,6 +252,7 @@ class Schedules:
         x = x0
         for f in d['fields'] + [None]:
             # inside a header group the column line starts below the group caption
-            line((x, top_grid - (hb if round(x, 9) in inner else 0)), (x, y))
+            if gap is None: line((x, top_grid - (hb if round(x, 9) in inner else 0)), (x, y))
+            else: line((x, top_grid - (hb if round(x, 9) in inner else 0)), (x, gap)); line((x, gap - hb), (x, y))
             if f: x += f['width']
         return out
