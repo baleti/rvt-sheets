@@ -66,6 +66,16 @@ def _property_line_value(tr, pid):
     return None
 
 
+def label_str(v):
+    """text of a label parameter value: an ElementId value (decoded EID) prints nothing (invalid -1) -- never its repr"""
+    if v is None: return ''
+    if isinstance(v, bool): return str(v)
+    r = type(v).__name__
+    if r == 'EID' or repr(v).startswith('EID('):
+        return ''
+    return str(v)
+
+
 class Annotations:
     def __init__(self, drawer):
         self.d = drawer; self.f = drawer.f; self.doc = drawer.doc
@@ -253,6 +263,61 @@ class Annotations:
                     'halign': 0 if dx > 0 else 2, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'})
         return out
 
+    def angular_dimension(self, eid, O, Mv, scale, res):
+        """angular dimension (AngularDim): the arc through m_origin about the centre of m_pDimArc between the directions of the two reference points, a filled 15 degree
+        arrowhead (3 mm of paper) plus a radial tick of the same length at each arc end (pointing out of the arc), the value in degrees (style m_oAngFormatOptions) centred
+        1.13 text heights outside the arc midpoint (Snowdon L1_43_High 7.5 degrees vs Revit's DXF dimension block)"""
+        r = self.f.rec(eid, 'AngularDim')
+        if not r: return []
+        fl = r['fields']
+        arc = ob(fl.get('m_pDimArc')) or {}
+        refs = fl.get('m_refPnts') or []
+        if not arc.get('m_center') or len(refs) < 2 or not fl.get('m_origin'): return []
+        wr = fl.get('m_witnessRefs') or []
+        vs = getattr(self.d, '_vis_elems', None)
+        if vs is not None:
+            for w in wr:
+                e_ = self.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId'))
+                if e_ not in (None, INVALID, -1) and e_ not in vs and self.f.rec(e_): return []
+        P = lambda p: ((np.asarray(p, float) - O) @ Mv.T)[:2]
+        c = P(arc['m_center']); rad = float(np.linalg.norm(P(fl['m_origin']) - c))
+        if rad < 1e-6: return []
+        a1, a2 = (math.atan2(*(P(q) - c)[::-1]) for q in refs[:2])
+        d = (a2 - a1 + math.pi) % (2 * math.pi) - math.pi          # the short way round
+        typ = self.f.rec(self.f.eid(fl.get('m_styleSymbolId')))
+        tf = typ['fields'] if typ else {}
+        la = ob(tf.get('m_pLineAndTextAttr')) or {}
+        font = self.doc['fonts'].get(self.f.eid(la.get('m_fontId'))) or {}
+        size = (font.get('size') or 3 / 32 * IN) * scale
+        line = res.line(None, -2000260, 'proj', eid, annotation=True)
+        pt = lambda a: c + rad * np.array([math.cos(a), math.sin(a)])
+        angs = a1 + d * np.linspace(0, 1, max(8, int(abs(d) * 60)))
+        out = [{'t': 'line', 'pts': [pt(a).tolist() for a in angs], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'line'}]
+        L = 0.003 * 3.28084 * scale * (1.0 if not units.is_imperial(self.f) else 1.0)         # 3 mm of paper
+        half = L * math.tan(math.radians(7.5))
+        for a, sgn in ((a1, 1.0), (a1 + d, -1.0)):
+            tip = pt(a); tang = np.array([-math.sin(a), math.cos(a)]) * (1 if d > 0 else -1) * sgn      # towards the other end
+            rd = np.array([math.cos(a), math.sin(a)]); base = tip + tang * L
+            tri = [tip.tolist(), (base + rd * half).tolist(), (base - rd * half).tolist(), tip.tolist()]
+            out.append({'t': 'fill', 'loops': [tri], 'color': [0, 0, 0], 'elem': eid, 'layer': 'annotation_fill', 'part': 'arrow'})
+            out.append({'t': 'line', 'pts': tri, 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'arrow'})
+            out.append({'t': 'line', 'pts': [(tip - rd * L / 2).tolist(), (tip + rd * L / 2).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'arrow'})
+        seg = (fl.get('m_ArrSegInfo') or [{}])[0]; vals = seg.get('m_values') or [{}]
+        val = vals[0].get('m_value')
+        if val is None or val < 0: val = abs(d)
+        deg = val * 180 / math.pi
+        ao = ob(tf.get('m_oAngFormatOptions')) or {}
+        acc = ao.get('m_accuracy') or 1.0
+        if acc < 1e-6: txt = ('%.4f' % deg).rstrip('0').rstrip('.')
+        else: txt = ('%.*f' % (max(0, -int(math.floor(math.log10(acc)))), round(deg / acc) * acc)).rstrip('0').rstrip('.') if acc < 1 else '%d' % round(deg / acc * acc)
+        txt += '\u00b0'
+        am = a1 + d / 2; rdm = np.array([math.cos(am), math.sin(am)])
+        tg = np.array([-rdm[1], rdm[0]])
+        if tg[0] < -1e-9 or (abs(tg[0]) < 1e-9 and tg[1] < 0): tg = -tg
+        out.append({'t': 'text', 'text': txt, 'origin': (pt(am) + rdm * size * 1.13).tolist(), 'x': tg.tolist(), 'size': size, 'font': font.get('name') or 'Arial',
+                    'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'})
+        return out
+
     def dimension(self, eid, O, Mv, scale, res):
         r = self.f.rec(eid, 'LinearDimString')
         if not r: return []
@@ -432,7 +497,7 @@ class Tags:
                 v = vals.get(prm.get('param'))
                 if v is None: v = ''
                 if isinstance(v, float): v = '%g' % v
-                parts.append((prm.get('prefix') or '') + str(v) + (prm.get('suffix') or ''))
+                parts.append((prm.get('prefix') or '') + label_str(v) + (prm.get('suffix') or ''))
             txt = ' '.join(parts).strip()
             if not txt: continue
             tt = self.doc['text_types'].get(lab['type']) or {}
@@ -506,6 +571,9 @@ class Tags:
         if not r: return []
         fl = r['fields']
         sid = self.f.eid(fl.get('m_symbolId'))
+        if r['class'] in ('SpanDirectionSymbol', 'BeamSystemTag') and os.environ.get('RVT_ACTUAL_SYM', '1') == '1':
+            sa_ = self.f.eid(fl.get('m_actualSymbolId'))          # the instance's own symbol copy: its geometry has the Left / Right / Top / Bottom parameters applied (Snowdon Parking 582085: arrows 90 ft long)
+            if sa_ not in (None, INVALID, -1) and self.f.rec(sa_): sid = sa_
         if r['class'] in ('IndependentTag', 'BeamSystemTag', 'SpanDirectionSymbol'):
             pos = fl.get('m_absHeadPos'); tagged = self.f.eid(path(fl, 'm_taggedElementId', 'm_linkInstOrHostId'))
             if pos is None:
@@ -630,7 +698,7 @@ class Tags:
                     if any(w in nm for w in ('Length', 'Width', 'Height', 'Elevation', 'Offset', 'Thickness', 'Depth', 'Perimeter')): v = units.fmt_length(v, {'m_bUseDefault': 1}, units.length_format(self.f))
                     elif 'Area' in nm: v = ('{:,} SF'.format(int(round(v)))) if units.is_imperial(self.f) else ('%.2f m²' % (v * 0.09290304))
                     else: v = '%g' % v
-                parts.append((prm.get('prefix') or '') + str(v) + (prm.get('suffix') or ''))
+                parts.append((prm.get('prefix') or '') + label_str(v) + (prm.get('suffix') or ''))
                 seps.append('\n' if prm.get('linebreak') else ' ' * int(prm.get('spaces') if prm.get('spaces') is not None else 1))
             tt = self.doc['text_types'].get(lab['type']) or {}
             font = self.doc['fonts'].get(tt.get('font')) or {}
@@ -803,7 +871,7 @@ def section_marker(drawer, eid, O, Mv, scale, res, vid, pts=None):
         sp = symbol_prims(drawer, sid, R, o, eid, res, -2000200)
         out += sp
         labs = [lab for lab in (drawer.dec.titleblock_symbol(sid) or {}).get('labels', [])
-                if ' '.join(str(vals.get(prm.get('name'), '')) for prm in lab.get('params') or []).strip()]
+                if ' '.join(label_str(vals.get(prm.get('name'), '')) for prm in lab.get('params') or []).strip()]
         # Revit keeps the head's labels upright and stacked: the anchor (centre of the labels) turns with the line, the offsets do not
         L = np.asarray([lab['origin'][:2] for lab in labs], float) if labs else np.zeros((0, 2))
         c = L.mean(0) if len(L) else np.zeros(2)
@@ -815,7 +883,7 @@ def section_marker(drawer, eid, O, Mv, scale, res, vid, pts=None):
                 ymid = cw[1] + (np.median(ys) - c[1]) * scale
                 out.append({'t': 'line', 'pts': [[cw[0] - rad, ymid], [cw[0] + rad, ymid]], 'style': res.line(None, -2000200, 'proj', eid, annotation=True), 'elem': eid, 'layer': 'annotation'})
         for lab in labs:
-            txt = ' '.join(str(vals.get(prm.get('name'), '')) for prm in lab.get('params') or []).strip()
+            txt = ' '.join(label_str(vals.get(prm.get('name'), '')) for prm in lab.get('params') or []).strip()
             if not txt: continue
             tt = doc['text_types'].get(lab['type']) or {}
             font = doc['fonts'].get(tt.get('font')) or {}
@@ -967,7 +1035,7 @@ def callout(drawer, eid, O, Mv, scale, res, vid):
     vals = {'Detail Number': (vp or {}).get('detail_number') or '', 'Sheet Number': (sheet or {}).get('sheetNumber') or '',
             'Reference Label': (((f.rec(f.eid((f.rec(tv) or {'fields': {}})['fields'].get('m_dbViewTypeId'))) or {'fields': {}})['fields'].get('m_refLabelStr') or '') if fl.get('m_bIsViewerReference') else '')}      # reference callouts show their view type's label ('typ.')
     for lab in (drawer.dec.titleblock_symbol(sid) or {}).get('labels', []):
-        txt = ' '.join(str(vals.get(prm.get('name'), '')) for prm in lab.get('params') or []).strip()
+        txt = ' '.join(label_str(vals.get(prm.get('name'), '')) for prm in lab.get('params') or []).strip()
         if not txt: continue
         tt = doc['text_types'].get(lab['type']) or {}
         font = doc['fonts'].get(tt.get('font')) or {}

@@ -150,7 +150,7 @@ class Visibility:
         if f.eid(fl.get('m_dbViewId')) == v.get('id'): return False
         if fl.get('m_sectionCreationMethod') == 202 or fl.get('m_showInOneViewOnly'):
             return f.eid(fl.get('m_parentDBViewId')) == v.get('id')
-        if not (fl.get('m_viewerFlags') or 0) & 2: return False
+        if ((fl.get('m_viewerFlags') or 0) & 7) == 7: return False      # flags 7 (Snowdon: 0 of 27 listings in other section views); 1 and 5 do appear, 3 appears in the 2020 samples
         cs = fl.get('m_coarserScale')
         if cs and (v.get('scale') or 0) > round(1.0 / cs) + 1e-6: return False
         r = self.section_plane_line(eid, v)

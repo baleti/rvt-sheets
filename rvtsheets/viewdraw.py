@@ -84,6 +84,24 @@ def _feature_edges(T, fid=None):
     return np.array(out, float).reshape(-1, 2, 3)
 
 
+def info_cls_topo(self, eid):
+    return (self.vis.info.info.get(eid) or {}).get('cls') in ('SiteSurface', 'TopographySurface')
+
+
+def _silhouette_edges(T):
+    """edges shared by two triangles that face opposite ways along the view depth (T: n x 3 x 3 in view coordinates, w = depth)"""
+    T = np.asarray(T, float)
+    N = np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0])[:, 2]
+    R = np.round(T, 5)
+    E = {}
+    for i in range(len(T)):
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            ka, kb = tuple(R[i, a]), tuple(R[i, b])
+            E.setdefault((ka, kb) if ka < kb else (kb, ka), []).append(i)
+    out = [(ka, kb) for (ka, kb), ts in E.items() if len(ts) == 2 and N[ts[0]] * N[ts[1]] < 0]
+    return np.array(out, float).reshape(-1, 2, 3)
+
+
 BELOW_RANGE_CATS = {-2000032, -2000120, -2000919, -2000920, -2000180}     # floors, stairs (runs, landings), ramps
 
 
@@ -161,6 +179,13 @@ class ViewDrawer:
         self.stats = collections.Counter()
         from .filters import FilterEval
         self.fe = FilterEval(dec, doc)
+
+    def _rvt22(self):
+        c = self.__dict__.get('_r22')
+        if c is None:
+            from .units import is_2022_plus
+            c = self._r22 = bool(is_2022_plus(self.f))        # the framing hidden-line gate is a 2022+ writer behaviour (2020 rst basic draws that geometry in every section)
+        return c
 
     def frame(self, v):
         O = np.asarray(v['origin'], float); X = np.asarray(v['right'], float); Y = np.asarray(v['up'], float); Z = np.asarray(v['dir'], float)
@@ -263,6 +288,10 @@ class ViewDrawer:
             if info['cls'] == 'LinearDimString':
                 try: prims += self.ann.dimension(eid, O, Mv, scale, res); self.stats['dimensions'] += 1
                 except Exception as ex: self.stats['dimension_error'] += 1
+                continue
+            if info['cls'] == 'AngularDim':
+                try: prims += self.ann.angular_dimension(eid, O, Mv, scale, res); self.stats['angular_dimensions'] += 1
+                except Exception: self.stats['dimension_error'] += 1
                 continue
             if info['cls'] == 'SpotElevation':
                 try:
@@ -413,6 +442,9 @@ class ViewDrawer:
                 rg = v['range']; zlo_ = min(x for x in (rg.get('depth'), rg.get('bottom')) if x is not None); bb_ = self.vis.info.bbox(eid)
                 if bb_ is not None and rg.get('top') is not None and bb_[1][2] < zlo_ - 1e-6 and not anno:
                     under_occ = self._underlay_occluder(v, O, Mv, elems, bb_[1][2])
+                elif (bb_ is not None and rg.get('top') is not None and not anno and cid == -2001320 and v.get('discipline') != 2 and rg.get('cut') is not None
+                      and bb_[1][2] < rg['cut'] - 0.01 and os.environ.get('RVT_FRAME_OCC', '1') == '1'):
+                    under_occ = self._underlay_occluder(v, O, Mv, elems, bb_[1][2])      # framing under a floor in a non-structural plan: the floor hides its symbolic lines (Snowdon L4 / L5: Revit's DXF has none)
             curves_ = pieces['curves']
             if info['cls'] in ('Rebar', 'RebarInSystem'):
                 try: curves_ = self.rebar_bars(eid, curves_) or curves_
@@ -447,6 +479,8 @@ class ViewDrawer:
                         if part.geom_type == 'LineString' and len(part.coords) > 1:
                             prims.append({'t': 'line', 'pts': [list(q) for q in part.coords], 'style': st, 'elem': eid, 'layer': lay})
                     continue
+                if os.environ.get('RVT_FRAMEGATE', '1') == '1' and self._rvt22() and v['kind'] == 'section' and cid == -2001320 and (c.get('flags') or 0) in (0x1088004, 0x1088204, 0x10880e0) and ((v.get('display') or {}).get('m_model') or {}).get('m_showHiddenLinesVal') != 2:
+                    self.stats['framing_hidden_style_skipped'] += 1; continue      # the family's hidden-line geometry (S-BEAM-HDLN in Revit's DXF) is only drawn when the view shows hidden lines (m_showHiddenLinesVal 2: Snowdon Longitudinal); Cross Section P .837 -> .958
                 pr = {'t': 'line', 'pts': pts[:, :2].tolist(), 'style': st, 'elem': eid, 'layer': lay}
                 if is_section and not anno and len(pts) > 1 and cid not in UNOBSCURED_CATS:
                     pr['_w'] = pts             # depth-tested below (elevations/sections)
@@ -626,6 +660,17 @@ class ViewDrawer:
                     from .compose import crop_rect_uv
                     caps += self.topo_poche(eid, cid, ov, O, Mv, cut_w, scale, res, prims, crop_rect_uv(v))
                 except Exception: self.stats['topo_error'] += 1
+                if os.environ.get('RVT_TOPO_SIL', '1') == '1':
+                    try:                                                      # the ground beyond the plane: its silhouette edges with hidden-line removal (Residential west elevation: Revit draws several ground lines, ours only the profile)
+                        import rvt_elemmesh as E_
+                        T_ = np.asarray(E_.element_mesh(self.f.g, eid).get('tris') or [], float).reshape(-1, 3, 3)
+                        if len(T_):
+                            T_ = _clip_tris_halfspace((T_ - O) @ Mv.T, np.array([0, 0, 1.0]), cut_w)
+                            if len(T_):
+                                Es_ = _silhouette_edges(T_)
+                                vis_ = [(a, b) for a, b in db.visible_parts(Es_, px * 2.0) if np.hypot(*(b[:2] - a[:2])) > px * 0.5] if len(Es_) else []
+                                if vis_: prims.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis_], 'style': res.line(None, cid, 'proj', eid, ov=ov), 'elem': eid, 'layer': 'projection'})
+                    except Exception: self.stats['topo_silhouette_error'] += 1
         prims = self.merge_cut_outlines(prims)
         # cut caps (the cut faces at the cut plane) hide what lies below them
         for loops2 in caps:
@@ -646,7 +691,7 @@ class ViewDrawer:
         for eid, cid, T2, uvw, fid, gs, ov in clipped:
             E = _feature_edges(T2, None)
             if cut_w is not None: E = E[~((np.abs(E[:, 0, 2] - cut_w) < 1e-6) & (np.abs(E[:, 1, 2] - cut_w) < 1e-6))]       # edges ON the cut plane belong to the cut outline
-            if cid in UNOBSCURED_CATS:                 # rebar: drawn through its host (Revit 'view unobscured' in the sample views)
+            if cid in UNOBSCURED_CATS or (cid == -2001300 and v['kind'] == 'plan' and (v.get('range') or {}).get('bottom') is not None and (self.vis.info.bbox(eid) is not None) and self.vis.info.bbox(eid)[1][2] >= v['range']['bottom'] - 1e-6 and self.vis.info.bbox(eid)[1][2] >= (v['range'].get('cut') or 0) - 12.0):                 # rebar: drawn through its host (Revit 'view unobscured' in the sample views); foundation slabs inside a plan's primary range show through the slab above them (Snowdon Parking pile caps / strip footings)
                 vis = [(a, b) for a, b in E if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
             else: vis = [(a, b) for a, b in db.visible_parts(E, eps) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]      # end-on edges collapse to points
             if not vis: continue

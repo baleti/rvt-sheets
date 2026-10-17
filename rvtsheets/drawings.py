@@ -113,7 +113,7 @@ SCENE_KEEP = ('t', 'elem', 'layer', 'pts', 'segs', 'loops', 'style', 'fill', 'co
               'box', 'order', 'cat', 'elems', 'part', 'paper', 'gs', 'pattern', 'hang', 'host')
 
 
-PROP_CLASSES = {'IndependentTag', 'BeamSystemTag', 'SpanDirectionSymbol', 'RoomTag', 'SpaceTag', 'AreaTag', 'TextNote', 'LinearDimString', 'SpotElevation', 'Grid', 'Level', 'Section', 'InteriorElev', 'StairsPathElement'}
+PROP_CLASSES = {'IndependentTag', 'BeamSystemTag', 'SpanDirectionSymbol', 'RoomTag', 'SpaceTag', 'AreaTag', 'TextNote', 'LinearDimString', 'AngularDim', 'SpotElevation', 'Grid', 'Level', 'Section', 'InteriorElev', 'StairsPathElement'}
 
 
 def _rnd(x, n=4):

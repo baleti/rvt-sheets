@@ -27,6 +27,14 @@ def length_format(f):
     return {'m_displayUnits': 2, 'm_accuracy': 1.0}
 
 
+def is_2022_plus(f):
+    """file written by Revit 2022 or later (unit options in m_formatOptionsMap)"""
+    for r in f.recs('UnitsElem'):
+        u = ob(r['fields'].get('m_units')) or {}
+        if u.get('m_formatOptionsMap') and not u.get('m_formatOptionsArr'): return True
+    return False
+
+
 def is_imperial(f):
     return length_format(f).get('m_displayUnits') in (3, 4, 5, 6)
 
