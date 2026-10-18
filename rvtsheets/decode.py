@@ -102,7 +102,7 @@ class Decoder:
                 fl = r['fields']; la = fl.get('m_lineAndTextAttr') or {}
                 out[r['id']] = {'class': c, 'name': path(fl, 'm_symbolInfo', 'm_name'), 'font': self.E(la.get('m_fontId')), 'cat': self.E(la.get('m_categoryId')),
                                 'opaque': la.get('m_background'), 'bold': la.get('m_bBold'), 'italic': la.get('m_bItalic'), 'underline': la.get('m_bUnderline'),
-                                'leader_offset': fl.get('m_leaderOffsetSheet'), 'width_scale': self._text_width_factor(fl)}
+                                'leader_offset': fl.get('m_leaderOffsetSheet'), 'width_scale': self._text_width_factor(fl), 'box_visible': fl.get('m_textBoxVisibility')}
         return out
 
     # ------------------------------------------------------------------ phases, filters

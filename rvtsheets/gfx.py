@@ -54,6 +54,54 @@ def rtf_text(raw):
     return ''.join(out).rstrip('\n ')
 
 
+def rtf_styled(raw):
+    """RTF -> lines of (text, bold, italic) runs (\\b / \\i toggles, \\par / \\line break lines, braces scope the toggles); None when no run is bold or italic"""
+    if raw is None: return None
+    if isinstance(raw, (bytes, bytearray)): s = raw.decode('latin1', 'replace')
+    else:
+        s = str(raw)
+        if s.startswith("b'") or s.startswith('b"'):
+            try:
+                import ast; s = ast.literal_eval(s).decode('latin1', 'replace')
+            except Exception: pass
+    s = s.replace('\x00', '')
+    lines = [[]]; b = i_ = False; stack = []; skip = None; depth = 0; k = 0; n = len(s); buf = []; styled = False
+    def flush():
+        if buf: lines[-1].append((''.join(buf), b, i_)); buf.clear()
+    while k < n:
+        ch = s[k]
+        if ch == '{':
+            depth += 1; stack.append((b, i_))
+            if re.match(r'\{\\(\*|fonttbl|colortbl|stylesheet|info)', s[k:]) and skip is None: skip = depth
+            k += 1; continue
+        if ch == '}':
+            flush()
+            if skip == depth: skip = None
+            if stack: b, i_ = stack.pop()
+            depth -= 1; k += 1; continue
+        if skip is not None: k += 1; continue
+        if ch == '\\':
+            m = re.match(r"\\'([0-9a-fA-F]{2})", s[k:])
+            if m: buf.append(bytes([int(m.group(1), 16)]).decode('cp1252', 'replace')); k += 4; continue
+            m = re.match(r'\\u(-?\d+) ?\??', s[k:])
+            if m: buf.append(chr(int(m.group(1)) % 65536)); k += len(m.group(0)); continue
+            m = re.match(r'\\([a-z]+)(-?\d+)? ?', s[k:])
+            if m:
+                w = m.group(1); prm = m.group(2)
+                if w in ('par', 'line'): flush(); lines.append([])
+                elif w == 'b': flush(); b = prm != '0'; styled = styled or b
+                elif w == 'i': flush(); i_ = prm != '0'; styled = styled or i_
+                elif w == 'tab': buf.append('\t')
+                k += len(m.group(0)); continue
+            if k + 1 < n and s[k + 1] in '\\{}': buf.append(s[k + 1]); k += 2; continue
+            k += 2; continue
+        if ch in '\r\n': k += 1; continue
+        buf.append(ch); k += 1
+    flush()
+    while lines and not lines[-1]: lines.pop()
+    return lines if styled else None
+
+
 def rtf_runs(raw):
     """font size of the first run in half-points (\\fsN), bold/italic flags (best effort)"""
     s = raw.decode('latin1', 'replace') if isinstance(raw, (bytes, bytearray)) else str(raw)
@@ -179,7 +227,7 @@ class Collector:
         elif cls == 'GRichText':
             raw = o.get('m_arrRtfRawData')
             x = (o.get('m_modelXUnitVec') or {}).get('m_xyz'); y = (o.get('m_modelYUnitVec') or {}).get('m_xyz')
-            self.prims.append(dict(p, t='text', text=rtf_text(raw), rtf=rtf_runs(raw) if raw is not None else {}, origin=(o.get('m_modelOrigin') or {}).get('m_xyz'), x=x, y=y,
+            self.prims.append(dict(p, t='text', text=rtf_text(raw), rtf=rtf_runs(raw) if raw is not None else {}, runs=rtf_styled(raw), origin=(o.get('m_modelOrigin') or {}).get('m_xyz'), x=x, y=y,
                                    size=o.get('m_defaultFontSize'), font=o.get('m_defaultFontName'), halign=o.get('m_defaultHorizontalTextAlignment'), valign=o.get('m_defaultVerticalTextAlignment'),
                                    bold=o.get('m_isDefaultFontBold'), italic=o.get('m_isDefaultFontItalic'), width_scale=o.get('m_widthScale'), color=o.get('m_defaultTextColor'),
                                    box=[(o.get('m_layoutWidthHimetric') or 0) / 1e5 / 0.3048, (o.get('m_layoutHeightHimetric') or 0) / 1e5 / 0.3048],

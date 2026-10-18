@@ -4,7 +4,7 @@ witness lines (gap / extension), tick marks (LeaderStyle of the dimension type),
 Sizes are paper sizes (feet of paper) x view scale. Defaults where the type does not store a value are Revit's out-of-the-box
 type values (?): witness gap 1/16", extension 3/32", tick 3/64" diagonal, text offset 1/32"."""
 import math
-import os
+import os, sys
 import numpy as np
 from .reader import ob, path, INVALID
 from . import units
@@ -397,6 +397,10 @@ class Annotations:
                 continue
             a = (d + n) / math.sqrt(2) * tick / 2
             out.append({'t': 'line', 'pts': [(q - a).tolist(), (q + a).tolist()], 'style': dict(tickst, w=max(tickst['w'], line['w'] * 2)), 'elem': eid, 'layer': 'annotation', 'part': 'arrow'})
+        toff = 0.0
+        if os.environ.get('RVT_DIMTOFF', '1') == '1':           # dimension type 'text offset' (m_pParamValueSetDouble entry 6, paper length): Commercial 'Linear - 3/32in Arial' 1/16in = text 1.46 mm higher in Revit's PDF than Snowdon 'Default' (1/128in)
+            try: toff = float(ob(tf.get('m_pParamValueSetDouble'))['m_paramSet'][6]['m_value']) * scale
+            except Exception: toff = 0.0
         # segment texts
         segs = fl.get('m_ArrSegInfo') or []
         order = np.argsort(ts)
@@ -414,7 +418,8 @@ class Annotations:
             if eq: txt = tf.get('m_equalityText') or 'EQ'
             org = sg.get('m_origin')
             pos = P(org) if org and any(org) else o + d * (ts[i] + ts[i + 1]) / 2
-            out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * DIM_TXT_OFF).tolist(), 'x': d_txt.tolist(), 'size': size,
+            if os.environ.get('RVT_DIMDBG'): print('DIM', eid, i, 'org', org, 'flags', fl.get('m_flags'), 'segkeys', {k: v for k, v in sg.items() if k != 'm_values'}, 'o', o.tolist(), 'd', d.tolist(), 'pos', pos.tolist(), file=sys.stderr)
+            out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * (size * DIM_TXT_OFF + toff)).tolist(), 'x': d_txt.tolist(), 'size': size,
                         'font': font.get('name') or 'Arial', 'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
             if not eq and tf.get('m_alternateUnits') == 2:                  # alternate units below the primary text (rst basic 3000 / 9' - 10": 2.27 ft = 2.91 text heights at 1:100)
                 aopt = ob(tf.get('m_oLinFormatOptionsAlternate')) or {}
@@ -423,12 +428,12 @@ class Annotations:
                     am = ('%.4f' % (val * k_)).rstrip('0').rstrip('.')
                 else: am = units.fmt_length(val, aopt, self.proj_len)
                 atxt = (tf.get('m_alternateUnitsPrefix') or '') + am + (tf.get('m_alternateUnitsSuffix') or '')
-                out.append({'t': 'text', 'text': atxt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * (DIM_TXT_OFF - (1.73 if (aopt.get('m_accuracy') or 1) < 1e-6 else 2.91))).tolist(), 'x': d_txt.tolist(), 'size': size,
+                out.append({'t': 'text', 'text': atxt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * (size * (DIM_TXT_OFF - (1.73 if (aopt.get('m_accuracy') or 1) < 1e-6 else 2.91)) + toff)).tolist(), 'x': d_txt.tolist(), 'size': size,
                             'font': font.get('name') or 'Arial', 'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text', 'part': 'alt_text'})
         if not segs:
             txt = units.fmt_length(t1 - t0, ob(tf.get('m_oLinFormatOptions')) or {}, self.proj_len)
             pos = o + d * (t0 + t1) / 2
-            out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * size * DIM_TXT_OFF).tolist(), 'x': d_txt.tolist(), 'size': size,
+            out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * (size * DIM_TXT_OFF + toff)).tolist(), 'x': d_txt.tolist(), 'size': size,
                         'font': font.get('name') or 'Arial', 'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
         return out
 
@@ -521,6 +526,14 @@ class Tags:
             out.append({'t': 'text', 'text': txt, 'origin': org.tolist(), 'x': (xd / np.linalg.norm(xd)).tolist(), 'size': (font.get('size') or 0.0078) * k,
                         'font': font.get('name') or 'Arial', 'bold': tt.get('bold'), 'halign': SheetComposer._halign(lab['flags'] or 0),
                         'valign': SheetComposer._valign(lab['flags'] or 0), 'anchor': True, 'elem': eid, 'layer': 'text'})
+            if tt.get('box_visible') and lab.get('width') and lab.get('height') and os.environ.get('RVT_LABEL_BOX', '1') == '1':
+                # text type with 'Show border' (m_textBoxVisibility): the label sits in a framed, opaque box (Snowdon 'NOT FOR CONSTRUCTION' stamp)
+                ux = np.asarray(out[-1]['x'], float); uy = np.array([-ux[1], ux[0]]); w_ = lab['width'] * k; h_ = lab['height'] * k
+                ha_ = SheetComposer._halign(lab['flags'] or 0); va_ = SheetComposer._valign(lab['flags'] or 0)
+                x0_, x1_ = {0: (0, w_), 1: (-w_ / 2, w_ / 2), 2: (-w_, 0)}[ha_]; y0_, y1_ = {0: (-h_, 0), 1: (-h_ / 2, h_ / 2), 2: (0, h_)}[va_]
+                cs_ = [(org + ux * a_ + uy * b_).tolist() for a_, b_ in ((x0_, y0_), (x1_, y0_), (x1_, y1_), (x0_, y1_))]
+                out.insert(len(out) - 1, {'t': 'fill', 'loops': [cs_ + [cs_[0]]], 'color': [255, 255, 255], 'elem': eid, 'layer': 'mask'})
+                out.insert(len(out) - 1, {'t': 'line', 'pts': cs_ + [cs_[0]], 'style': {'w': 0.18, 'rgb': [0, 0, 0], 'dash': None, 'pen': 1, 'halftone': False}, 'elem': eid, 'layer': 'annotation', 'part': 'frame'})
         return out
 
     def element_props(self, eid):

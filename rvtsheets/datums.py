@@ -1,6 +1,7 @@
 """Grids (plan views, sections) and levels (sections/elevations): datum line from the datum plane (DatumPlane.m_pSurface origin, xVec
 along the line, envelope = extents along xVec / yVec), per-view extents from the view's ExtentElem, head symbols (type m_familyTagId)
 with their labels at paper size (x view scale). Output prims in view coordinates (model feet)."""
+import os
 import math
 import numpy as np
 from .reader import ob, path, INVALID
@@ -177,7 +178,10 @@ class Datums:
                 pass
             uv0 = ((p0 - O) @ Mv.T)[:2]; uv1 = ((p1 - O) @ Mv.T)[:2]
             if lvl_ext is not None: uv0, uv1 = uv_f, uv_b
-            if r['class'] == 'Level' and lvl_ext is None and v.get('kind') == 'section' and uv0[0] > uv1[0]: uv0, uv1 = uv1, uv0     # no stored bubble end: head at the right end (Commercial building section, Mezzanine)
+            if r['class'] == 'Level' and lvl_ext is None and v.get('kind') == 'section' and uv0[0] > uv1[0]:
+                # no stored bubble end: head at the right end (Commercial building section, West elevation levels) unless the datum's origin sits exactly at one envelope end
+                # (Commercial Mezzanine, envelope u -45.2 .. 0): the head is there (left end in the North elevation and the wall section, right end in the building section)
+                if not (abs(hi) < 1e-6 and abs(lo) > 1e-6 and os.environ.get('RVT_LVLHEAD') != 'right'): uv0, uv1 = uv1, uv0
             if v.get('kind') in ('section', 'plan') and not self._meets_crop(v, uv0, uv1): continue      # outside an active crop: hidden
             if r['class'] == 'Grid' and grid_ext is None and v.get('kind') in ('plan', 'section'):
                 # 3D-extent grid in a cropped view: drawn to the annotation crop region (crop + offsets x scale), the bubble moves there

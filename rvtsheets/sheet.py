@@ -1,6 +1,7 @@
 """Stage 2: compose a sheet: title block (symbol saved graphics + static texts + labels with the sheet's parameter values) and viewports.
 Output: a 'drawing' dict {size:[w,h] ft, prims:[...]} in sheet feet coordinates, styles resolved (stroke mm, rgb, dash mm)."""
 import datetime
+import os
 import numpy as np
 from . import gfx
 from .decode import Decoder, color, FT_MM, SOLID_LINE
@@ -75,6 +76,7 @@ class SheetComposer:
         if g and g.get('class') == 'GElement':
             col = gfx.Collector(self.f)
             for p in col.collect(g):
+                if p.get('t') == 'line' and os.environ.get('RVT_TB_REFLINES', '1') == '1' and (self.doc['gstyles'].get(p.get('gs')) or {}).get('cat') == -2000064: continue      # grey text-box guide lines of the family (category -2000064): not in Revit's print (Snowdon consultant boxes)
                 out += self._place(p, R, o, tb['id'])
             if col.unknown: out.append({'t': 'note', 'text': 'unknown graphics nodes %s' % col.unknown})
         sym = self.doc['titleblock_symbols'].get(tb['symbol']) or self.doc['titleblock_symbols'].get(str(tb['symbol']))
@@ -188,14 +190,30 @@ class SheetComposer:
         r = self.f.rec(sid, 'ImageSymbol')
         if r:
             fl = r['fields']; dpi = fl.get('m_dpi') or 72; w = fl.get('m_widthInFeet') or 0; h = fl.get('m_heightInFeet') or 0
-            try:
-                import rvt_materials as M, base64
-                if not hasattr(self, '_emb'): self._emb = M.embedded_images(self.f.fn)
-                W = round(w * 12 * dpi); H = round(h * 12 * dpi)
-                for e in self._emb:
-                    if abs(e['width'] - W) <= 1 and abs(e['height'] - H) <= 1:
-                        res = ('data:image/png;base64,' + base64.b64encode(M.embedded_image_bytes(self.f.fn, e)).decode(), w, h); break
-            except Exception: pass
+            if os.environ.get('RVT_RASTER_IMG', '1') == '1':
+                # the image holder element stores the raster itself (compressed TIFF / PNG): exact per image (Snowdon logo, the four 'How to Use this Project.pdf' pages: same pixel size, different content)
+                try:
+                    import base64, io
+                    from PIL import Image
+                    hd_ = self.f.rec(self.f.eid(fl.get('m_idImageHolder')))
+                    raw = ob((hd_ or {'fields': {}})['fields'].get('m_pRasterImage')) or {}
+                    data = raw.get('m_compressedImage')
+                    if data:
+                        im = Image.open(io.BytesIO(bytes(data))); im.load()
+                        if max(im.size) > 1600: im.thumbnail((1600, 1600), Image.LANCZOS)
+                        bio = io.BytesIO(); (im.convert('RGBA') if im.mode in ('RGBA', 'LA', 'P') else im.convert('RGB')).save(bio, 'PNG', optimize=True)
+                        res = ('data:image/png;base64,' + base64.b64encode(bio.getvalue()).decode(), w, h)
+                except Exception: res = None
+            if res is None:
+                try:
+                    import rvt_materials as M, base64
+                    if not hasattr(self, '_emb'): self._emb = M.embedded_images(self.f.fn)
+                    W = round(w * 12 * dpi); H = round(h * 12 * dpi)
+                    if fl.get('m_widthInPixels') and fl.get('m_heightInPixels'): W, H = int(fl['m_widthInPixels']), int(fl['m_heightInPixels'])      # 2022+ files store the pixel size
+                    for e in self._emb:
+                        if abs(e['width'] - W) <= 1 and abs(e['height'] - H) <= 1:
+                            res = ('data:image/png;base64,' + base64.b64encode(M.embedded_image_bytes(self.f.fn, e)).decode(), w, h); break
+                except Exception: pass
         self._imgs[sid] = res
         return res
 

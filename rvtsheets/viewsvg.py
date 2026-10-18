@@ -73,6 +73,10 @@ def body(prims, scale, tx, layer_order=('underlay', 'room_fill', 'symbolic_fill'
             out.append('<path d="%s" %s%s/>' % (' '.join(D(s) for s in p['segs']), stroke(p['style']), e))
         elif p['t'] == 'text' and p.get('text') and p.get('origin') is not None:
             out.append(text_svg(p, tx, scale))
+        elif p['t'] == 'image' and p.get('uri'):
+            cx, cy = p['center']; w_, h_ = p['w'], p['h']
+            (x0_, y0_), (x1_, y1_) = tx(cx - w_ / 2, cy + h_ / 2), tx(cx + w_ / 2, cy - h_ / 2)
+            out.append('<image x="%.3f" y="%.3f" width="%.3f" height="%.3f" href="%s" preserveAspectRatio="none"%s/>' % (min(x0_, x1_), min(y0_, y1_), abs(x1_ - x0_), abs(y1_ - y0_), p['uri'], e))
         elif p['t'] == 'fill':
             c = color(p['color']) if isinstance(p.get('color'), int) else p.get('color')
             out.append('<path d="%s" fill="%s" fill-rule="evenodd" stroke="none"%s/>' % (' '.join(D(l) + ' Z' for l in p['loops']), _rgb(c) if c else '#888', e))
@@ -145,7 +149,8 @@ def text_svg(p, tx, scale):
         bw = (p.get('box') or [0, 0])[0] * FT_MM / scale
         dx = {0: 0.0, 1: bw / 2, 2: bw}.get(p.get('halign') or 0, 0.0) if bw else 0.0
         first = rtf_first(size_mm, p.get('font'))
-    tsp = ''.join('<tspan x="%.3f" dy="%.3f">%s</tspan>' % (dx, (first if i == 0 else lh), html.escape(l)) for i, l in enumerate(lines))
+    from .svg import tspans
+    tsp = tspans(lines, dx, first, lh)
     wt = ' font-weight="bold"' if p.get('bold') else ''
     c = p.get('color'); fill = ''
     if isinstance(c, int) and 0 < c < 1 << 24: fill = ' fill="#%02x%02x%02x"' % (c & 255, (c >> 8) & 255, (c >> 16) & 255)       # text colour (BGR int): the Help Button '?' is light grey on blue

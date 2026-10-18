@@ -64,6 +64,20 @@ def rtf_first(em, font=None):
     return em * (0.99 if 'trebuchet' in (font or '').lower() else 0.90)
 
 
+def tspans(lines, dx, first, lh, runs=None):
+    """one tspan per non-empty line; a blank line only advances the next line by one more pitch (an empty tspan's dy is dropped by SVG renderers)"""
+    out = []; pend = 0
+    for i, l in enumerate(lines):
+        if not l.strip() and i > 0 and i < len(lines) - 1 or (not l.strip() and i == 0):
+            pend += 1; continue
+        dy = (first if not out else lh) + (pend * lh if out else pend * lh)
+        if runs:
+            inner = ''.join('<tspan%s%s>%s</tspan>' % (' font-weight="bold"' if b_ else '', ' font-style="italic"' if i_ else '', html.escape(t_)) for t_, b_, i_ in runs[i])
+        else: inner = html.escape(l)
+        out.append('<tspan x="%.3f" dy="%.3f">%s</tspan>' % (dx, dy, inner)); pend = 0
+    return ''.join(out)
+
+
 def font_stack(name):
     import os
     if name in ('ARchitxt', 'Swis721 Lt BT') and os.environ.get('RVT_ARIAL_NARROW', 'arial') == 'arial': name = 'Arial'      # the Revit reference machines lack these fonts too and print Arial (Snowdon weld-symbol texts: Revit PDF = ArialMT)
@@ -125,13 +139,16 @@ class SVG:
             # notes/labels: origin is the anchor point on the alignment side; vertical: top / middle / bottom of the text block
             dx = 0.0
             bw_ = (p.get('box') or [0, 0])[0] * FT_MM
-            if p.get('label') and bw_ > 1.0 and not p.get('nowrap') and os.environ.get('RVT_TB_LABELWRAP', '1') == '1' and (p.get('halign') or 0) == 0:
+            if p.get('label') and bw_ > 1.0 and not p.get('nowrap') and os.environ.get('RVT_TB_LABELWRAP', '1') == '1':
                 from .viewdraw import wrap_text       # title block labels wrap at their layout box width (Residential cover: 'Enter address here' on two lines)
                 lines = wrap_text('\n'.join(lines), bw_ / (p.get('width_scale') or 1.0), size_mm, p.get('font') or 'Arial', bool(p.get('bold'))).split('\n')
             n = len(lines)
             bh_ = (p.get('box') or [0, 0])[1] * FT_MM
-            if p.get('label') and n > 1 and bh_ > 0 and bw_ > 1.0 and os.environ.get('RVT_TB_LABELWRAP', '1') == '1': lh = bh_ / n        # line pitch from the stored label box height
-            first = first_baseline(p.get('valign'), n, lh, size_mm, p.get('font'), box_slack(p, size_mm, p.get('font')))
+            if p.get('label') and n > 1 and bh_ > 0 and bw_ > 1.0 and os.environ.get('RVT_TB_LABELWRAP', '1') == '1' and bh_ / n >= size_mm * 1.05: lh = bh_ / n        # line pitch from the stored label box height
+            sl_ = box_slack(p, size_mm, p.get('font'))
+            if n > 1 and sl_:                                                  # several lines (wrapped label): the slack is what the whole block leaves free in the box, not what one line leaves
+                sl_ = (p['box'][1] * FT_MM - (n - 1) * lh - (1.17 if 'trebuchet' in (p.get('font') or '').lower() else 1.15) * size_mm) / 2
+            first = first_baseline(p.get('valign'), n, lh, size_mm, p.get('font'), sl_)
         else:
             # saved-graphics rich text: origin = top-left of the layout box (?), alignment inside the box
             bw = (p.get('box') or [0, 0])[0] * FT_MM
@@ -150,7 +167,10 @@ class SVG:
         it = ' font-style="italic"' if p.get('italic') else ''
         wsc = (p.get('width_scale') or 1.0) if os.environ.get('RVT_TB_WS', '1') == '1' else 1.0
         if abs(wsc - 1.0) > 1e-6: dx = dx / wsc
-        tsp = ''.join('<tspan x="%.3f" dy="%.3f">%s</tspan>' % (dx, (first if i == 0 else lh), html.escape(l)) for i, l in enumerate(lines))
+        runs = p.get('runs')
+        if runs and len(runs) == len(lines) and [''.join(r[0] for r in rl) for rl in runs] == lines and os.environ.get('RVT_RTF_RUNS', '1') == '1':
+            tsp = tspans(lines, dx, first, lh, runs)          # bold / italic runs of saved rich text (Snowdon consultant blocks)
+        else: tsp = tspans(lines, dx, first, lh)
         self.parts.append('<text xml:space="preserve" transform="translate(%.3f %.3f) rotate(%.3f)%s" font-family="%s" font-size="%.3f" text-anchor="%s"%s%s fill="#000"%s>%s</text>' % (x, y, ang, (' scale(%.4f 1)' % wsc) if abs(wsc - 1.0) > 1e-6 else '', html.escape(fam), size_mm, ha, wt, it, da, tsp))
 
     def rect(self, x0, y0, x1, y1, stroke='#999', w=0.25, dash='2,1'):

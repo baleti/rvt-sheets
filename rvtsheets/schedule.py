@@ -95,6 +95,26 @@ class Schedules:
                 'fonts': {k: self.font(fl.get(k)) for k in ('m_titleTextTypeId', 'm_headerTextTypeId', 'm_bodyTextTypeId')},
                 'grid_gs': self.sc.cat_gstyle(self.f.eid(sch.get('m_bodyGridCategoryId'))), 'outline_gs': self.sc.cat_gstyle(self.f.eid(sch.get('m_outlineGridCategoryId'))), 'medium_gs': self.sc.cat_gstyle(-2000043), 'tb_inst': self.f.eid(sch.get('m_titleBlockInstId'))}
 
+    def rev_rows(self, d, sheet_id):
+        """revision schedule of a title block: one row per revision listed on the sheet (sheet m_explicitlyPresentRevisionIds, ascending sequence number): number, description, date, issued by / to"""
+        if os.environ.get('RVT_REVROWS', '1') != '1' or sheet_id is None: return []
+        try:
+            r = self.f.rec(sheet_id)
+            ids = [self.f.eid(x) for x in (r['fields'].get('m_explicitlyPresentRevisionIds') or [])]
+            revs = [self.f.rec(i) for i in ids]; revs = [x for x in revs if x]
+            revs.sort(key=lambda x: x['fields'].get('m_sequenceNumber') or 0)
+            out = []
+            for rv in revs:
+                fl = rv['fields']
+                vals = {'umber': str(fl.get('m_numberStr') or ''), 'escription': str(fl.get('m_description') or ''), 'ate': str(fl.get('m_date') or ''), 'ssued by': str(fl.get('m_issuedBy') or ''), 'ssued to': str(fl.get('m_issuedTo') or '')}
+                row = []
+                for f in d['fields']:
+                    nm = str(f.get('pname') or f.get('heading') or '')
+                    row.append(next((v for k, v in vals.items() if k in nm), ''))
+                out.append(row)
+            return out
+        except Exception: return []
+
     def rows(self, d, sheet_id=None):
         """element rows: elements of the category (instances unless a type schedule); revision schedules: revisions shown on the sheet (?)"""
         cat = d['category']; out = []
@@ -242,12 +262,12 @@ class Schedules:
         if not d or not d['fields']: return []
         x0, y0 = origin[0], origin[1]
         W = sum(f['width'] for f in d['fields'])
-        rows = [] if d['tb_inst'] not in (None, INVALID) else self.rows(d, sheet_id)       # title block revision schedules: issued revisions (none in the samples)
+        rows = self.rev_rows(d, sheet_id) if d['tb_inst'] not in (None, INVALID) else self.rows(d, sheet_id)       # title block revision schedules: the revisions present on the sheet
         out = []; y = y0
         def line(a, b, heavy=False):
             if d.get('grid_lines') == 0: return
             gs_ = d['medium_gs'] if heavy == 'mid' and d.get('outline') and d.get('medium_gs') is not None and os.environ.get('RVT_SCHED_OUTLINE', '1') == '1' else d['outline_gs'] if heavy and d.get('outline') and d.get('outline_gs') is not None and os.environ.get('RVT_SCHED_OUTLINE', '1') == '1' else d['grid_gs']
-            out.append({'t': 'line', 'pts': [[a[0], a[1], 0], [b[0], b[1], 0]], 'gs': gs_, 'cond': [], 'elem': sched_id, 'w_min': 0.24 if os.environ.get('RVT_SCHED_LW', '1') == '1' else 0.0})      # Revit PDFs print every schedule grid / outline line at least 0.24 mm (Commercial Door Schedule, How Do I, Snowdon Sheet Index)
+            out.append({'t': 'line', 'pts': [[a[0], a[1], 0], [b[0], b[1], 0]], 'gs': gs_, 'cond': [], 'elem': sched_id, 'w_min': 0.457 if heavy is True and os.environ.get('RVT_SCHED_LW', '1') == '1' else 0.0})      # Revit PDFs (pt widths): schedule outline 1.3 pt = 0.457 mm (Commercial Door Schedule verticals, Snowdon Sheet Index), inner grid 0.24 pt = 0.085 mm black
         def text(s, x, yy, w, h, font, halign=1):
             size, name, bold = font
             size *= 0.72 * self.em_k(d)
@@ -290,7 +310,7 @@ class Schedules:
                 g = fs[i]['groups'][0] if fs[i].get('groups') else None
                 if g is None:
                     hd = fs[i]['heading']; fit = os.environ.get('RVT_SCHED_FIT', '1') == '1'
-                    est = len(hd) * 0.5 * hf[0] * self.em_k(d)                        # Arial average advance ~0.5 em
+                    est = len(hd) * 0.55 * hf[0] * self.em_k(d)                        # Arial average advance ~0.5 em
                     if fit and ' ' in hd and est > fs[i]['width'] - 0.004:            # a heading wider than its column wraps: two lines, one per heading row (Revit: 'Head' / 'Height')
                         a_, b_ = hd.split(' ', 1) if hd.count(' ') == 1 else (hd[:hd.rfind(' ')], hd[hd.rfind(' ') + 1:])
                         text(a_, x, y, fs[i]['width'], h, hf); text(b_, x, y - h, fs[i]['width'], h, hf)

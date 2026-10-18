@@ -414,6 +414,10 @@ class ViewDrawer:
                 try: prims += self.ann.angular_dimension(eid, O, Mv, scale, res); self.stats['angular_dimensions'] += 1
                 except Exception: self.stats['dimension_error'] += 1
                 continue
+            if info['cls'] == 'ImageInstance' and os.environ.get('RVT_IMAGEINST', '1') == '1':
+                try: prims += self.image_instance(eid, O, Mv); self.stats['image_instances'] += 1
+                except Exception: self.stats['image_instance_error'] += 1
+                continue
             if info['cls'] == 'SpotElevation':
                 try:
                     sp = self.ann.spot_slope(eid, O, Mv, scale, res)
@@ -930,6 +934,18 @@ class ViewDrawer:
         for k_, v_ in gfx.UNKNOWN_CLASSES.items(): self.stats['unknown_gnode ' + k_] = v_
         self.stats['seconds'] = round(time.time() - t0, 1)
         return {'prims': self._finish(prims, O, Mv), 'stats': dict(self.stats), 'conds_unknown': {str(k): v for k, v in W.unknown_conds.items()}}
+
+    def image_instance(self, eid, O, Mv):
+        """raster image placed in a view (ImageInstance m_pImageInfo: symbol, transform origin, width / height scale) -> image prim in view coordinates (model feet)"""
+        r = self.f.rec(eid, 'ImageInstance'); ii = ob_(r['fields'].get('m_pImageInfo')) or {}
+        t = ii.get('m_Trf') or {}
+        from .sheet import SheetComposer
+        if not hasattr(self, '_sc_img'): self._sc_img = SheetComposer(self.dec, self.doc)
+        im = self._sc_img.image(self.f.eid(ii.get('m_symbolId')))
+        if not im: return []
+        sx, sy = ii.get('m_dWidthScale') or 1.0, ii.get('m_dHeightScale') or 1.0
+        o = ((np.asarray(t.get('m_or') or [0, 0, 0], float) - O) @ Mv.T)[:2]
+        return [{'t': 'image', 'uri': im[0], 'center': [float(o[0]), float(o[1])], 'w': im[1] * sx, 'h': im[2] * sy, 'angle': 0.0, 'elem': eid, 'layer': 'symbolic_fill'}]
 
     def _apply_draw_order(self, v, vid, prims):
         dord = v.get('draw_order') or []
