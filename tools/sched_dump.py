@@ -20,5 +20,5 @@ if len(sys.argv) > 3 and sys.argv[3] != '-':
     dx = ezdxf.readfile(sys.argv[3]); K = {1: 1/12, 2: 1.0, 4: 1/304.8, 5: 1/30.48, 6: 1/0.3048}.get(dx.header.get('$INSUNITS', 0), 1.0)
     h = collections.Counter()
     for e in dx.modelspace():
-        if e.dxftype() in ('TEXT', 'MTEXT'): h[round(e.dxf.get('height', e.dxf.get('char_height', 0)) * K, 5)] += 1
+        if e.dxftype() in ('TEXT', 'MTEXT'): h[round((e.dxf.height if e.dxftype() == 'TEXT' else e.dxf.char_height) * K, 5)] += 1
     print('revit dxf text heights (ft):', dict(h))

@@ -19,6 +19,7 @@ port=$((20000 + RANDOM % 20000))
 echo "standalone (port $port)"
 "$here/rvt-sheets" serve "$f" --port $port > "$tmp/s.log" 2>&1 & pid=$!
 sleep 2; check "http://127.0.0.1:$port/sheets" local; kill $pid; wait $pid 2>/dev/null
+if [ -n "$SMOKE_SHEETS_ONLY" ]; then [ $fail = 0 ] && echo "SMOKE OK (sheets only)" || { echo "SMOKE FAILED (logs in $tmp)"; exit 1; }; exit 0; fi
 port=$((port + 1))
 echo "viewer demo command (--sheets --no-browser, port $port)"
 ~/src/rvt-viewer/bin/rvt-view "$f" --sheets --no-browser --port $port > "$tmp/v.log" 2>&1 & pid=$!

@@ -2,7 +2,7 @@
 FillPattern grids (FillPatternElem.m_pFillPattern.m_gridsArr): angle, origin (u,v), deltas = (shift along the line, offset between lines),
 segments (dash/space lengths along the line, empty = continuous). Drafting patterns (target 0) are sized on paper (feet of paper),
 model patterns (target 1) in model feet. Region coordinates are view u,v in model feet; paper size = model * (1/scale)."""
-import math
+import math, os
 import numpy as np
 import shapely
 from shapely.geometry import Polygon, MultiPolygon, LineString, MultiLineString
@@ -84,7 +84,9 @@ def hatch(geom, pattern, scale, view_rot=0.0):
             per = sum(abs(s_) for s_ in segs)
             if per <= 1e-12: continue
             if len(js) * (2 * R / per + 2) * ((len(segs) + 1) // 2) > MAX_DASHES:        # a fine stipple over a big region (1:16 plan floor: 'Sand' millions of dots, 6 GB): not generated
-                SKIPPED['dashes'] += 1; return []
+                SKIPPED['dashes'] += 1
+                if os.environ.get('RVT_STIPPLE', '1') == '1' and pattern.get('target', 0) == 0: return stipple(geom, scale)
+                return []
             for j in js:
                 base = o + j * (off * nrm + shift * d)
                 tc = float((np.array([cx, cy]) - base) @ d)
@@ -104,3 +106,21 @@ def hatch(geom, pattern, scale, view_rot=0.0):
             c = list(ls.coords)
             for a_, b_ in zip(c, c[1:]): out.append([list(a_), list(b_)])
     return out
+
+
+STIPPLE_PER_MM2 = 0.05      # Revit thins very fine stipples (Sand: 0.25 dots / mm2 on paper by definition) to about 0.05 dots / mm2 in its 1:96 plan export (speckled room floors)
+
+
+def stipple(geom, scale, seed=7):
+    """sparse deterministic random dots over a region: stands for a drafting stipple too fine to generate dash by dash"""
+    minx, miny, maxx, maxy = geom.bounds
+    area_mm2 = geom.area * (304.8 / scale) ** 2
+    n = int(min(area_mm2 * STIPPLE_PER_MM2, 150000))
+    if n < 1: return []
+    rng = np.random.default_rng(int(abs(minx * 1000 + miny * 7000)) % (2 ** 31) + seed)
+    m = int(n * (geom.envelope.area / max(geom.area, 1e-12)) * 1.1) + 10
+    pts = np.column_stack([rng.uniform(minx, maxx, m), rng.uniform(miny, maxy, m)])
+    keep = shapely.contains_xy(geom, pts[:, 0], pts[:, 1])
+    pts = pts[keep][:n]
+    d = 0.2 / 304.8 * scale
+    return [[[float(x), float(y)], [float(x + d), float(y)]] for x, y in pts]

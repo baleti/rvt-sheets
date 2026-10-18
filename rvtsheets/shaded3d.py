@@ -2,7 +2,7 @@
 (perspective views store the crop as tangents at unit distance: bounds = [[right, left], [top, bottom], [far, near]] -> field of view),
 per-triangle material colours, Lambert shading with one sun + ambient, numba z-buffer, sky gradient background. Output: PNG bytes.
 Not a Revit-exact renderer (no shadows, textures, entourage): a faithful-colour massing view like Revit's 'Shaded' style."""
-import io, math
+import io, math, os
 import numpy as np
 from numba import njit
 
@@ -37,7 +37,7 @@ def _raster(tx, ty, tz, col, alpha, W, H, zb, img):
 
 
 def render(tris, colors, alphas, eye, right, up, fwd, tan_x, tan_y, width_px, perspective=True, ortho_half=None, centre=(0.0, 0.0), sun=(-0.4, -0.5, 0.75),
-           sky=((176, 197, 218), (232, 238, 244)), ground=(150, 150, 150)):
+           sky=((176, 197, 218), (232, 238, 244)), ground=(150, 150, 150), gain=1.0, plan=False, caster=None, horizon=False, soft=None):
     """tris (n,3,3) world feet, colors (n,3) 0..255 base colours. tan_x/tan_y: half field of view tangents (perspective) or None.
     Returns (png bytes, width, height). Camera looks along fwd; right/up orthonormal."""
     if perspective:
@@ -52,7 +52,14 @@ def render(tris, colors, alphas, eye, right, up, fwd, tan_x, tan_y, width_px, pe
     n[facing < 0] *= -1                                                          # two-sided shading
     L = np.asarray(sun, float); L = L / np.linalg.norm(L)
     shade = 0.45 + 0.55 * np.clip((n * L).sum(1), 0, 1) ** 0.8                  # ambient + diffuse
-    col = np.clip(colors * shade[:, None], 0, 255).astype(np.uint8)
+    if plan:                                                                     # near-vertical light: flat faces brightest (x1.5), roof facets away from the sun darker (x1.17), as in Revit's shaded plan
+        L2 = np.array([-0.19, 0.10, 0.975]); L2 /= np.linalg.norm(L2)
+        shade = 0.2 + 0.8 * np.clip((n * L2).sum(1), 0, 1) ** 1.5
+        if soft is not None:                                                     # terrain is smooth-shaded in Revit: slopes only tint the flat colour (Residential site: no near-black facets)
+            flat = 0.2 + 0.8 * float(np.clip(L2[2], 0, 1)) ** 1.5
+            sm = np.asarray(soft, bool)
+            shade = np.where(sm, flat + 0.3 * (shade - flat), shade)
+    col = np.clip(colors * (shade * gain)[:, None], 0, 255).astype(np.uint8)
     # near-plane clipping: drop triangles with any vertex behind 0.1 ft (cheap; entourage rarely crosses the eye)
     keep = (D > 0.1).all(1)
     X, Y, D, col, alphas = X[keep], Y[keep], D[keep], col[keep], np.asarray(alphas, float)[keep]
@@ -66,14 +73,75 @@ def render(tris, colors, alphas, eye, right, up, fwd, tan_x, tan_y, width_px, pe
     # background: sky gradient (top -> horizon), ground below the horizon when the camera is level-ish
     t = np.linspace(0, 1, H)[:, None, None]
     img[:] = (np.array(sky[0]) * (1 - t) + np.array(sky[1]) * t).astype(np.uint8)
+    if horizon and perspective:
+        # per-row elevation of the camera ray: sky gradient (zenith -> horizon) above the horizon, ground colour below it
+        yv = (0.5 - (np.arange(H) + 0.5) / H) * 2 * tan_y + centre[1]
+        dz = fwd[2] + yv * up[2]
+        tt = np.clip(1 - dz / 0.38, 0, 1)[:, None]
+        rows = (np.array(sky[0]) * (1 - tt) + np.array(sky[1]) * tt)
+        rows[dz < 0] = ground
+        img[:] = rows[:, None, :].astype(np.uint8)
     if len(px):
         _raster(np.ascontiguousarray(px), np.ascontiguousarray(py), np.ascontiguousarray(iz), np.ascontiguousarray(col), np.ascontiguousarray(alphas), W, H, zb, img)
+    if plan and os.environ.get('RVT_PLAN_SHADOW', '1') == '1' and len(px):
+        # cast shadows of what stands above the ground (Revit's shaded plan: dark band right of / below the building): every triangle is projected along the light
+        # (vertex shift proportional to its height, so vertical walls sweep a band), the mask darkens only surfaces lying low (ground, pads, paving)
+        from PIL import Image as _I, ImageDraw
+        zt = (-rel @ fwd)[keep][order] if False else None
+        hgt = (tris[:, :, 2])[keep][order]
+        tall = hgt.max(1) > 1.0
+        if caster is not None: tall &= np.asarray(caster)[keep][order]
+        if tall.any():
+            kx, ky = SHADOW_K
+            m = _I.new('L', (W, H), 0); dr = ImageDraw.Draw(m)
+            ppm = W / (2 * ortho_half[0])                                  # pixels per foot
+            for t in np.nonzero(tall)[0]:
+                poly = [(float(px[t, k] + kx * hgt[t, k] * ppm), float(py[t, k] + ky * hgt[t, k] * ppm)) for k in range(3)]
+                dr.polygon(poly, fill=255)
+            mk = np.asarray(m) > 0
+            surf_z = eye[2] - 1.0 / np.maximum(zb, 1e-6)                    # height of the visible surface (zb = 1 / depth)
+            low = (zb > 0) & (surf_z < 4.0)
+            sh = mk & low
+            img[sh] = (img[sh].astype(float) * SHADOW_DARK).astype(np.uint8)
     from PIL import Image
     bio = io.BytesIO(); Image.fromarray(img).save(bio, 'PNG', optimize=False, compress_level=3)
     return bio.getvalue(), W, H
 
 
+SHADOW_K = (0.21, 0.15)          # screen px shift per foot of height as a fraction of a pixel-per-foot: x right, y down (Commercial cover sheet site: shadow 4.4 ft right of / 4 ft below a 26 ft building)
+SHADOW_DARK = 0.42
 SITE_CATS = {-2001340, -2001360}                                   # topography, planting?: green when no material colour
+
+
+def view_background(drawer, vid):
+    """ViewDisplayMgr.m_background of a view (m_type 0 none, 257 / 512 sky), {} when absent"""
+    try: return dict(drawer.f.rec(vid)['fields']['m_pViewDisplayMgr']['obj'].get('m_background') or {})
+    except Exception: return {}
+
+
+def has_sky(drawer, v):
+    """perspective 3D view with a sky background (Commercial 'Section Perspective': hidden-line style in the file, Revit's sheet export shows grey shaded surfaces under a dark blue sky)"""
+    return v.get('kind') == '3d' and (v.get('crop') or {}).get('proj_method') == 2 and view_background(drawer, v['id']).get('m_type') == 512 and os.environ.get('RVT_SKYVIEW', '1') == '1'
+
+
+def _clip_section_box(v, T, C, A):
+    """cut triangles at the section box planes, keeping each triangle's colour / alpha (groups by colour)"""
+    sb = v.get('section_box') or {}
+    if not sb.get('on'): return T, C, A
+    from .viewdraw import _clip_tris_halfspace
+    o = np.asarray(sb['origin'], float); B = np.asarray(sb['basis'], float)
+    key = np.concatenate([C, A[:, None]], 1); uk, inv = np.unique(key, axis=0, return_inverse=True)
+    outT, outC, outA = [], [], []
+    for g in range(len(uk)):
+        t = T[inv.ravel() == g]
+        for i in range(3):
+            hi, lo = sb['bounds'][i]; n = B[i]
+            t = _clip_tris_halfspace(t, n, float(o @ n + hi))
+            if len(t): t = _clip_tris_halfspace(t, -n, float(-(o @ n + lo)))
+            if not len(t): break
+        if len(t): outT.append(t); outC.append(np.tile(uk[g][:3], (len(t), 1))); outA.append(np.full(len(t), uk[g][3]))
+    if not outT: return T[:0], C[:0], A[:0]
+    return np.concatenate(outT), np.concatenate(outC), np.concatenate(outA)
 
 
 def view_image(drawer, vid, width_px=1600, max_tris=2_000_000):
@@ -81,11 +149,17 @@ def view_image(drawer, vid, width_px=1600, max_tris=2_000_000):
     got = collect(drawer, vid, max_tris)
     if got is None: return None
     T, C, A, (O, X, Y, Z, c, persp), _K = got
+    v_ = drawer.doc['views'][vid]
+    T, C, A = _clip_section_box(v_, T, C, A)
+    if not len(T): return None
+    hlr_sky = view_background(drawer, vid).get('m_type') == 512
+    if hlr_sky: C = np.full_like(C, 255.0)           # hidden-line style: surfaces are neutral (white, shaded by the light) not material coloured
+    sky = ((36, 62, 112), (125, 155, 195)) if hlr_sky else ((176, 197, 218), (232, 238, 244))      # Revit's 'sky' background: dark blue at the zenith fading to the horizon
     b = c.get('bounds') or [[1, -1], [1, -1], [0, 0]]
     if persp:
         # crop bounds of a perspective view = tangents on the unit-distance plane: [[right, left], [top, bottom], ...]
         pd = c.get('proj_dist') or 0.1                           # distance of the crop plane from the eye (feet)
-        png, w, h = render(T, C, A, O, X, Y, Z, (b[0][0] - b[0][1]) / 2 / pd, (b[1][0] - b[1][1]) / 2 / pd, width_px, True,
+        png, w, h = render(T, C, A, O, X, Y, Z, (b[0][0] - b[0][1]) / 2 / pd, (b[1][0] - b[1][1]) / 2 / pd, width_px, True, sky=sky, horizon=hlr_sky, ground=(160, 160, 150),
                            centre=((b[0][0] + b[0][1]) / 2 / pd, (b[1][0] + b[1][1]) / 2 / pd))
     else:
         half = ((b[0][0] - b[0][1]) / 2, (b[1][0] - b[1][1]) / 2)
@@ -115,7 +189,7 @@ def collect(drawer, vid, max_tris=2_000_000):
         except Exception: continue
         cid = info['cat']
         base = (drawer.doc['categories'].get(cid) or {}).get('proj') or {}
-        if not pieces['solids']:
+        if not pieces['solids'] or (info['cls'] == 'Text3dElem' and os.environ.get('RVT_TEXT3D_MESH', '1') == '1'):      # model text: the walker adds a 16-triangle bounding box next to the letters (Commercial 'Pharmacy' sign: a solid red slab); the reader's element mesh is the exact letter solid
             # no own B-rep solids (topography polymesh, family instances whose geometry sits in the symbol): the reader's element mesh
             try:
                 import rvt_elemmesh as E
@@ -123,7 +197,15 @@ def collect(drawer, vid, max_tris=2_000_000):
             except Exception: tr = np.zeros((0, 3, 3))
             if len(tr):
                 col = (110, 150, 105) if cid in SITE_CATS else (base.get('color') if base.get('color') and any(base.get('color')) else (170, 170, 170))
-                T.append(tr); C.append(np.tile(np.asarray(col, float), (len(tr), 1))); A.append(np.ones(len(tr))); K.append(np.full(len(tr), cid))
+                cc = np.tile(np.asarray(col, float), (len(tr), 1))
+                try:                                          # per-triangle material of the element mesh (topography subregions: Site - Grass / Sidewalk, pads: Asphalt ...)
+                    mt = m.get('mat') or []
+                    if len(mt) == len(tr) and os.environ.get('RVT_MESHMAT', '1') == '1':
+                        for k in set(x for x in mt if x is not None):
+                            mc = (mats.get(int(k)) or {}).get('color')
+                            if mc and any(mc): cc[np.asarray([x == k for x in mt])] = mc
+                except Exception: pass
+                T.append(tr); C.append(cc); A.append(np.ones(len(tr))); K.append(np.full(len(tr), cid))
             continue
         for s in pieces['solids']:
             if not drawer.drawable_gs(s.get('gs')): continue
@@ -167,11 +249,15 @@ def plan_image(drawer, vid, width_px=2400, max_tris=2_000_000):
     T, C, A, (O, X, Y, Z, c, persp), K = got
     b = c.get('bounds')
     if not b or not len(T): return None
+    if os.environ.get('RVT_PLAN_PLANTING', '0') != '1':           # planting is drawn as symbol linework in Revit's plan, not as shaded foliage meshes
+        keep = K != -2001360
+        if keep.any(): T, C, A, K = T[keep], C[keep], A[keep], K[keep]
     # collect() flips the stored direction for 3D views (which point at the eye); a plan's already looks down -Z after the same flip
     eye = np.array([O[0], O[1], float(T[:, :, 2].max()) + 10.0]); fwd = np.array([0.0, 0.0, -1.0])
     half = ((b[0][0] - b[0][1]) / 2, (b[1][0] - b[1][1]) / 2); ctr = ((b[0][0] + b[0][1]) / 2, (b[1][0] + b[1][1]) / 2)
     png, w, h = render(T, C, A, eye, X, Y, fwd, None, None, width_px, False, ortho_half=half, centre=ctr,
-                       sky=((255, 255, 255), (255, 255, 255)))
+                       sky=((255, 255, 255), (255, 255, 255)), gain=float(os.environ.get('RVT_PLAN_GAIN', '1.6')), plan=True,
+                       caster=~np.isin(K, [-2001340, -2001263, -2001360, -2000032, -2001392, -2001370]), soft=np.isin(K, [-2001340, -2001263]))      # ground-level categories (topography, pads, floors, sweeps) cast no shadow      # Revit's shaded plan shows material colours x ~1.5 on horizontal faces (Commercial site: Asphalt 170 -> white, Sidewalk 140 -> 200, Grass 78/100/75 -> 121/148/110)
     return png, w, h
 
 

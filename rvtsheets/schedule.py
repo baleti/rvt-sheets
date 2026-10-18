@@ -247,7 +247,7 @@ class Schedules:
         def line(a, b, heavy=False):
             if d.get('grid_lines') == 0: return
             gs_ = d['medium_gs'] if heavy == 'mid' and d.get('outline') and d.get('medium_gs') is not None and os.environ.get('RVT_SCHED_OUTLINE', '1') == '1' else d['outline_gs'] if heavy and d.get('outline') and d.get('outline_gs') is not None and os.environ.get('RVT_SCHED_OUTLINE', '1') == '1' else d['grid_gs']
-            out.append({'t': 'line', 'pts': [[a[0], a[1], 0], [b[0], b[1], 0]], 'gs': gs_, 'cond': [], 'elem': sched_id})
+            out.append({'t': 'line', 'pts': [[a[0], a[1], 0], [b[0], b[1], 0]], 'gs': gs_, 'cond': [], 'elem': sched_id, 'w_min': 0.24 if os.environ.get('RVT_SCHED_LW', '1') == '1' else 0.0})      # Revit PDFs print every schedule grid / outline line at least 0.24 mm (Commercial Door Schedule, How Do I, Snowdon Sheet Index)
         def text(s, x, yy, w, h, font, halign=1):
             size, name, bold = font
             size *= 0.72 * self.em_k(d)
@@ -274,7 +274,7 @@ class Schedules:
             y -= hh
         hb = d['body_h'] or d['fonts']['m_bodyTextTypeId'][0] * 2.2
         if d.get('grid_lines') == 0: hb = max(hb, d['fonts']['m_bodyTextTypeId'][0] * (1.917 if os.environ.get('RVT_SCHED_GL', '1') == '1' else 1.2 * 0.72 * 1.8))   # gridless lists: rows follow the larger text
-        elif os.environ.get('RVT_SCHED_FIT', '1') == '1': hb = max(hb, d['fonts']['m_bodyTextTypeId'][0] * (1.917 if self.old_em(d) else 1.597 * self.em_k(d)))      # Door Schedule PDF: body pitch 4.565 mm = 1.917 x 3/32in, header rows 6.09 mm = 1.917 x 1/8in, Sheet List 12.17 mm = 1.917 x 1/4in   # Revit's rows follow the text (2020 Window Schedule export: pitch 0.0199 ft vs stored 0.0139)
+        elif os.environ.get('RVT_SCHED_FIT', '1') == '1': hb = max(hb, d['fonts']['m_bodyTextTypeId'][0] * (1.917 if (self.old_em(d) or os.environ.get('RVT_SCHED_P', 'new') == 'new') else 1.597 * self.em_k(d)))      # Door Schedule PDF: body pitch 4.565 mm = 1.917 x 3/32in, header rows 6.09 mm = 1.917 x 1/8in, Sheet List 12.17 mm = 1.917 x 1/4in   # Revit's rows follow the text (2020 Window Schedule export: pitch 0.0199 ft vs stored 0.0139)
         hh = hb
         if d.get('grid_lines') != 0 and os.environ.get('RVT_SCHED_FIT', '1') == '1' and os.environ.get('RVT_SCHED_HDR', '1') == '1':
             bs_, hs_ = d['fonts']['m_bodyTextTypeId'][0], d['fonts']['m_headerTextTypeId'][0]
@@ -307,8 +307,17 @@ class Schedules:
                 x += gw; i = j
             y -= 2 * h; line((x0, y), (x0 + W, y), 'mid'); header_top = y + 2 * h
         elif d['show_headers']:
-            h = hh; x = x0
-            for f in d['fields']: text(f['heading'], x, y, f['width'], h, d['fonts']['m_headerTextTypeId']); x += f['width']
+            h = hh; x = x0; hf = d['fonts']['m_headerTextTypeId']; wrap = os.environ.get('RVT_SCHED_WRAP', '1') == '1'
+            lp = hf[0] * self.em_k(d) * 1.26 if wrap else 0.0          # headings wider than their column wrap at the space (Snowdon Sheet Index PDF: 'Sheet' / 'Number'); the row grows by a text line and the lines sit at its bottom
+            def lines_of(f):
+                hd = f['heading']
+                if wrap and ' ' in hd and len(hd) * 0.56 * hf[0] * self.em_k(d) > f['width'] - 0.004: return hd.split(' ', 1) if hd.count(' ') == 1 else [hd[:hd.rfind(' ')], hd[hd.rfind(' ') + 1:]]
+                return [hd]
+            nl = max(len(lines_of(f)) for f in d['fields']); extra = (nl - 1) * lp; h = hh + extra
+            for f in d['fields']:
+                ls = lines_of(f)
+                for i, t_ in enumerate(ls): text(t_, x, y - extra + (len(ls) - 1 - i) * lp, f['width'], hh, hf)
+                x += f['width']
             line((x0, y), (x0 + W, y), 'mid'); y -= h; line((x0, y), (x0 + W, y), 'mid')
         gap = None
         if d['show_headers'] and d.get('grid_lines', 1) and d.get('initial_spacer') and os.environ.get('RVT_SCHED_FIT', '1') == '1':

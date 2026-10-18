@@ -86,6 +86,15 @@ class Decoder:
             out[r['id']] = {'name': ft.get('m_name'), 'size': ft.get('m_size'), 'color': color(ft.get('m_color'))}
         return out
 
+    def _text_width_factor(self, fl):
+        """type parameter 'Width Factor' (id -1006327 = 4293960969) of a text / tag type; 1.0 when absent"""
+        try:
+            for it in (ob(fl.get('m_pParamValueSetDouble')) or {}).get('m_paramSet') or []:
+                pid = self.E(it.get('m_paramId'))
+                if pid in (4293960969, -1006327): return float(it.get('m_value') or 1.0)
+        except Exception: pass
+        return 1.0
+
     def text_types(self):
         out = {}
         for c in ('TextNoteAttributes', 'TagNoteAttributes'):
@@ -93,7 +102,7 @@ class Decoder:
                 fl = r['fields']; la = fl.get('m_lineAndTextAttr') or {}
                 out[r['id']] = {'class': c, 'name': path(fl, 'm_symbolInfo', 'm_name'), 'font': self.E(la.get('m_fontId')), 'cat': self.E(la.get('m_categoryId')),
                                 'opaque': la.get('m_background'), 'bold': la.get('m_bBold'), 'italic': la.get('m_bItalic'), 'underline': la.get('m_bUnderline'),
-                                'leader_offset': fl.get('m_leaderOffsetSheet')}
+                                'leader_offset': fl.get('m_leaderOffsetSheet'), 'width_scale': self._text_width_factor(fl)}
         return out
 
     # ------------------------------------------------------------------ phases, filters

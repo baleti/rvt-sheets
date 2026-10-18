@@ -59,7 +59,7 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
         vp = item['vp']; v = doc['views'].get(vp['view'])
         if v['kind'] not in ('plan', 'section', 'drafting', 'legend', '3d'):
             o = vp['offset']; s.text({'text': '[%s view not drawn yet: %s]' % (v['kind'], v['name']), 'origin': [o[0], o[1], 0], 'size': 2.5 / FT_MM}); continue
-        if v['kind'] == '3d' and (v.get('crop') or {}).get('proj_method') == 2 and not (vp.get('scale') or 0) and shaded3d.is_shaded(v):
+        if v['kind'] == '3d' and (v.get('crop') or {}).get('proj_method') == 2 and not (vp.get('scale') or 0) and (shaded3d.is_shaded(v) or shaded3d.has_sky(vd, v)):
             # perspective 3D: shaded image placed in the viewport (size = crop tangents x D ft, image centre = viewport offset + D x crop centre
             # tangents; D is the view's own DBView3d.m_scale: Commercial Cover Sheet 15.366, Section Perspective 10.163, Residential Front Yard 11.613,
             # all matching Revit's sheet exports - an earlier empirical constant 11.6 came from the Front Yard export alone)
@@ -89,7 +89,7 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
                     for p in item.get('title') or []: s.prim(p)
                     continue
             except Exception as ex: log('3d view %s failed: %r' % (v['id'], ex))
-        if v['kind'] == '3d' and (v.get('crop') or {}).get('proj_method') == 2 and not (vp.get('scale') or 0) and not shaded3d.is_shaded(v):
+        if v['kind'] == '3d' and (v.get('crop') or {}).get('proj_method') == 2 and not (vp.get('scale') or 0) and not shaded3d.is_shaded(v) and not shaded3d.has_sky(vd, v):
             # perspective hidden-line 3D (a section perspective): visible edges projected through the camera, placed like the shaded image above
             try:
                 res = shaded3d.persp_lines(vd, v['id'])

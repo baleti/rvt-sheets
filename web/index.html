@@ -48,6 +48,15 @@ stage.onwheel = e => { e.preventDefault(); const k = Math.exp(-e.deltaY * 0.0015
   tx = mx - (mx - tx) * k; ty = my - (my - ty) * k; z *= k; apply(); };
 let drag = null; stage.onmousedown = e => drag = [e.clientX - tx, e.clientY - ty]; onmouseup = () => drag = null;
 onmousemove = e => { if (drag) { tx = e.clientX - drag[0]; ty = e.clientY - drag[1]; apply(); } };
+// thin pens (under 0.2 mm paper) are drawn 1 screen pixel wide, medium pens (under 0.35 mm) 1.6 px, at every zoom like Revit's on-screen lines (0.076 mm at fit-to-screen is a faint 0.1 px grey line); ?hair=0 turns it off
+function hairlines(root) {
+  if (new URLSearchParams(location.search).get('hair') === '0') return;
+  for (const el of root.querySelectorAll('svg path[stroke-width]')) {
+    const w = parseFloat(el.getAttribute('stroke-width'));
+    if (w < 0.35 && Math.abs(w - 0.1) > 1e-6 && el.getAttribute('fill') === 'none') {      // 0.100 mm = fill pattern (hatch) lines: they stay light (1 px would make hatches solid at fit-to-screen)
+      el.setAttribute('vector-effect', 'non-scaling-stroke'); el.setAttribute('stroke-width', w < 0.2 ? '1' : '1.6'); }      // thin pens 1 px, medium pens 1.6 px, heavier pens keep scaling
+  }
+}
 const url = (k, i) => `${base}/api/${mid}/${k}/${i}.svg` + (D ? '?v=' + D.key : '');
 function markCached(k, i){ cached.add(k + '/' + i); const el = side.querySelector(`.it[data-k=${k}][data-i="${i}"]`); if (el) el.classList.add('c'); }
 
@@ -67,6 +76,7 @@ async function show(n){
   clearTimeout(timer); spin.style.display = 'none';
   if (my != seq) return;                                         // the user moved on meanwhile
   paper.innerHTML = txt || '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 40"><text x="5" y="20" font-size="6">could not load</text></svg>';
+  hairlines(paper);
   fit();
   const ms = Math.round(performance.now() - t);
   stext.textContent = `${it.label} (${ms} ms)`; badge.style.display = hit || ms < 300 ? 'inline' : 'none';

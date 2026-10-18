@@ -152,6 +152,7 @@ _SUBST = {'trebuchet ms': ('Noto Sans', 'regular', 1.068), 'georgia': ('Liberati
 
 
 def _font(name, bold):
+    if name in ('ARchitxt', 'Swis721 Lt BT') and os.environ.get('RVT_ARIAL_NARROW', 'arial') == 'arial': name = 'Arial'      # the Revit reference machines lack these fonts too and print Arial (Snowdon weld-symbol texts: Revit PDF = ArialMT)
     if name == 'Arial Narrow' and os.environ.get('RVT_ARIAL_NARROW', 'arial') == 'arial': name = 'Arial'      # see svg.font_stack
     k = (name, bold)
     if k not in _FONTS:
@@ -221,11 +222,13 @@ class ViewDrawer:
             wf = far - O[2] if Z[2] > 0 else O[2] - far
             return wc, wf, Z * (1 if Z[2] > 0 else 1)
         if kind == 'section' and crop.get('basis'):
+            pc = getattr(self, '_piece', None)
             B = np.asarray(crop['basis'], float); co = np.asarray(crop['origin'], float); b = crop['bounds']
             near = co + B[2] * b[2][1]; farp = co + B[2] * b[2][0]
             cu = (v.get('cutters') or {}).get('Cutter')
             if cu and cu.get('origin') is not None and os.environ.get('RVT_CUTTER', '1') == '1': near = np.asarray(cu['origin'], float)       # the view's own cut plane
             wc = float((near - O) @ Z)
+            if pc: wc = pc[2]
             wf = float((farp - O) @ Z) if (crop.get('active') or [[1, 1]] * 3)[2][0] else -1e9
             return wc, wf, Z
         return None, -1e9, Z
@@ -241,8 +244,92 @@ class ViewDrawer:
         patterns.WORLD_UV = None
         if v and os.environ.get('RVT_PAT_ORIGIN', '1') == '1' and v.get('kind') in ('plan', 'section'):
             O_, X_, Y_, _ = self.frame(v); patterns.WORLD_UV = (float(-O_ @ X_), float(-O_ @ Y_))       # model patterns are anchored at the world origin, not the view origin
-        try: return self._draw(vid, *a, **k)
+        try:
+            pieces = self._jog_pieces(v) if v and not getattr(self, '_piece', None) else None
+            if pieces: return self._draw_jogged(vid, v, pieces, a, k)
+            return self._draw(vid, *a, **k)
         finally: patterns.CLIP = None; patterns.WORLD_UV = None
+
+    def _jog_pieces(self, v):
+        """jogged section line (viewer m_frontCut with more than 2 points): [(u0, u1, w)] pieces parallel to the view plane, each with its own cut plane depth w; None for ordinary sections
+        and for callouts (they carry their own cutter)"""
+        if v.get('kind') != 'section' or v.get('class') != 'DBViewSection' or v.get('cutters') or os.environ.get('RVT_JOG', '1') != '1': return None
+        try:
+            r = self.f.rec(v['viewer']); fc = r['fields'].get('m_frontCut') if r else None
+        except Exception: return None
+        if not fc or len(fc) < 3: return None
+        O, X, Y, Z = self.frame(v)
+        P = [((np.asarray(q, float) - O) @ X, (np.asarray(q, float) - O) @ Z) for q in fc]
+        segs = [(min(a[0], b[0]), max(a[0], b[0]), 0.5 * (a[1] + b[1])) for a, b in zip(P, P[1:]) if abs(a[1] - b[1]) < 1e-6 and abs(a[0] - b[0]) > 1e-6]
+        if len(segs) < 2: return None
+        segs.sort()
+        segs[0] = (-1e9, segs[0][1], segs[0][2]); segs[-1] = (segs[-1][0], 1e9, segs[-1][2])
+        return segs
+
+    def _draw_jogged(self, vid, v, pieces, a, k):
+        """jogged section: every straight piece of the section line cuts at its own plane; draw the view once per piece and keep each drawing's model content within the piece's u range
+        (annotations, datums and text are taken once, from the first drawing that has them)"""
+        from shapely.geometry import box, LineString
+        merged = None; seen = set(); MODEL = ('cut', 'cut_fill', 'projection', 'symbolic', 'symbolic_fill', 'surface_fill', 'underlay', 'room_fill')
+        for (u0, u1, w) in pieces:
+            self._piece = (u0, u1, w)
+            try: d = self._draw(vid, *a, **k)
+            finally: self._piece = None
+            bx = box(u0, -1e9, u1, 1e9); keep = []
+            for p in d['prims']:
+                if p.get('layer') in MODEL and p['t'] in ('cut', 'segs', 'line', 'fill'):
+                    keep += self._clip_prim_u(p, bx, u0, u1)
+                else:
+                    key = (p.get('elem'), p['t'], p.get('layer'), p.get('part'), str(p.get('origin') or (p.get('pts') or [None])[0])[:60])
+                    if merged is None or key not in seen: seen.add(key); keep.append(p)
+            if merged is None: merged = dict(d, prims=keep)
+            else:
+                merged['prims'] += keep
+                for kk, vv in d['stats'].items():
+                    if isinstance(vv, (int, float)): merged['stats'][kk] = merged['stats'].get(kk, 0) + vv
+        merged['stats']['jog_pieces'] = len(pieces)
+        return merged
+
+    @staticmethod
+    def _clip_prim_u(p, bx, u0, u1):
+        from shapely.geometry import LineString, Polygon
+        def clip_line(pts):
+            ls = LineString([q[:2] for q in pts])
+            c = ls.intersection(bx)
+            return [list(g.coords) for g in getattr(c, 'geoms', [c]) if g.geom_type == 'LineString' and not g.is_empty and len(g.coords) > 1]
+        try:
+            if p['t'] == 'line':
+                parts = clip_line(p['pts'])
+                return [dict(p, pts=[list(q) for q in part]) for part in parts]
+            if p['t'] == 'segs':
+                out = []
+                for s_ in p['segs']:
+                    if u0 <= min(s_[0][0], s_[1][0]) and max(s_[0][0], s_[1][0]) <= u1: out.append(s_)
+                    else:
+                        for part in clip_line(s_): out.append([list(part[0]), list(part[-1])])
+                return [dict(p, segs=out)] if out else []
+            if p['t'] in ('cut', 'fill'):
+                loops = []
+                for l in p.get('loops') or []:
+                    if len(l) < 3: continue
+                    pg = Polygon([q[:2] for q in l])
+                    if not pg.is_valid: pg = pg.buffer(0)
+                    c = pg.intersection(bx)
+                    for g in getattr(c, 'geoms', [c]):
+                        if g.geom_type == 'Polygon' and g.area > 1e-9: loops.append([list(q) for q in g.exterior.coords])
+                segs = None
+                if p['t'] == 'cut':
+                    segs = []
+                    for s_ in p.get('segs') or []:
+                        if u0 <= min(s_[0][0], s_[1][0]) and max(s_[0][0], s_[1][0]) <= u1: segs.append(s_)
+                        else:
+                            for part in clip_line(s_): segs.append([list(part[0]), list(part[-1])])
+                if not loops and not segs: return []
+                q = dict(p, loops=loops)
+                if segs is not None: q['segs'] = segs
+                return [q]
+        except Exception: return [p]
+        return [p]
 
     def _draw(self, vid, px_mm=0.25, max_elems=None, skip_classes=(), skip_cats=()):
         t0 = time.time()
@@ -275,7 +362,7 @@ class ViewDrawer:
         W.is_2d = lambda e: v['kind'] == 'drafting' or _is_anno(e) or self.vis.info.info.get(e, {}).get('cat') == -2002000     # detail items
         res = Resolver(self.doc, ev, scale)
         rcp_under = self.underlay_range(v, O, Z) if is_rcp else None
-        elems = self.vis.elements(vid)
+        elems, self._vis_why = self.vis.elements(vid, explain=True)
         self._vis_elems = set(elems)                 # tags of elements that are not in this view are not drawn (rst basic cross section: CHS / foundation tags)
         prims = []; solids = []      # per element: (eid, cat, tris_uvw, gs)
         occ_owner = []; carve_boxes = {}
@@ -587,6 +674,18 @@ class ViewDrawer:
                 ov2 = dict(ov, _mat=m) if m is not None else ov
                 if (v['kind'] in ('section', '3d') or (v['kind'] == 'plan' and cid == -2000032 and not is_rcp)) and len(T) > 2 and T[2] is not None: ov2 = dict(ov2, _frs=T[2])   # plans: floor top surface pattern (Commercial 'Sand' dots under the room colours)
                 solids.append((eid, cid, uvw, fid, s.get('gs'), ov2))
+            if info['cls'] == 'BaseRailing' and v['kind'] in ('section', 'plan') and os.environ.get('RVT_RAILMESH', '1') == '1':
+                # railings: the balusters / rails live in symbol instances that the walker leaves without solids; the reader's element mesh has them (Commercial Building Section A-FLOR-HRAL: the mezzanine railing rails)
+                try:
+                    import rvt_elemmesh as E_
+                    m_ = E_.element_mesh(self.f.g, eid); tr_ = np.asarray(m_.get('tris') or [], float).reshape(-1, 3, 3)
+                    own_ = sum(len(x[2]) for x in solids if x[0] == eid)
+                    if len(tr_) > own_:
+                        solids = [x for x in solids if x[0] != eid]      # the mesh carries the rails as well as the posts the walker found
+                        gs_ = ((self.doc['categories'].get(cid) or {}).get('proj') or {}).get('gstyle')
+                        fid_ = np.asarray(m_.get('fid') if m_.get('fid') is not None and len(m_.get('fid')) == len(tr_) else np.arange(len(tr_)))
+                        solids.append((eid, cid, (tr_ - O) @ Mv.T, fid_, gs_, ov)); self.stats['railing_mesh'] += 1
+                except Exception: self.stats['railing_mesh_error'] += 1
         if datum_ids:
             from .datums import Datums
             from .sheet import SheetComposer
@@ -646,10 +745,13 @@ class ViewDrawer:
             bx = [max(bx[0], cr[0] - mg), max(bx[1], cr[1] - mg), min(bx[2], cr[2] + mg), min(bx[3], cr[3] + mg)]
             if bx[0] >= bx[2] or bx[1] >= bx[3]: bx = [P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max()]
         db = DepthBuffer(bx[0], bx[1], bx[2], bx[3], px)
+        noocc_all_ = os.environ.get('RVT_NOOCC') == 'all'; noocc_ = {int(x) for x in os.environ.get('RVT_NOOCC', '').split(',') if x and x != 'all'}
         for c in clipped:
+            if noocc_all_ or c[1] in noocc_: continue
+            if os.environ.get('RVT_ONLYOCC') and str(c[1]) not in os.environ['RVT_ONLYOCC'].split(','): continue
             if c[1] == -2003500 and v['kind'] == 'section': continue        # stacked-wall parents duplicate their child walls (and cover curtain-wall storefronts): not occluders (Commercial east/south elevation DXF R 0.66/0.69 -> 0.80/0.85)
             db.add(self._carve_tris(c[2], carve_boxes[c[0]]) if c[0] in carve_boxes else c[2])
-        for T in occluders:
+        for T in ([] if os.environ.get('RVT_NOOCC2') else occluders):
             if cut_w is not None: T = _clip_tris_halfspace(T, np.array([0, 0, 1.0]), cut_w)
             if wf is not None and wf > -1e8: T = _clip_tris_halfspace(T, np.array([0, 0, -1.0]), -wf)
             if len(T): db.add(T)
@@ -773,9 +875,11 @@ class ViewDrawer:
                         p_['segs'] = ns
             except Exception: self.stats['wall_wins_error'] += 1
         # cut caps (the cut faces at the cut plane) hide what lies below them
-        for loops2 in caps:
+        for ci_, loops2 in enumerate(caps):
+            if os.environ.get('RVT_CAPSKIP') and (os.environ['RVT_CAPSKIP'] == 'all' or ci_ in [int(x) for x in os.environ['RVT_CAPSKIP'].split(',')]): continue
             reg = patterns.region([l for l in loops2 if len(l) > 3 and np.allclose(l[0], l[-1], atol=1e-6)])
             if reg is None: continue
+            if os.environ.get('RVT_DBGCAPS'): print('CAP', [len(l) for l in loops2], np.round(reg.bounds, 1).tolist(), round(reg.area, 1))
             try:
                 import mapbox_earcut as earcut
                 for poly in getattr(reg, 'geoms', [reg]):
@@ -790,6 +894,12 @@ class ViewDrawer:
         eps = px * 2.0
         for eid, cid, T2, uvw, fid, gs, ov in clipped:
             E = _feature_edges(T2, None)
+            if (cid == -2000126 or os.environ.get('RVT_ALLSIL', '1') == '1') and v['kind'] == 'section' and os.environ.get('RVT_RAILSIL', '1') == '1':
+                # railing rods are smooth cylinders: only their end rings are feature edges; Revit draws the rod silhouettes (long lines: Commercial Building Section A-FLOR-HRAL)
+                try:
+                    Es = _silhouette_edges(T2) if len(T2) <= 150000 else np.zeros((0, 2, 3))      # pure-python edge map: skip huge single elements
+                    if len(Es): E = np.concatenate([E, Es]) if len(E) else Es
+                except Exception: self.stats['railing_sil_error'] += 1
             if cut_w is not None: E = E[~((np.abs(E[:, 0, 2] - cut_w) < 1e-6) & (np.abs(E[:, 1, 2] - cut_w) < 1e-6))]       # edges ON the cut plane belong to the cut outline
             if cid in UNOBSCURED_CATS or (cid == -2001300 and v['kind'] == 'plan' and (v.get('range') or {}).get('bottom') is not None and (self.vis.info.bbox(eid) is not None) and self.vis.info.bbox(eid)[1][2] >= v['range']['bottom'] - 1e-6 and self.vis.info.bbox(eid)[1][2] >= (v['range'].get('cut') or 0) - 12.0):                 # rebar: drawn through its host (Revit 'view unobscured' in the sample views); foundation slabs inside a plan's primary range show through the slab above them (Snowdon Parking pile caps / strip footings)
                 vis = [(a, b) for a, b in E if np.hypot(*(b[:2] - a[:2])) > px * 0.5]

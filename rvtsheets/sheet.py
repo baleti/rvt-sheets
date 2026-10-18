@@ -93,7 +93,7 @@ class SheetComposer:
         fl = n.get('flags') or 0
         return {'t': 'text', 'text': text, 'origin': n['origin'], 'x': n['base'], 'y': n['up'], 'size': font.get('size') or 3 / FT_MM, 'font': font.get('name') or 'Arial',
                 'bold': tt.get('bold'), 'italic': tt.get('italic'), 'halign': self._halign(fl), 'valign': self._valign(fl), 'anchor': True, 'flags': fl, 'box': [n.get('width') or 0, n.get('height') or 0],
-                'gs': None, 'cond': [], 'label': True}
+                'gs': None, 'cond': [], 'label': True, 'width_scale': tt.get('width_scale') or 1.0}
 
     @staticmethod
     def _halign(flags):

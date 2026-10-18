@@ -119,15 +119,15 @@ def text_svg(p, tx, scale):
     import math
     from .decode import FT_MM
     x, y = tx(*p['origin'][:2])
-    from .svg import EM, LINE_PITCH, revit_pt, first_baseline, rtf_first
+    from .svg import EM, LINE_PITCH, line_pitch, revit_pt, first_baseline, rtf_first, box_slack
     size_mm = revit_pt((p.get('size') or 0.01) * FT_MM / scale * EM)
     ang = -math.degrees(math.atan2(p['x'][1], p['x'][0])) if p.get('x') else 0.0
     if 85 < abs(ang) < 95 or ang < -95 or ang > 95:
         pass
-    lines = p['text'].split('\n'); lh = size_mm * LINE_PITCH
+    lines = p['text'].split('\n'); lh = size_mm * line_pitch(p.get('font'))
     ha = {0: 'start', 1: 'middle', 2: 'end'}.get(p.get('halign') or 0, 'start')
     asc = size_mm * 0.9; n = len(lines); dx = 0.0
-    if p.get('anchor') and 'rtf' not in p: first = first_baseline(p.get('valign'), n, lh, size_mm, p.get('font'))
+    if p.get('anchor') and 'rtf' not in p: first = first_baseline(p.get('valign'), n, lh, size_mm, p.get('font'), box_slack(p, size_mm, p.get('font')))
     else:
         # saved-graphics rich text (family labels such as the Help Button '?'): origin = top-left of the layout box, alignment inside the box
         bw = (p.get('box') or [0, 0])[0] * FT_MM / scale

@@ -16,6 +16,7 @@ SKETCH_CATS = {-2000045, -2000954}            # <Sketch> lines, railing path ext
 AREA_BOUNDARY = -2000079
 TYPE_FLAG = {'Annotation': 'm_annotationsExcluded', 'Model': 'm_modelsExcluded', 'AnalyticalModel': 'm_analyticalModelsExcluded'}
 
+TOUCH = float(os.environ.get('RVT_TOUCH', '-1e-6'))
 PHASE_IDX = {'existing': 2, 'demolished': 3, 'new': 4, 'temporary': 5}
 DONT_SHOW, BY_CATEGORY, OVERRIDDEN = 0, 1, 2
 
@@ -43,7 +44,7 @@ class ElementInfo:
         return bb
 
 
-ABOVE_CUT_CATS = {-2001320, -2001330, -2009000, -2001300, -2009030, -2000032}
+ABOVE_CUT_CATS = ({-2000011} if os.environ.get('RVT_WALL_ABOVE', '1') == '1' else set()) | {-2001320, -2001330, -2009000, -2001300, -2009030, -2000032}
 
 
 class Visibility:
@@ -254,6 +255,7 @@ class Visibility:
         kind = v['kind']; crop = v.get('crop') or {}
         if kind == 'plan' and v.get('range'):
             r = v['range']; zlo = min(x for x in (r.get('depth'), r.get('bottom')) if x is not None); zhi = r.get('top')
+            if r.get('plan_view_type') == 2 and r.get('cut') is not None and os.environ.get('RVT_CEILING_RANGE', '1') == '1': zlo = r['cut']       # reflected ceiling plans look up: elements from the cut plane to the top (Residential 'attic' ceiling plan 9952 lists 0 of the 15 predicted walls below its cut)
             ub = r.get('underlay_bottom'); ut = r.get('underlay_top')
             if ub is not None and ut is not None and abs(ub) < 1e8 and abs(ut) < 1e8:      # underlay range (shown halftone)
                 zlo = min(zlo, ub); zhi = max(zhi, ut)
@@ -262,7 +264,7 @@ class Visibility:
             if crop.get('crop_active'):
                 cut = self._crop_test(crop, use_z=False)
             def test(bb):
-                if bb[1][2] < zlo - 1e-6 or bb[0][2] > zhi + 1e-6: return False
+                if bb[1][2] < zlo + TOUCH or bb[0][2] > zhi + 1e-6: return False         # an element whose top only touches the bottom of the range (floors on the level below, stair runs ending at the level) is outside it
                 return cut(bb) if cut else True
             return test
         sb = v.get('section_box')
@@ -273,6 +275,11 @@ class Visibility:
             cu = (v.get('cutters') or {}).get('Cutter')
             if kind == 'section' and cu and cu.get('origin') is not None and os.environ.get('RVT_CUTTER', '1') == '1':
                 near = float((np.asarray(cu['origin'], float) - np.asarray(crop['origin'], float)) @ np.asarray(crop['basis'][2], float))       # the view's own cut plane (callouts of a jogged section sit on different pieces)
+            if kind == 'section' and not cu and v.get('class') == 'DBViewSection' and os.environ.get('RVT_JOG', '1') == '1':
+                pcs = self._jog_pieces(v, crop)
+                if pcs:
+                    tests = [self._crop_test(crop, use_z=True, xy=crop.get('crop_active'), near=nz, xr=xr) for nz, xr in pcs]
+                    return lambda bb: any(t(bb) for t in tests)
             return self._crop_test(crop, use_z=kind == 'section', xy=crop.get('crop_active'), near0=kind == 'section' and near is None and v.get('id') not in self._callout_views(), near=near)
         return lambda bb: True
 
@@ -329,11 +336,30 @@ class Visibility:
             self._cv = {self.dec.f.eid(r['fields'].get('m_dbViewId')) for r in self.dec.f.recs('Section') if r['fields'].get('m_sectionCreationMethod') == 202}
         return self._cv
 
-    def _crop_test(self, crop, use_z=True, xy=True, z=True, near0=False, near=None):
+    def _jog_pieces(self, v, crop):
+        """jogged section line (viewer m_frontCut): [(near plane z in the crop frame, (x0, x1) range in the crop frame)] per straight piece"""
+        try:
+            r = self.dec.f.rec(v['viewer']); fc = r['fields'].get('m_frontCut') if r else None
+        except Exception: return None
+        if not fc or len(fc) < 3: return None
+        O = np.asarray(v['origin'], float); X = np.asarray(v['right'], float); Z = np.asarray(v['dir'], float)
+        co = np.asarray(crop['origin'], float); B = np.asarray(crop['basis'], float)
+        P = [((np.asarray(q, float) - O) @ X, (np.asarray(q, float) - O) @ Z) for q in fc]
+        segs = sorted((min(a[0], b[0]), max(a[0], b[0]), 0.5 * (a[1] + b[1])) for a, b in zip(P, P[1:]) if abs(a[1] - b[1]) < 1e-6 and abs(a[0] - b[0]) > 1e-6)
+        if len(segs) < 2: return None
+        out = []
+        for i, (u0, u1, w) in enumerate(segs):
+            pt = O + Z * w
+            x0 = -1e9 if i == 0 else float((O + X * u0 - co) @ B[0]); x1 = 1e9 if i == len(segs) - 1 else float((O + X * u1 - co) @ B[0])
+            out.append((float((pt - co) @ B[2]), (min(x0, x1), max(x0, x1))))
+        return out
+
+    def _crop_test(self, crop, use_z=True, xy=True, z=True, near0=False, near=None, xr=None):
         """oriented box test in the crop frame: x/y = crop region (when xy), z: near plane (bounds min) always for sections, far plane (bounds max) when active"""
         o = np.asarray(crop['origin'], float); B = np.asarray(crop['basis'], float); b = crop['bounds']
         lo = np.array([b[i][1] for i in range(3)], float); hi = np.array([b[i][0] for i in range(3)], float)
         if use_z and near is not None: lo[2] = near
+        if xr is not None: lo[0] = max(lo[0], xr[0]); hi[0] = min(hi[0], xr[1])
         if use_z and near0 and os.environ.get('RVT_NEAR0', '1') == '1': lo[2] = max(lo[2], 0.0)       # the cut plane is the near clip of a section: nothing between it and the viewer is drawn (Residential building section: stairs / doors 1.5-13 ft in front, 80% of their ink absent from Revit's DXF)
         act = crop.get('active') or [[1, 1]] * 3
         use_lo = np.array([xy, xy, use_z]); use_hi = np.array([xy, xy, use_z and bool(act[2][0]) if z != 'all' else True])
@@ -399,6 +425,12 @@ class Visibility:
                 bb_ = self._datum_bbox(eid)
                 if bb_ is not None and not vol(bb_): why[eid] = 'datum_outside_section_box'; continue
             if eid in hidden_el: why[eid] = 'hidden_element'; continue
+            if e['cls'] == 'RoomElem' and os.environ.get('RVT_ROOMS', '1') == '1':
+                if v['kind'] == '3d': why[eid] = 'room_in_3d'; continue                  # Residential: 0 rooms in 6 of 6 3D lists (102 predicted)
+                bb_ = self.info.bbox(eid); rg_ = v.get('range') or {}
+                if bb_ is not None and (not np.all(bb_[0] <= bb_[1]) or np.abs(bb_).max() > 1e20): bb_ = None      # unplaced room (empty bbox sentinel): listed by Revit
+                if v['kind'] == 'plan' and bb_ is not None and rg_.get('cut') is not None and rg_.get('plan_view_type') != 2 and (bb_[1][2] < rg_['cut'] - 1e-6 or bb_[0][2] > rg_['cut'] + 1e-6): why[eid] = 'room_not_at_cut'; continue      # a room is listed in a plan only when it spans the cut plane (Residential: first floor cut 4, rooms 0..8 listed, the basement rooms -8..-1 not; attic 13 / Site 32.8)
+            if v['kind'] == 'section' and e['cls'] == 'VolumeOfInterest' and os.environ.get('RVT_VOI_SECTION', '1') == '1': why[eid] = 'scope_box_in_section'; continue       # Snowdon: 0 of 20 section lists hold a scope box (12 predicted)
             if v['kind'] == '3d' and e['cls'] in NOT_IN_3D and os.environ.get('RVT_NOT_IN_3D', '1') == '1' and self._is22(): why[eid] = 'not_in_3d'; continue
             if e['cls'] == 'RefPlane' and self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_designOptionId')) == -4: why[eid] = 'refplane_dopt4'; continue       # reference planes with design option id -4 (Commercial 52, Residential 8) are in no Revit list; those with -1 are (rst_basic 21, Snowdon 16, Residential 2)
             if v['kind'] == 'section' and e['cls'] in DATUM_CLASSES and v.get('dir') and not self._datum_perpendicular(eid, v): why[eid] = 'datum_not_perpendicular'; continue
@@ -462,7 +494,7 @@ class Visibility:
                     try: refs.append(self.dec.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId')))
                     except Exception: refs.append(None)
                 if wr and all(x in (None, INVALID, -1) for x in refs): del out[eid]; why[eid] = 'dim_dangling_refs'; continue
-                if os.environ.get('RVT_DIM_REFVIEW', '1') == '1' and any(x not in (None, INVALID, -1) and x in self.info.info and self.info.info[x]['owner'] == INVALID and x not in out for x in refs): del out[eid]; why[eid] = 'dim_ref_not_in_view'; continue
+                if os.environ.get('RVT_DIM_REFVIEW', '1') == '1' and any(x not in (None, INVALID, -1) and x in self.info.info and self.info.info[x]['owner'] == INVALID and x not in out and why.get(x) == 'outside_view_volume' for x in refs): del out[eid]; why[eid] = 'dim_ref_not_in_view'; continue
                 dl = ob(fl.get('m_pDimLine')) or {}
                 if v['kind'] == 'plan' and dl.get('m_origin') and rgp.get('bottom') is not None and dl['m_origin'][2] < rgp['bottom'] - 0.5: del out[eid]; why[eid] = 'dim_below_range'
         if os.environ.get('RVT_CGL_HOST', '1') == '1':

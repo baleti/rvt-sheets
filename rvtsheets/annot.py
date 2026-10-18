@@ -332,7 +332,7 @@ class Annotations:
         if vs is not None:           # Revit omits a dimension when a referenced element is not in the view (Snowdon L2 38'-7" dim: its wall 587033 lies outside the view volume)
             for w in wr:
                 e_ = self.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId'))
-                if e_ not in (None, INVALID, -1) and e_ not in vs and self.f.rec(e_):
+                if e_ not in (None, INVALID, -1) and e_ not in vs and self.f.rec(e_) and (getattr(self.d, '_vis_why', {}) or {}).get(e_, 'outside_view_volume') == 'outside_view_volume':      # only references outside the view volume drop a dimension (Residential basement dim 235357: its wall lies above the cut, Revit still lists the dimension)
                     self.d.stats['dim_hidden_ref'] += 1; return []
         dl = ob(fl.get('m_pDimLine')) or {}
         if not dl.get('m_origin'): return []
