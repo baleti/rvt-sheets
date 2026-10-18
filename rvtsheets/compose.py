@@ -65,14 +65,20 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
             # all matching Revit's sheet exports - an earlier empirical constant 11.6 came from the Front Yard export alone)
             try:
                 import base64
-                img = shaded3d.view_image(vd, v['id'], 1400)
+                img = None; ext_ = False
+                try:                              # an externally rendered image of this view (the viewer's textured / realistic render, tools/install_vp_png.py) replaces our software shading
+                    from .cache import file_hash, ROOT
+                    pf_ = os.path.join(ROOT, 'vp3d', file_hash(dec.f.fn), '%d.png' % v['id'])
+                    if os.path.isfile(pf_) and os.environ.get('RVT_VP_PNG', '1') == '1': img = (open(pf_, 'rb').read(), 0, 0); ext_ = True
+                except Exception: img = None
+                if img is None: img = shaded3d.view_image(vd, v['id'], 1400)
                 if img:
                     c = v['crop']; b = c['bounds']; D = v.get('persp_scale') or 11.6
                     w = (b[0][0] - b[0][1]) * D; h = (b[1][0] - b[1][1]) * D
                     cx = vp['offset'][0] + (b[0][0] + b[0][1]) / 2 * D; cy = vp['offset'][1] + (b[1][0] + b[1][1]) / 2 * D
                     a = s.P((cx - w / 2, cy + h / 2))
                     s.raw('<image x="%.3f" y="%.3f" width="%.3f" height="%.3f" href="data:image/png;base64,%s" preserveAspectRatio="none"/>' % (a[0], a[1], w * FT_MM, h * FT_MM, base64.b64encode(img[0]).decode()))
-                    if ((v.get('display') or {}).get('m_model') or {}).get('m_edges'):          # 'show edges': thin dark lines over the shaded image
+                    if not ext_ and ((v.get('display') or {}).get('m_model') or {}).get('m_edges'):          # 'show edges': thin dark lines over the shaded image
                         try:
                             res = shaded3d.persp_lines(vd, v['id'])
                             if res and res[1]:

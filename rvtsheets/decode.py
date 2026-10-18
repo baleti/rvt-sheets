@@ -282,11 +282,12 @@ class Decoder:
         go = path(fl, 'm_oGraphicOverrides') or {}
         v['host_layers_overridden'] = go.get('m_bHostLayersOverridden')
         v['filters'] = [{'filter': E(path(s, 'm_filterElemId')), 'visible': bool(path(s, 'm_bVisibilityFlag')), 'overrides': self.ogs(path(s, 'm_pOverrideGraphicSettings')),
-                         'enabled': path(s, 'm_bEnabled', default=None)} for s in path(fl, 'm_oFilterOverrides', 'm_oaSettings') or []]
+                         'enabled': (None if path(s, 'm_bEnabledFlag', default=None) is None else bool(path(s, 'm_bEnabledFlag')))} for s in path(fl, 'm_oFilterOverrides', 'm_oaSettings') or []]
         ah = path(fl, 'm_oAdHocOverrides') or {}
         v['element_overrides'] = self._adhoc(ah)
         v['hidden_elements'] = sorted(set([E(x) for x in fl.get('m_explicitlyHiddenElements') or []] + [E(x) for x in path(fl, 'm_oHiddenElementsViewSettings', 'm_hiddenElements') or []]))
         v['design_options'] = [[E(p['first']), E(p['second'])] for p in path(fl, 'm_oDesignOptionViewSettings', 'm_mOverridingOptions2') or [] if isinstance(p, dict) and 'first' in p]      # (option set, chosen option) pairs of View > Design Options; [] = automatic (primary of every set)
+        v['workset_vis'] = {path(p, 'first', 'm_guid', 'm_guid'): p.get('second') for p in path(fl, 'm_oWorksetVisibilityViewSettings', 'm_worksetVisibilityPGUIDMap') or [] if isinstance(p, dict)}      # workset GUID (hex) -> 1 visible / 0 hidden; absent = the workset's global default
         v['draw_order'] = path(fl, 'm_pDetailDrawOrderMgr', 'm_aDrawOrder')
         vd = path(fl, 'm_pViewDisplayMgr') or {}
         v['display'] = {k: ob(vd.get(k)) for k in ('m_model',) if k in vd}

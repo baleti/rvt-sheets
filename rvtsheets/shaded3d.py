@@ -189,7 +189,7 @@ def collect(drawer, vid, max_tris=2_000_000):
         except Exception: continue
         cid = info['cat']
         base = (drawer.doc['categories'].get(cid) or {}).get('proj') or {}
-        if not pieces['solids'] or (info['cls'] == 'Text3dElem' and os.environ.get('RVT_TEXT3D_MESH', '1') == '1'):      # model text: the walker adds a 16-triangle bounding box next to the letters (Commercial 'Pharmacy' sign: a solid red slab); the reader's element mesh is the exact letter solid
+        if not pieces['solids'] or (info['cls'] == 'Text3dElem' and os.environ.get('RVT_TEXT3D_MESH', '1') == '1') or (cid == -2000011 and os.environ.get('RVT_WALL_MESH', '0') == '1'):      # model text: the walker adds a 16-triangle bounding box next to the letters (Commercial 'Pharmacy' sign: a solid red slab); the reader's element mesh is the exact letter solid
             # no own B-rep solids (topography polymesh, family instances whose geometry sits in the symbol): the reader's element mesh
             try:
                 import rvt_elemmesh as E

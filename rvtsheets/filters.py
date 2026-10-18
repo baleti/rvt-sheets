@@ -3,6 +3,9 @@ values (rvt_params: {name: value}). Unknown parameters make a rule false (Revit:
 from .reader import INVALID
 
 
+TYPE_NAME_PARAMS = ('Type Name', 'Family Name')
+
+
 class FilterEval:
     def __init__(self, dec, doc):
         self.dec = dec; self.doc = doc; self._p = None
@@ -24,7 +27,11 @@ class FilterEval:
                 fam = tp.get('Family Name') or {'DBViewType': ''}.get((self.params().get(v) or {}).get('class'), '')
                 return '%s: %s' % (fam, tp.get('Type Name', '')) if fam else tp.get('Type Name', '')
             return v
-        # type parameters
+        # type parameters (Type Name, type mark, dimensions...): the element's type element carries them (Revit filters accept instance and type parameters)
+        tid = pe.get('Family and Type')
+        if isinstance(tid, int) and name in TYPE_NAME_PARAMS:       # only the naming parameters: a general type fallback made Snowdon's 'NOT' filters match (and hide) 2300 elements Revit lists
+            tp = (self.params().get(tid) or {}).get('params') or {}
+            if name in tp: return tp[name]
         return None
 
     def rule_ok(self, eid, r):

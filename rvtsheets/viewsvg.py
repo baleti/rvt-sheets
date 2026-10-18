@@ -137,4 +137,6 @@ def text_svg(p, tx, scale):
     wt = ' font-weight="bold"' if p.get('bold') else ''
     c = p.get('color'); fill = ''
     if isinstance(c, int) and 0 < c < 1 << 24: fill = ' fill="#%02x%02x%02x"' % (c & 255, (c >> 8) & 255, (c >> 16) & 255)       # text colour (BGR int): the Help Button '?' is light grey on blue
-    return '<text xml:space="preserve" transform="translate(%.3f %.3f) rotate(%.3f)" font-family="%s" font-size="%.3f" text-anchor="%s"%s%s data-e="%s">%s</text>' % (x, y, ang, html.escape(font_stack(p.get('font'))), size_mm, ha, wt, fill, p.get('elem'), tsp)
+    wsc = p.get('width_scale') or 1.0
+    wtr = (' scale(%.4f 1)' % wsc) if abs(wsc - 1.0) > 1e-6 else ''       # text type 'Width Factor' (wide / condensed notes): horizontal scale about the anchor
+    return '<text xml:space="preserve" transform="translate(%.3f %.3f) rotate(%.3f)%s" font-family="%s" font-size="%.3f" text-anchor="%s"%s%s data-e="%s">%s</text>' % (x, y, ang, wtr, html.escape(font_stack(p.get('font'))), size_mm, ha, wt, fill, p.get('elem'), tsp)

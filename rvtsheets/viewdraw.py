@@ -16,6 +16,7 @@ from .visibility import CAT_TYPES, PHASE_IDX
 from . import gfx
 
 FEATURE_ANGLE = math.radians(20)
+SIL_SKIP = set(int(x) for x in os.environ.get('RVT_SILSKIP', '-2001340,-2000120,-2000919,-2000123,-2000035').split(',') if x)      # categories without silhouette edges in sections (topography, stairs, roofs: their tessellation facets are not Revit silhouettes)
 UNOBSCURED_CATS = {-2009000, -2009003, -2009009, -2009016, -2009017}     # structural rebar, area/path reinforcement, fabric (?)
 NO_SOLID_CLASSES = {'RoomElem', 'AreaElem', 'ZoneElement', 'MassLevelData'}
 
@@ -624,7 +625,7 @@ class ViewDrawer:
                     self.stats['framing_hidden_style_skipped'] += 1; continue      # the family's hidden-line geometry (S-BEAM-HDLN in Revit's DXF) is only drawn when the view shows hidden lines (m_showHiddenLinesVal 2: Snowdon Longitudinal); Cross Section P .837 -> .958
                 if v['kind'] == 'plan' and cid == -2000151 and info['cls'] == 'FamilyInstance' and ((c.get('flags') or 0) & 0x1088000) == 0x1088000 and not (c.get('flags') or 0) & 0x8000000 and ((v.get('display') or {}).get('m_model') or {}).get('m_showHiddenLinesVal') != 2: continue      # generic-model families' hidden-line geometry in plans (Snowdon L4 precision .974 -> .998, L2 .959 -> .971, recall -0.2..-0.7)
                 pr = {'t': 'line', 'pts': pts[:, :2].tolist(), 'style': st, 'elem': eid, 'layer': lay}
-                if is_section and not anno and len(pts) > 1 and cid not in UNOBSCURED_CATS:
+                if is_section and not anno and len(pts) > 1 and (cid not in UNOBSCURED_CATS or (v.get('view_type') == -1 and os.environ.get('RVT_REBAR_OCC', '1') == '1')):
                     pr['_w'] = pts             # depth-tested below (elevations/sections)
                     if cid in (-2000023, -2000014): pr['_eps'] = 1.5      # doors/windows sit recessed inside the wall thickness
                 prims.append(pr)
@@ -894,7 +895,7 @@ class ViewDrawer:
         eps = px * 2.0
         for eid, cid, T2, uvw, fid, gs, ov in clipped:
             E = _feature_edges(T2, None)
-            if (cid == -2000126 or os.environ.get('RVT_ALLSIL', '1') == '1') and v['kind'] == 'section' and os.environ.get('RVT_RAILSIL', '1') == '1':
+            if (cid == -2000126 or (os.environ.get('RVT_ALLSIL', '1') == '1' and cid not in SIL_SKIP)) and v['kind'] == 'section' and os.environ.get('RVT_RAILSIL', '1') == '1':
                 # railing rods are smooth cylinders: only their end rings are feature edges; Revit draws the rod silhouettes (long lines: Commercial Building Section A-FLOR-HRAL)
                 try:
                     Es = _silhouette_edges(T2) if len(T2) <= 150000 else np.zeros((0, 2, 3))      # pure-python edge map: skip huge single elements
@@ -1172,7 +1173,7 @@ class ViewDrawer:
         if wid and txt and not fl.get('m_bNoWrapping'): txt = wrap_text(txt, wid, size * scale / 0.72, font.get('name') or 'Arial', bool(tt.get('bold')))
         return {'t': 'text', 'text': txt, 'origin': org, 'x': x, 'size': size * scale, 'font': font.get('name') or 'Arial',
                 'bold': tt.get('bold'), 'italic': tt.get('italic'), 'halign': SheetComposer._halign(fl_), 'valign': SheetComposer._valign(fl_), 'anchor': True,
-                'elem': eid, 'layer': 'text', 'width': (fl.get('m_lineWidth') or 0) * scale}
+                'elem': eid, 'layer': 'text', 'width': (fl.get('m_lineWidth') or 0) * scale, 'width_scale': tt.get('width_scale') or 1.0}
 
     PART_DEFAULT = {'Grid': ('bubble', 'bubble'), 'Level': ('bubble', 'bubble'), 'IndependentTag': ('head', 'head'), 'RoomTag': ('head', 'head'), 'SpaceTag': ('head', 'head'),
                     'AreaTag': ('head', 'head'), 'InteriorElev': ('head', 'arrow'), 'Section': ('head', 'head'), 'SpotElevation': ('target', 'target'), 'TextNote': ('frame', 'frame')}
@@ -1811,7 +1812,23 @@ class ViewDrawer:
         ax = np.array([math.cos(math.radians(best)), math.sin(math.radians(best))]); nr = np.array([-ax[1], ax[0]])   # long axis, wall normal
         tot = sum(l['m_layerWidth'] for l in layers)
         d = (P - c) @ nr; lo, hi = d.min(), d.max()
-        if abs((hi - lo) - tot) > 0.15 * tot + 0.02: return False       # not a plain straight cut of this wall type
+        if abs((hi - lo) - tot) > 0.15 * tot + 0.02:
+            # stepped / capped cut (parapet with a wider cap, footing step): the wall body is the pair of faces tot apart that carries the most boundary length
+            pr = None
+            if os.environ.get('RVT_WALLSTEP', '1') == '1' and not slab:
+                ds = np.unique(np.round(d, 3)); best_ = 0.0
+                for i_ in range(len(ds)):
+                    for j_ in range(i_ + 1, len(ds)):
+                        if abs((ds[j_] - ds[i_]) - tot) > 0.02 * tot + 0.005: continue
+                        sc_ = 0.0
+                        for l_ in loops:
+                            Lq = np.asarray([q[:2] for q in l_], float)
+                            for a_, b_ in zip(Lq[:-1], Lq[1:]):
+                                dm = float((((a_ + b_) / 2) - c) @ nr); dd = float(abs(((b_ - a_) @ ax)))
+                                if abs(dm - ds[i_]) < 0.01 or abs(dm - ds[j_]) < 0.01: sc_ += dd
+                        if sc_ > best_: best_ = sc_; pr = (float(ds[i_]), float(ds[j_]))
+            if pr is None: return False       # not a plain straight cut of this wall type
+            lo, hi = pr; self.stats['wall_layers_stepped'] += 1
         # which side is the exterior: wall orientation vs view: use the wall's world normal from its curve driver is not decoded yet;
         # layer 0 (exterior) on the side away from the building = the side with lower |view-depth| of the wall centre... fall back: +nr
         flip = bool(r['fields'].get('m_isFlipped'))

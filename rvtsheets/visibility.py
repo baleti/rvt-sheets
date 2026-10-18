@@ -315,6 +315,28 @@ class Visibility:
             self._i22 = bool(is_2022_plus(self.dec.f))
         return self._i22
 
+    def _workset_state(self):
+        """(element -> workset id, workset id -> guid, default-hidden guids) for workshared files that hide a workset somewhere, else None (rvt_worksets: Global/ElemTable + PartitionTable)"""
+        if getattr(self, '_wsx', 0) == 0:
+            self._wsx = None
+            try:
+                hid_any = any(any(x == 0 for x in (vv.get('workset_vis') or {}).values()) for vv in self.doc['views'].values())
+                import rvt_worksets as W
+                ws = W.worksets(self.dec.f.fn)
+                if hid_any or any(not w['default_visible'] for w in ws.values()):
+                    self._wsx = ({int(e): w for e, w in W.element_worksets(self.dec.f.fn).items()}, {w['id']: g for g, w in ws.items()}, {g for g, w in ws.items() if not w['default_visible']})
+            except Exception: self._wsx = None
+        return self._wsx
+
+    def workset_hidden(self, v, eid):
+        st = self._workset_state()
+        if st is None: return False
+        ew, id2g, dflt = st
+        g = id2g.get(ew.get(eid))
+        if g is None: return False
+        m = v.get('workset_vis') or {}
+        return (m[g] == 0) if g in m else (g in dflt)
+
     def _datum_bbox(self, eid):
         """world bbox [[min],[max]] of a datum plane's finite envelope"""
         r = self.dec.f.rec(eid); srf = ob((r or {}).get('fields', {}).get('m_pSurface')) or {}
@@ -425,6 +447,7 @@ class Visibility:
                 bb_ = self._datum_bbox(eid)
                 if bb_ is not None and not vol(bb_): why[eid] = 'datum_outside_section_box'; continue
             if eid in hidden_el: why[eid] = 'hidden_element'; continue
+            if os.environ.get('RVT_WORKSETS', '1') == '1' and self.workset_hidden(v0, eid): why[eid] = 'workset_hidden'; continue
             if e['cls'] == 'RoomElem' and os.environ.get('RVT_ROOMS', '1') == '1':
                 if v['kind'] == '3d': why[eid] = 'room_in_3d'; continue                  # Residential: 0 rooms in 6 of 6 3D lists (102 predicted)
                 bb_ = self.info.bbox(eid); rg_ = v.get('range') or {}
