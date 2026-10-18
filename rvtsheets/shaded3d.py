@@ -110,6 +110,7 @@ def render(tris, colors, alphas, eye, right, up, fwd, tan_x, tan_y, width_px, pe
 
 SHADOW_K = (0.21, 0.15)          # screen px shift per foot of height as a fraction of a pixel-per-foot: x right, y down (Commercial cover sheet site: shadow 4.4 ft right of / 4 ft below a 26 ft building)
 SHADOW_DARK = 0.42
+PLANT_GREY = (78, 78, 78)      # Revit's shaded views draw planting (RPC entourage) as dark charcoal two-tone silhouettes, not green
 SITE_CATS = {-2001340, -2001360}                                   # topography, planting?: green when no material colour
 
 
@@ -144,12 +145,78 @@ def _clip_section_box(v, T, C, A):
     return np.concatenate(outT), np.concatenate(outC), np.concatenate(outA)
 
 
+def _surface_pattern_lines(drawer, T, MT, eye, bx, pd, W):
+    """thin dark quads for the horizontal courses of model surface patterns (siding, brick bed joints) on vertical faces: lines z = origin + k * offset of the pattern's horizontal
+    grids, clipped to each triangle, one pixel wide at the camera distance, a hair in front of the face so the depth test hides them where the face is hidden"""
+    mats = drawer.materials(); fp = drawer.doc['fill_patterns']
+    n = np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]); ln = np.linalg.norm(n, axis=1); ln[ln == 0] = 1; n = n / ln[:, None]
+    vert = np.abs(n[:, 2]) < 0.15
+    tan_x = (bx[0] - bx[1]) / 2 / pd
+    outT = []
+    for mid in np.unique(MT[vert]):
+        if mid < 0: continue
+        sp = (mats.get(int(mid)) or {}).get('surface_pattern') or {}
+        pat = fp.get(sp.get('id')) if sp.get('id') is not None else None
+        if not pat or pat.get('solid') or pat.get('target', 0) != 1: continue
+        sel = np.nonzero(vert & (MT == mid))[0]
+        if not len(sel): continue
+        for g in pat.get('grids') or []:
+            if g.get('segments') or abs(np.sin(g['angle'])) > 1e-3: continue            # continuous horizontal lines only
+            off = abs(g['offset'])
+            if off < 0.05 or off > 5: continue
+            z0 = g['origin'][1]
+            Ts = T[sel]; zmin = Ts[:, :, 2].min(1); zmax = Ts[:, :, 2].max(1)
+            k0 = int(np.floor((zmin.min() - z0) / off)); k1 = int(np.ceil((zmax.max() - z0) / off))
+            if k1 - k0 > 400: continue
+            for k in range(k0, k1 + 1):
+                z = z0 + k * off
+                m_ = (zmin < z) & (zmax > z)
+                if not m_.any(): continue
+                Q = Ts[m_]; nn = n[sel][m_]
+                d = Q[:, :, 2] - z                                         # signed height of the three corners
+                pts = []
+                for a_, b_ in ((0, 1), (1, 2), (2, 0)):
+                    cr = (d[:, a_] * d[:, b_]) < 0
+                    t_ = np.where(cr, d[:, a_] / np.where(cr, d[:, a_] - d[:, b_], 1), 0.0)
+                    pts.append((cr, Q[:, a_] + (Q[:, b_] - Q[:, a_]) * t_[:, None]))
+                # two crossing edges per triangle
+                P0 = np.zeros((len(Q), 3)); P1 = np.zeros((len(Q), 3)); cnt = np.zeros(len(Q), int)
+                for cr, pt in pts:
+                    for row in np.nonzero(cr)[0]:
+                        if cnt[row] == 0: P0[row] = pt[row]
+                        elif cnt[row] == 1: P1[row] = pt[row]
+                        cnt[row] += 1
+                ok = cnt == 2
+                if not ok.any(): continue
+                P0, P1, nn = P0[ok], P1[ok], nn[ok]
+                mid_ = (P0 + P1) / 2; dist = np.linalg.norm(mid_ - eye, axis=1)
+                pxf = 2 * tan_x * dist / W
+                dense = off / pxf < 6.0                                 # courses closer than 6 px alias into a dark mass (brick bed joints at 1:100): not drawn, like Revit's shaded export
+                if dense.all(): continue
+                if dense.any(): P0, P1, nn, mid_, dist, pxf = P0[~dense], P1[~dense], nn[~dense], mid_[~dense], dist[~dense], pxf[~dense]
+                wz = pxf * 1.3
+                fr = nn * 0.02                                           # a hair in front of the face (pointing to the eye side below)
+                to_eye = eye - mid_; flip = (nn * to_eye).sum(1) < 0; fr[flip] *= -1
+                up = np.zeros_like(P0); up[:, 2] = wz
+                A_, B_ = P0 + fr, P1 + fr
+                outT.append(np.stack([A_, B_, B_ + up], 1)); outT.append(np.stack([A_, B_ + up, A_ + up], 1))
+    if not outT: return np.zeros((0, 3, 3)), np.zeros((0, 3)), np.zeros(0)
+    Tl = np.concatenate(outT)
+    return Tl, np.tile(np.array([130.0, 130.0, 130.0]), (len(Tl), 1)), np.ones(len(Tl))
+
+
 def view_image(drawer, vid, width_px=1600, max_tris=2_000_000):
     """shaded image of 3D view `vid` through the ViewDrawer machinery: (png, w, h)"""
     got = collect(drawer, vid, max_tris)
     if got is None: return None
     T, C, A, (O, X, Y, Z, c, persp), _K = got
     v_ = drawer.doc['views'][vid]
+    MT_ = getattr(drawer, '_collect_mt', None)
+    if os.environ.get('RVT_SURFPAT_LINES', '1') == '1' and MT_ is not None and len(MT_) == len(T) and ((v_.get('display') or {}).get('m_model') or {}).get('m_bShowSurfacePatterns') and not (v_.get('section_box') or {}).get('on'):
+        try:
+            Tl, Cl, Al = _surface_pattern_lines(drawer, T, MT_, O, (c.get('bounds') or [[1, -1]])[0], c.get('proj_dist') or 0.1, width_px)
+            if len(Tl): T = np.concatenate([T, Tl]); C = np.concatenate([C, Cl]); A = np.concatenate([A, Al])
+        except Exception: drawer.stats['surfpat_lines_error'] += 1
     T, C, A = _clip_section_box(v_, T, C, A)
     if not len(T): return None
     hlr_sky = view_background(drawer, vid).get('m_type') == 512
@@ -167,6 +234,18 @@ def view_image(drawer, vid, width_px=1600, max_tris=2_000_000):
     return png, w, h
 
 
+def _wall_exterior_material(drawer, eid):
+    """material id of the first (exterior) layer with width of a compound wall's type, None when unknown"""
+    try:
+        cs = drawer._compound_of(eid)
+        from .reader import ob
+        for l in (cs or {}).get('m_layers') or []:
+            l = ob(l)
+            if (l.get('m_layerWidth') or 0) > 1e-6: return drawer.f.eid(l.get('m_materialId'))
+    except Exception: pass
+    return None
+
+
 def collect(drawer, vid, max_tris=2_000_000):
     """world-space triangles of 3D view `vid` with colours, alphas and category ids, and the camera: (T, C, A, (O, X, Y, Z, crop, persp), K) or None"""
     import collections
@@ -181,7 +260,7 @@ def collect(drawer, vid, max_tris=2_000_000):
     ctx = ViewCtx(Z, detail=ev.get('detail_level') or 2, kind='3d', scale=1)
     W = Walker(drawer.f, ctx); W.is_2d = lambda e: False; W.invisible_gs = set()
     mats = drawer.materials(); elems = drawer.vis.elements(vid)
-    T = []; C = []; A = []; K = []
+    T = []; C = []; A = []; K = []; MT = []; ext_mat = {}
     for eid in elems:
         info = drawer.vis.info.info[eid]
         if info['cls'] in ('Grid', 'Level', 'RefPlane', 'IndependentTag', 'RoomTag', 'LinearDimString', 'TextNote', 'InteriorElev', 'InteriorElevArrow', 'Section') or info['cls'] in ('RoomElem',): continue
@@ -189,6 +268,7 @@ def collect(drawer, vid, max_tris=2_000_000):
         except Exception: continue
         cid = info['cat']
         base = (drawer.doc['categories'].get(cid) or {}).get('proj') or {}
+        if cid == -2003500 and os.environ.get('RVT_SKIP_STACKED', '1') == '1': continue      # stacked-wall parents duplicate their child walls (grey slab over the brick facade)
         if not pieces['solids'] or (info['cls'] == 'Text3dElem' and os.environ.get('RVT_TEXT3D_MESH', '1') == '1') or (cid == -2000011 and os.environ.get('RVT_WALL_MESH', '0') == '1'):      # model text: the walker adds a 16-triangle bounding box next to the letters (Commercial 'Pharmacy' sign: a solid red slab); the reader's element mesh is the exact letter solid
             # no own B-rep solids (topography polymesh, family instances whose geometry sits in the symbol): the reader's element mesh
             try:
@@ -196,7 +276,7 @@ def collect(drawer, vid, max_tris=2_000_000):
                 m = E.element_mesh(drawer.f.g, eid); tr = np.asarray(m.get('tris') or [], float).reshape(-1, 3, 3)
             except Exception: tr = np.zeros((0, 3, 3))
             if len(tr):
-                col = (110, 150, 105) if cid in SITE_CATS else (base.get('color') if base.get('color') and any(base.get('color')) else (170, 170, 170))
+                col = (PLANT_GREY if cid == -2001360 and os.environ.get('RVT_PLANT_GREY', '1') == '1' else (110, 150, 105)) if cid in SITE_CATS else (base.get('color') if base.get('color') and any(base.get('color')) else (170, 170, 170))
                 cc = np.tile(np.asarray(col, float), (len(tr), 1))
                 try:                                          # per-triangle material of the element mesh (topography subregions: Site - Grass / Sidewalk, pads: Asphalt ...)
                     mt = m.get('mat') or []
@@ -205,6 +285,8 @@ def collect(drawer, vid, max_tris=2_000_000):
                             mc = (mats.get(int(k)) or {}).get('color')
                             if mc and any(mc): cc[np.asarray([x == k for x in mt])] = mc
                 except Exception: pass
+                mt_ = m.get('mat') or []
+                MT.append(np.asarray([(-1 if x is None else int(x)) for x in mt_], int) if len(mt_) == len(tr) else np.full(len(tr), -1))
                 T.append(tr); C.append(cc); A.append(np.ones(len(tr))); K.append(np.full(len(tr), cid))
             continue
         for s in pieces['solids']:
@@ -218,24 +300,28 @@ def collect(drawer, vid, max_tris=2_000_000):
             gm = (drawer.doc['gstyles'].get(s.get('gs')) or {}).get('material')
             fallback = base.get('color')
             if not fallback or not any(fallback) or not base.get('material') in (None, -1) and False: fallback = (190, 190, 190)       # category pens are black: neutral grey
-            if cid in SITE_CATS: fallback = (110, 150, 105)
+            if cid in SITE_CATS: fallback = PLANT_GREY if cid == -2001360 and os.environ.get('RVT_PLANT_GREY', '1') == '1' else (110, 150, 105)
+            mids_ = np.full(len(tris), -1)
             for i in range(len(tris)):
-                m = None
+                m = None; mk_ = None
                 if frs is not None and i < len(frs) and frs[i] is not None:
-                    try: m = mats.get(int(frs[i]))
+                    try: m = mats.get(int(frs[i])); mk_ = int(frs[i]) if m is not None else None
                     except Exception: m = None
-                if m is None and gm not in (None, -1): m = mats.get(gm)
+                if m is None and gm not in (None, -1): m = mats.get(gm); mk_ = gm if m is not None else None
+                if m is None and cid == -2000011 and os.environ.get('RVT_WALL_EXT', '1') == '1':
+                    mk_ = ext_mat.setdefault(eid, _wall_exterior_material(drawer, eid)); m = mats.get(mk_)      # faces without a material (curved ArcWall: id -1) take the wall type's exterior layer
                 if m and 'light source' in str(m.get('name')).lower(): al[i] = 0.0; cols[i] = (0, 0, 0); continue        # light cones: not drawn
-                col = (m or {}).get('color')
+                col = (m or {}).get('color'); mids_[i] = -1 if (m is None or mk_ is None) else int(mk_)
                 cols[i] = col if col and any(col) else fallback
                 tr = (m or {}).get('transparency') or 0
                 if tr: al[i] = max(0.15, 1 - float(tr))
             keep = al > 0
             if not keep.any(): continue
-            T.append(tris[keep]); C.append(cols[keep]); A.append(al[keep]); K.append(np.full(int(keep.sum()), cid))
+            MT.append(mids_[keep]); T.append(tris[keep]); C.append(cols[keep]); A.append(al[keep]); K.append(np.full(int(keep.sum()), cid))
     if not T: return None
-    T = np.concatenate(T); C = np.concatenate(C); A = np.concatenate(A); K = np.concatenate(K)
-    if len(T) > max_tris: sel = np.random.default_rng(0).choice(len(T), max_tris, replace=False); T, C, A, K = T[sel], C[sel], A[sel], K[sel]
+    T = np.concatenate(T); C = np.concatenate(C); A = np.concatenate(A); K = np.concatenate(K); MTa = np.concatenate(MT)
+    if len(T) > max_tris: sel = np.random.default_rng(0).choice(len(T), max_tris, replace=False); T, C, A, K, MTa = T[sel], C[sel], A[sel], K[sel], MTa[sel]
+    drawer._collect_mt = MTa
     res = (T, C, A, (O, X, Y, Z, c, persp), K)
     drawer._collect_cache = ((vid, max_tris), res)
     return res

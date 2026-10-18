@@ -1,5 +1,5 @@
 """view drawing (view coordinates, model feet) -> standalone SVG at the view scale (paper mm)"""
-import html
+import html, math, os
 import numpy as np
 from .decode import FT_MM, color
 from .svg import font_stack
@@ -54,7 +54,19 @@ def body(prims, scale, tx, layer_order=('underlay', 'room_fill', 'symbolic_fill'
         e = ' data-e="%s"' % p.get('elem')
         if mclip and (p.get('layer') in MODEL_LAYERS or p.get('layer') == 'mask'): e += ' clip-path="url(#cropclip)"'      # model content is cut at the crop region (Revit shows nothing of it beyond)
         if p['t'] == 'line': out.append('<path d="%s" %s%s/>' % (D(p['pts']), stroke(p['style']), e))
-        elif p['t'] == 'segs': out.append('<path d="%s" %s%s/>' % (' '.join(D(s) for s in p['segs']), stroke(p['style']), e))
+        elif p['t'] == 'segs':
+            segs_ = p['segs']
+            if p.get('layer') in ('cut_fill', 'surface_fill', 'symbolic_fill') and abs(p['style'].get('w', 0) - 0.1) < 1e-6 and os.environ.get('RVT_DOTS', '1') == '1' and len(segs_) > 8:
+                # stipple dots (dashes shorter than 0.5 mm on paper: Sand, Concrete specks) are drawn as 0.3 mm black dots like Revit's export (1 px at 3000 px sheets), not as 0.1 mm slivers
+                dots, rest = [], []
+                for sg in segs_:
+                    (x0, y0), (x1, y1) = tx(*sg[0][:2]), tx(*sg[-1][:2])
+                    (dots if math.hypot(x1 - x0, y1 - y0) < 0.5 else rest).append(sg)
+                if dots:
+                    st_ = dict(p['style'], w=0.34)
+                    out.append('<path d="%s" %s%s/>' % (' '.join(D([[(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]] * 2) for a, b in ((sg[0], sg[-1]) for sg in dots)), stroke(st_), e))
+                segs_ = rest
+            if segs_: out.append('<path d="%s" %s%s/>' % (' '.join(D(s) for s in segs_), stroke(p['style']), e))
         elif p['t'] == 'cut':
             closed = [l for l in p['loops'] if len(l) > 3 and np.allclose(l[0], l[-1], atol=1e-6)]
             if closed and p.get('fill'): out.append('<path d="%s" fill="%s" fill-rule="evenodd" stroke="none"%s/>' % (' '.join(D(l) + ' Z' for l in closed), _rgb(p['fill']), e))
@@ -116,7 +128,7 @@ def view_svg(drawing, scale, margin_mm=5, crop=None, hang=True):
 
 def text_svg(p, tx, scale):
     """text prim in view coordinates (size in model feet) -> svg text"""
-    import math
+    import math, os
     from .decode import FT_MM
     x, y = tx(*p['origin'][:2])
     from .svg import EM, LINE_PITCH, line_pitch, revit_pt, first_baseline, rtf_first, box_slack

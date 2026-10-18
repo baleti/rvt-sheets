@@ -10,7 +10,7 @@ Evidence: tools/check_elements.py (element sets vs FilteredElementCollector), to
 | subcategory overrides | partial | via category parent lookup |
 | element overrides, hidden elements | done / partial | m_explicitlyHiddenElements read; hidden dims of Snowdon L2 (595385/6) are hidden by an unknown mechanism |
 | view filters (rules, enabled, visibility, overrides) | done | 2026-10-15: inverse rules decoded, 'Family and Type' resolved, filters now also hide annotation + marker elements (Sections/Callouts/Elevations categories); missing-parameter inverse rule = no match |
-| phase / phase filter | partial | visibility + presentation overrides; demolished/new graphics partial |
+| phase / phase filter | done (lists + resolved overrides) | oracle scene 2024_vg_phases: element phase status = Revit's ElementOnPhaseStatus 213/213; per-filter presentation (ByCategory / Overridden / DontShow) resolved: 'VG custom' view (Existing = Overridden: grey 127 pen 2, no cut fill; Temporary = Overridden blue; New ByCategory black; Demolished not shown) equals Revit's PNG; DXF/image numbers not measured |
 | discipline | partial | marker rules by discipline (coordination hides markers); no other effect modelled |
 | view range (cut/top/bottom/depth) | done | plus underlay (halftone), stair/floor exceptions; structural framing above the cut plane hidden (Snowdon L2, one data point) |
 | crop region, annotation crop | done / partial | crop clip, datums clipped to the annotation crop (crop + offsets x scale) when a 3D-extent grid has no per-view extent |

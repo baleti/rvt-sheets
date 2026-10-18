@@ -454,6 +454,9 @@ class Visibility:
                 if bb_ is not None and (not np.all(bb_[0] <= bb_[1]) or np.abs(bb_).max() > 1e20): bb_ = None      # unplaced room (empty bbox sentinel): listed by Revit
                 if v['kind'] == 'plan' and bb_ is not None and rg_.get('cut') is not None and rg_.get('plan_view_type') != 2 and (bb_[1][2] < rg_['cut'] - 1e-6 or bb_[0][2] > rg_['cut'] + 1e-6): why[eid] = 'room_not_at_cut'; continue      # a room is listed in a plan only when it spans the cut plane (Residential: first floor cut 4, rooms 0..8 listed, the basement rooms -8..-1 not; attic 13 / Site 32.8)
             if v['kind'] == 'section' and e['cls'] == 'VolumeOfInterest' and os.environ.get('RVT_VOI_SECTION', '1') == '1': why[eid] = 'scope_box_in_section'; continue       # Snowdon: 0 of 20 section lists hold a scope box (12 predicted)
+            if v.get('discipline') == 2 and e['cls'] == 'SWall' and os.environ.get('RVT_STRUCT_WALLS', '1') == '1':
+                fl_ = self.dec.f.rec(eid)['fields']
+                if not fl_.get('m_isStructuralSignificant'): why[eid] = 'nonstructural_wall_in_structural_view'; continue       # Structural discipline views list only structurally significant walls (oracle scene 2024_vg_discipline: 5 of 5 walls with significance 0 unlisted; Snowdon L2: 21 of 21 significant listed)
             if v['kind'] == '3d' and e['cls'] in NOT_IN_3D and os.environ.get('RVT_NOT_IN_3D', '1') == '1' and self._is22(): why[eid] = 'not_in_3d'; continue
             if e['cls'] == 'RefPlane' and self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_designOptionId')) == -4: why[eid] = 'refplane_dopt4'; continue       # reference planes with design option id -4 (Commercial 52, Residential 8) are in no Revit list; those with -1 are (rst_basic 21, Snowdon 16, Residential 2)
             if v['kind'] == 'section' and e['cls'] in DATUM_CLASSES and v.get('dir') and not self._datum_perpendicular(eid, v): why[eid] = 'datum_not_perpendicular'; continue
