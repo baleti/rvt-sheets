@@ -105,7 +105,12 @@ def render(m, kind, eid):
             if sv: return sv
         except Exception: pass                                # fall back to the line drawing
     from .compose import crop_rect_uv
-    return view_svg(drawer.draw(eid), v.get('scale') or 100, crop=crop_rect_uv(v))
+    under = None
+    if shaded3d.is_shaded_section(v) and os.environ.get('RVT_SHADED_SECTION', '1') == '1':
+        try:
+            img = shaded3d.section_image(drawer, eid, 2400); under = (img[0], img[3]) if img else None     # material colours under the linework (as on sheets)
+        except Exception: traceback.print_exc()
+    return view_svg(drawer.draw(eid), v.get('scale') or 100, crop=crop_rect_uv(v), under=under)
 
 
 # ---- view scene JSON (control API: c2-vctl / c2-annot, CONTROL-API.md)

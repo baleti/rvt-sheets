@@ -83,7 +83,7 @@ def body(prims, scale, tx, layer_order=('underlay', 'room_fill', 'symbolic_fill'
     return out
 
 
-def view_svg(drawing, scale, margin_mm=5, crop=None, hang=True):
+def view_svg(drawing, scale, margin_mm=5, crop=None, hang=True, under=None):
     """crop: (u0, v0, u1, v1) of an active crop region - the drawing is bounded by it (Revit's own view export does the same)"""
     b = bounds(drawing['prims'])
     if b is None: return '<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm"/>'
@@ -126,7 +126,12 @@ def view_svg(drawing, scale, margin_mm=5, crop=None, hang=True):
     if crop is not None:
         x0_, y1_ = tx(crop[0], crop[1]); x1_, y0_ = tx(crop[2], crop[3])
         defs = '<defs><clipPath id="cropclip"><rect x="%.3f" y="%.3f" width="%.3f" height="%.3f"/></clipPath></defs>\n' % (min(x0_, x1_), min(y0_, y1_), abs(x1_ - x0_), abs(y1_ - y0_)); mc = True
-    return ('<svg xmlns="http://www.w3.org/2000/svg" width="%.1fmm" height="%.1fmm" viewBox="0 0 %.3f %.3f"><rect width="100%%" height="100%%" fill="#fff"/>\n' % (W, H, W, H) + defs
+    img = ''
+    if under is not None:               # shaded section image (png bytes) under the linework, covering the crop rectangle
+        import base64
+        ur_ = under[1]; under = under[0]; a_ = tx(ur_[0], ur_[3]); b_ = tx(ur_[2], ur_[1])
+        img = '<g%s><image x="%.3f" y="%.3f" width="%.3f" height="%.3f" href="data:image/png;base64,%s" preserveAspectRatio="none"/></g>\n' % (' clip-path="url(#cropclip)"' if mc else '', a_[0], a_[1], b_[0] - a_[0], b_[1] - a_[1], base64.b64encode(under).decode())
+    return ('<svg xmlns="http://www.w3.org/2000/svg" width="%.1fmm" height="%.1fmm" viewBox="0 0 %.3f %.3f"><rect width="100%%" height="100%%" fill="#fff"/>\n' % (W, H, W, H) + defs + img
             + '\n'.join(body(drawing['prims'], scale, tx, clip=((u0 - 2 * margin_mm / k, v0 - 2 * margin_mm / k), (u1 + 2 * margin_mm / k, v1 + 2 * margin_mm / k)), mclip=mc)) + '\n</svg>\n')
 
 

@@ -6,7 +6,7 @@ type values (?): witness gap 1/16", extension 3/32", tick 3/64" diagonal, text o
 import math
 import os, sys
 import numpy as np
-from .reader import ob, path, INVALID
+from .reader import ob, path, INVALID, wref
 from . import units
 
 IN = 1 / 12.0
@@ -280,7 +280,7 @@ class Annotations:
         vs = getattr(self.d, '_vis_elems', None)
         if vs is not None:
             for w in wr:
-                e_ = self.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId'))
+                e_ = self.f.eid((wref(w).get('m_geomRef') or {}).get('m_elemId'))
                 if e_ not in (None, INVALID, -1) and e_ not in vs and self.f.rec(e_): return []
         P = lambda p: ((np.asarray(p, float) - O) @ Mv.T)[:2]
         c = P(arc['m_center']); rad = float(np.linalg.norm(P(fl['m_origin']) - c))
@@ -326,12 +326,36 @@ class Annotations:
         if not r: return []
         fl = r['fields']
         wr = fl.get('m_witnessRefs') or []
-        if wr and all(self.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId')) in (None, INVALID, -1) for w in wr):
+        if wr and all(self.f.eid((wref(w).get('m_geomRef') or {}).get('m_elemId')) in (None, INVALID, -1) for w in wr):
             return []            # every witness reference points at no element (Snowdon L2 dimension 595385): Revit does not draw it
         vs = getattr(self.d, '_vis_elems', None)
-        if vs is not None:           # Revit omits a dimension when a referenced element is not in the view (Snowdon L2 38'-7" dim: its wall 587033 lies outside the view volume)
+        if vs is not None and self.f.idbits == 64 and os.environ.get('RVT_DIMREF64', '0') == '1':
+            # 2024+: a dimension is dropped when a referenced element has no record at all (Snowdon L2 38'-7" / 80'-1" dims: wall 587033); references outside the view volume do not drop it
+            # (L2 581543 '10'-10 1/2"': basement walls 587032 / 587034 are drawn by Revit)
             for w in wr:
-                e_ = self.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId'))
+                e_ = self.f.eid((wref(w).get('m_geomRef') or {}).get('m_elemId'))
+                if e_ not in (None, INVALID, -1) and self.f.rec(e_) is None: self.d.stats['dim_hidden_ref'] += 1; return []
+            if os.environ.get('RVT_DIMTAG6', '1') == '1':
+                # outside the view volume a wall reference survives on face tag 5 but not on tag 6 (Snowdon L2: 595144 [5, 5] drawn; 595117 [5, 6], 595116 [5, 6] absent from Revit's PDF)
+                for w in wr:
+                    g_ = wref(w).get('m_geomRef') or {}; e_ = self.f.eid(g_.get('m_elemId'))
+                    if e_ not in (None, INVALID, -1) and e_ not in vs and self.f.rec(e_) and g_.get('m_geomTag') == 6:
+                        self.d.stats['dim_hidden_ref'] += 1; return []
+            if os.environ.get('RVT_DIMSTALE', '1') == '1':
+                # a reference point that no longer lies on its wall (the wall moved after the dimension was saved) makes Revit drop the dimension: Snowdon L2 dims 595117 (ref y 41.5 vs wall y 1.9..2.9)
+                # and 595116 are absent from Revit's PDF, 595144 (points on both walls) is drawn
+                rp_ = fl.get('m_refPnts') or []
+                for i_, w in enumerate(wr[:len(rp_)]):
+                    e_ = self.f.eid((wref(w).get('m_geomRef') or {}).get('m_elemId'))
+                    if e_ in (None, INVALID, -1) or (self.f.rec(e_) or {}).get('class') != 'SWall': continue
+                    bb_ = self.d.vis.info.bbox(e_)
+                    if bb_ is None: continue
+                    pt_ = np.asarray(rp_[i_], float)
+                    if np.any(pt_[:2] < np.asarray(bb_[0], float)[:2] - 0.6) or np.any(pt_[:2] > np.asarray(bb_[1], float)[:2] + 0.6):
+                        self.d.stats['dim_stale_ref'] += 1; return []
+        elif vs is not None:           # Revit omits a dimension when a referenced element is not in the view (Snowdon L2 38'-7" dim: its wall 587033 lies outside the view volume)
+            for w in wr:
+                e_ = self.f.eid((wref(w).get('m_geomRef') or {}).get('m_elemId'))
                 if e_ not in (None, INVALID, -1) and e_ not in vs and self.f.rec(e_) and (getattr(self.d, '_vis_why', {}) or {}).get(e_, 'outside_view_volume') == 'outside_view_volume':      # only references outside the view volume drop a dimension (Residential basement dim 235357: its wall lies above the cut, Revit still lists the dimension)
                     self.d.stats['dim_hidden_ref'] += 1; return []
         dl = ob(fl.get('m_pDimLine')) or {}
@@ -355,6 +379,11 @@ class Annotations:
         size = (font.get('size') or 3 / 32 * IN) * scale
         cat = -2000260
         line = res.line(None, cat, 'proj', eid, annotation=True)
+        if os.environ.get('RVT_DIM_TYPE_COLOR', '1') == '1':          # the type's line-and-text category (Snowdon 'Level dimension' types: orange 0xff8040 in Revit's PDF) colours the dimension line and text
+            lc_ = self.f.eid(la.get('m_categoryId'))
+            try: rgb_ = list(res.line(None, lc_, 'proj', eid, annotation=True)['rgb'])[:3] if lc_ in self.doc['categories'] else None
+            except Exception: rgb_ = None
+            if rgb_ and rgb_ != [0, 0, 0] and list(line['rgb'])[:3] == [0, 0, 0]: line = dict(line, rgb=rgb_)
         tickst = res.line(None, self.f.eid(tf.get('m_tickCategoryId')) if tf.get('m_tickCategoryId') is not None else cat, 'proj', eid, annotation=True)
         gap = 1 / 16 * IN * scale; ext = 3 / 32 * IN * scale; tick = 3 / 64 * IN * scale
         lsn = self.f.rec(self.f.eid(tf.get('m_arrowHeadStyleId')))
@@ -372,7 +401,7 @@ class Annotations:
         if len(wr) == len(refs):
             for i_, w_ in enumerate(wr):
                 try:
-                    g_ = ob(w_['m_pWitnessRef'])['m_geomRef']; r_ = self.f.rec(self.f.eid(g_['m_elemId']))
+                    g_ = wref(w_)['m_geomRef']; r_ = self.f.rec(self.f.eid(g_['m_elemId']))
                     if r_ and r_['class'] == 'FamilyInstance': cen.add(i_)
                 except Exception: pass
         cdia = 1 / 16 * IN * scale
@@ -414,6 +443,12 @@ class Annotations:
             if vals and vals[0].get('m_value', -1) >= 0: val = vals[0]['m_value']
             if val is None: val = abs(ts[i + 1] - ts[i])
             txt = units.fmt_length(val, ob(tf.get('m_oLinFormatOptions')) or {}, self.proj_len)
+            try:                                                           # value text fields of the segment: prefix / suffix / override (Snowdon 'From Origin ' dimensions)
+                tfv = ob((vals[0] if vals else {}).get('m_oTextFields')) or {}
+                if os.environ.get('RVT_DIMFIELDS', '1') == '1':
+                    if tfv.get('m_valueOverride'): txt = tfv['m_valueOverride']
+                    else: txt = (tfv.get('m_prefix') or '') + txt + ((' ' if ' ' in txt else '') + tfv['m_suffix'] if tfv.get('m_suffix') else '')      # Revit PDFs: '1 1/2" Min' (mixed number: space) but '1/2"Max' / '3/8"Max' (no space); 'From Origin  110'-6"' is the prefix's own space
+            except Exception: pass
             eq = bool((fl.get('m_flags') or 0) & 0x80) and len(ts) > 2          # equality display (flag 0x80 of the dimension): every segment reads 'EQ' (rst basic cross section roof dimension)
             if eq: txt = tf.get('m_equalityText') or 'EQ'
             org = sg.get('m_origin')
@@ -425,7 +460,9 @@ class Annotations:
                 aopt = ob(tf.get('m_oLinFormatOptionsAlternate')) or {}
                 if (aopt.get('m_accuracy') or 1) < 1e-6 and units.du_of(aopt) in (0, 1, 2, 3, 6):      # unrestricted accuracy (Snowdon '_Working' styles: '236.5' under 19'-8 1/2"): all decimals, trailing zeros dropped, no unit symbol
                     k_ = {0: 0.3048, 1: 30.48, 2: 304.8, 3: 1.0, 6: 12.0}[units.du_of(aopt)]
-                    am = ('%.4f' % (val * k_)).rstrip('0').rstrip('.')
+                    am = ('%.10f' % (val * k_)).rstrip('0').rstrip('.')      # unrestricted accuracy: up to 10 decimals ('258.0554339555')
+                    if aopt.get('m_bUseGrouping') and os.environ.get('RVT_DIMFIELDS', '1') == '1':
+                        ip_, _, fp_ = am.partition('.'); am = '{:,}'.format(int(ip_)) + ('.' + fp_ if fp_ else '')      # digit grouping (Revit '1,326')
                 else: am = units.fmt_length(val, aopt, self.proj_len)
                 atxt = (tf.get('m_alternateUnitsPrefix') or '') + am + (tf.get('m_alternateUnitsSuffix') or '')
                 out.append({'t': 'text', 'text': atxt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * (size * (DIM_TXT_OFF - (1.73 if (aopt.get('m_accuracy') or 1) < 1e-6 else 2.91)) + toff)).tolist(), 'x': d_txt.tolist(), 'size': size,
@@ -435,6 +472,10 @@ class Annotations:
             pos = o + d * (t0 + t1) / 2
             out.append({'t': 'text', 'text': txt, 'origin': (pos + np.array([-d_txt[1], d_txt[0]]) * (size * DIM_TXT_OFF + toff)).tolist(), 'x': d_txt.tolist(), 'size': size,
                         'font': font.get('name') or 'Arial', 'bold': bool(la.get('m_bBold')), 'italic': bool(la.get('m_bItalic')), 'halign': 1, 'valign': 2, 'anchor': True, 'elem': eid, 'layer': 'text'})
+        if os.environ.get('RVT_DIM_TEXT_COLOR', '1') == '1' and line.get('rgb') and list(line['rgb'])[:3] != [0, 0, 0]:
+            c_ = line['rgb']; bgr = int(c_[0]) | int(c_[1]) << 8 | int(c_[2]) << 16        # the dimension's colour (type / category / view override) also colours its text (Snowdon Longitudinal: orange level dimensions 0xff8040 in Revit's PDF text spans)
+            for q in out:
+                if q['t'] == 'text' and 'color' not in q: q['color'] = bgr
         return out
 
 
@@ -459,6 +500,7 @@ class Tags:
             # built-in type parameters stored as family parameters under the unsigned 32-bit id (door Width -1001301 = 4293965995, Height -1001300)
             for k, v in self.fam_values(r).items():
                 k = int(k)
+                if k >= 2 ** 63: k -= 2 ** 32 * 2 ** 32 - 2 ** 32       # 2024+ files store the built-in id as uint64 (2^64 - 1001405): bring it to the 32-bit unsigned form first
                 if k >= 2 ** 31 and isinstance(v, (int, float, str)) and v != '': out.setdefault(k - 2 ** 32, v)
         mid = self.f.eid(r['fields'].get('m_masterId')) if r else None
         if mid not in (None, INVALID, sym) and depth < 3:
@@ -473,7 +515,7 @@ class Tags:
             pid = e.get('m_paramId')
             if not isinstance(pid, int): continue
             if e.get('m_str'): v = e['m_str']
-            elif e.get('m_elemId') not in (None, 4294967295, -1) and isinstance(e.get('m_elemId'), int): v = e['m_elemId']
+            elif e.get('m_elemId') not in (None, 4294967295, -1) and isinstance(e.get('m_elemId'), int) and (e['m_elemId'] < 2 ** 32 - 1 or os.environ.get('RVT_ELEMID64', '1') != '1'): v = e['m_elemId']      # 2024+ files: the invalid id is uint64 max
             elif e.get('m_value'): v = e['m_value']
             elif e.get('m_int'): v = e['m_int']
             else: v = ''
@@ -491,7 +533,7 @@ class Tags:
         sid = self.f.eid(ii.get('m_symbolId')); trf = ii.get('m_Trf') or {}
         if sid in (None, INVALID) or not trf.get('m_3x3'): return []
         sym = self.d.dec.titleblock_symbol(sid)
-        if not sym or not sym.get('labels'): return []
+        if not sym or not (sym.get('labels') or sym.get('texts')): return []
         vals = {}
         chain = [sid]; srec = self.f.rec(sid)
         while srec and len(chain) < 4:
@@ -507,6 +549,19 @@ class Tags:
         M = np.asarray(trf['m_3x3'], float); o = np.asarray(trf.get('m_or') or [0, 0, 0], float)
         k = float(np.linalg.norm(M[:, 0])) or 1.0
         out = []
+        if os.environ.get('RVT_SYMTEXT', '1') == '1':
+            from .gfx import rtf_text
+            for tn in sym.get('texts') or []:                              # static text of the family (RTF text notes: the centreline symbol 'C' over 'L' of Snowdon connection details)
+                txt = rtf_text(tn.get('rtf')).strip()
+                if not txt or not tn.get('origin'): continue
+                tt = self.doc['text_types'].get(tn['type']) or {}; font = self.doc['fonts'].get(tt.get('font')) or {}
+                pw = gfx.transform_pts([tn['origin']], M, o)[0]; org = ((np.asarray(pw, float) - O) @ Mv.T)[:2]
+                xd = (Mv @ (M @ np.asarray(tn.get('base') or [1, 0, 0], float)))[:2]
+                if np.linalg.norm(xd) < 1e-9: xd = np.array([1.0, 0.0])
+                if xd[0] < -1e-6: xd = -xd
+                out.append({'t': 'text', 'text': txt, 'origin': org.tolist(), 'x': (xd / np.linalg.norm(xd)).tolist(), 'size': (font.get('size') or 0.0078) * k,
+                            'font': font.get('name') or 'Arial', 'bold': tt.get('bold'), 'halign': SheetComposer._halign(tn['flags'] or 0), 'valign': SheetComposer._valign(tn['flags'] or 0),
+                            'anchor': True, 'elem': eid, 'layer': 'text'})
         for lab in sym['labels']:
             parts = []
             for prm in lab.get('params') or []:
@@ -584,7 +639,8 @@ class Tags:
             for e in o.get('m_paramSet') or []:
                 pid = e.get('m_paramId')
                 if isinstance(pid, int):
-                    if pid >= 2 ** 31: pid -= 2 ** 32
+                    if pid >= 2 ** 63: pid -= 2 ** 64                         # 2024+ files: uint64 negative ids
+                    elif pid >= 2 ** 31: pid -= 2 ** 32
                     out[pid] = e.get('m_value')
         return out
 
@@ -631,6 +687,8 @@ class Tags:
                 import re as _re
                 for k_, v_ in tr['fields'].items():
                     if _re.fullmatch(r'm_\w*Attr(ibutes)?Id', k_) and v_ is not None and self.f.eid(v_) not in (None, INVALID, -1) and self.f.rec(self.f.eid(v_)): sym = self.f.eid(v_); break
+            if sym in (None, INVALID) and isinstance(vals.get('Type Id'), int) and vals['Type Id'] > 0 and self.f.rec(vals['Type Id']) and os.environ.get('RVT_TAGTYPEID', '1') == '1':
+                sym = vals['Type Id']                              # elements whose type is only given by the 'Type Id' parameter (continuous footings: Description 'SF' + Width + Foundation Thickness = 'SF36"x18"')
             tsym = sym
             if sym not in (None, INVALID):
                 for k, v in self.params_of(sym).items(): vals.setdefault(k, v)
@@ -643,6 +701,19 @@ class Tags:
             # tag orientation: 0 horizontal, 1 vertical, 2 model (rotation angle): Snowdon L2 column tags at 45 deg, beam tags at 90 deg
             if oc.get('m_orientation') == 1: ang = math.pi / 2
             elif oc.get('m_orientation') == 2: ang = float(oc.get('m_rotationAngle') or 0.0)
+            elif r['class'] == 'BeamSystemTag' and os.environ.get('RVT_BST_DIR', '1') == '1':
+                # 'Beam System Tag Direction' (not stored on the tag): Revit runs the note perpendicular to the held beams (Snowdon Parapet 2 beams along x: text vertical 90 deg;
+                # sawtooth region beams -25 deg: 65 deg; L2 / L3 N-S beams: horizontal), read upright
+                try:
+                    js = self.f.rec(tagged); hb = (js['fields'].get('m_heldBeams') or []) if js else []
+                    e_ = np.asarray(hb[0]['m_ends'], float) if hb else None
+                    if e_ is not None:
+                        bd = (Mv @ (e_[1] - e_[0]))[:2]
+                        if np.linalg.norm(bd) > 1e-6:
+                            ang = math.atan2(bd[1], bd[0]) + math.pi / 2
+                            while ang > math.pi / 2 + 1e-6: ang -= math.pi
+                            while ang <= -math.pi / 2 + 1e-6: ang += math.pi
+                except Exception: pass
             if ang:
                 ca, sa = math.cos(ang), math.sin(ang)
                 R = np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1]]) * scale
@@ -698,6 +769,13 @@ class Tags:
                 nm = prm.get('name') or ''
                 v = raw.get(prm.get('param')) if isinstance(prm.get('param'), int) and prm.get('param') < 0 else None
                 if v is None: v = vals.get(nm)
+                if v is None and nm and isinstance(prm.get('param'), int) and prm['param'] < 0 and os.environ.get('RVT_TAGBYNAME', '1') == '1':
+                    # the label's built-in id is not stored on this element but another built-in parameter with the SAME NAME is (isolated footing: label 'Width' -1001558, family value under
+                    # 'Width' -1001568; Revit resolves by name: 'Cap36"x36"x24"')
+                    pn_ = self.d.dec.param_names
+                    for k_, x_ in raw.items():
+                        if k_ != prm['param'] and pn_.get(str(k_)) == nm and isinstance(x_, (int, float, str)) and not isinstance(x_, bool) and x_ not in ('', None) and not (isinstance(x_, int) and x_ > 1 << 24):
+                            v = x_; break
                 if prm.get('param') == -1002001 and not v and tsym not in (None, INVALID): v = self.type_name(tsym)       # Type Name: the (master) symbol's own name
                 if v is None and nm == 'Area' and tr and tr['class'] == 'RoomElem' and f_isarea(self, tr) and os.environ.get('RVTSHEETS_AREA_POLY'): v = _area_of_scheme_region(self.d, tr)      # off by default: polygon of the boundary lines gives 1277 SF where Revit prints 1310 (Residential area plan)
                 if v is None and nm == 'Area' and tr and tr['class'] == 'RoomElem':      # room area: Revit computes it from the boundary; here the floor face of the room volume
@@ -717,6 +795,9 @@ class Tags:
                 if isinstance(v, int) and not isinstance(v, bool) and v > 0 and 'Type' in nm and self.f.rec(v):
                     try: v = self.type_name(v) or v                       # ElementId-valued type parameter (JoistSystem 'Beam Type' = the beam type element: '18LH04')
                     except Exception: pass
+                if v is None and r['class'] == 'RoomTag' and tr and tr['class'] == 'RoomElem' and isinstance(prm.get('param'), int) and prm['param'] < 0 \
+                        and nm not in ('Area', 'Perimeter', 'Volume', 'Level', 'Upper Limit', 'Limit Offset', 'Unbounded Height') and os.environ.get('RVT_TAGQ', '1') == '1':
+                    v = '?'                                            # a room that never stored the label's string parameter (Residential attic: no Floor Finish / Comments): Revit prints '?' (DXF A-AREA-IDEN)
                 if v is None: v = ''                                   # Revit shows an empty label when the value is missing (sample text only in the family editor)
                 if isinstance(v, float) and prm.get('fmt'):
                     v = units.fmt_length(v, dict(prm['fmt'], m_displayUnits=units.du_of(prm['fmt'])), units.length_format(self.f))      # the label's own number format (CW12")
@@ -840,8 +921,9 @@ class Markers:
                 if sh.get('kind') == 'sheet':
                     for vp in sh.get('viewports') or []: ref[vp['view']] = (vp.get('detail_number'), sh.get('sheetNumber'))
             self.d.dec.__dict__['_vp_of_view'] = ref
-        if vid not in ref: return []
-        dn, sn = ref[vid]
+        if vid in ref: dn, sn = ref[vid]
+        elif os.environ.get('RVT_UNPLACED_MARK', '1') == '1': dn, sn = '-', '-'          # an elevation whose view is on no sheet reads '-' / '-' (view_k annotations scene PDF: 8 texts in each plan)
+        else: return []
         from .sheet import SheetComposer
         out = []
         font = self.doc['fonts'].get(self.f.eid(ob(af.get('m_lineAndTextAttr')).get('m_fontId'))) if af.get('m_lineAndTextAttr') else None
@@ -883,7 +965,8 @@ def section_marker(drawer, eid, O, Mv, scale, res, vid, pts=None):
     look = look / (np.linalg.norm(look) or 1)
     vp = next((vp for s in doc['sheets'].values() for vp in s['viewports'] if vp['view'] == tv), None)
     sheet = next((s for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
-    vals = {'Detail Number': (vp or {}).get('detail_number') or '', 'Sheet Number': (sheet or {}).get('sheetNumber') or '',
+    vals = {'Detail Number': (vp or {}).get('detail_number') or ('-' if vp is None and os.environ.get('RVT_UNPLACED_MARK', '1') == '1' else ''), 'Sheet Number': (sheet or {}).get('sheetNumber') or ('---' if vp is None and os.environ.get('RVT_UNPLACED_MARK', '1') == '1' else ''),      # a section whose view is on no sheet reads '-' over '---' (Snowdon Facades L1 PDF)
+
             'Reference Label': ((vt or {'fields': {}})['fields'].get('m_refLabelStr') or '') if fl.get('m_bIsViewerReference') else ''}      # reference sections ('Reference Other View') show their view type's label ('typ.')
     # jogged sections (Residential A-2, Commercial 173630: Revit DXF) carry the full head at BOTH ends; straight ones head + tail box (A-3)
     tail_key = 'm_sectionHeadFamilyTagId' if len(pts) > 2 else 'm_sectionTailFamilyTagId'
@@ -1002,7 +1085,13 @@ def symbol_prims(drawer, sid, R, o, eid, res, cat):
     for p in pc['fills']:
         pat = drawer.doc['fill_patterns'].get(p.get('pattern'))
         if p.get('loops') and (pat is None or pat.get('solid')) and not ((p.get('fill_flags') or 0) & 4 and False):
-            out.append({'t': 'fill', 'loops': [[q[:2] for q in l] for l in p['loops']], 'color': [0, 0, 0], 'elem': eid, 'layer': 'annotation_fill'})
+            col_ = [0, 0, 0]
+            if cat == -2000200 and os.environ.get('RVT_SECTION_FILL_COLOR', '1') == '1':          # section head flags take the colour of their filled region's graphic style (Snowdon head 580314: region style 973285 colour 255 = the red flags of Revit's PDFs; the black first fill is covered)
+                eg_ = (drawer.doc['gstyles'].get(p.get('edge_gs')) or {}).get('color')
+                if eg_ is not None: col_ = list(eg_)[:3]
+            out.append({'t': 'fill', 'loops': [[q[:2] for q in l] for l in p['loops']], 'color': col_, 'elem': eid, 'layer': 'annotation_fill'})
+    if cat == -2000200 and os.environ.get('RVT_SECTION_FILL_COLOR', '1') == '1' and any(o_.get('layer') == 'annotation_fill' and o_['color'] != [0, 0, 0] for o_ in out):
+        out = [o_ for o_ in out if o_.get('layer') == 'annotation_fill' and o_['color'] != [0, 0, 0]]      # a head family with a coloured region (Snowdon: red) shows only that one (no outlines either: the Revit PDF holds the red triangle alone); its alternatives are hidden by the family's visibility parameters (Revit draws only the red flags)
     return out
 
 
@@ -1059,7 +1148,8 @@ def callout(drawer, eid, O, Mv, scale, res, vid):
     if L > 1e-6 and L > 0: out.append({'t': 'line', 'pts': [a.tolist(), (h - dv / L * hr).tolist()], 'style': st, 'elem': eid, 'layer': 'annotation'})
     vp = next((x for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
     sheet = next((s for s in doc['sheets'].values() for x in s['viewports'] if x['view'] == tv), None)
-    vals = {'Detail Number': (vp or {}).get('detail_number') or '', 'Sheet Number': (sheet or {}).get('sheetNumber') or '',
+    vals = {'Detail Number': (vp or {}).get('detail_number') or ('-' if vp is None and os.environ.get('RVT_UNPLACED_MARK', '1') == '1' else ''), 'Sheet Number': (sheet or {}).get('sheetNumber') or ('---' if vp is None and os.environ.get('RVT_UNPLACED_MARK', '1') == '1' else ''),      # a section whose view is on no sheet reads '-' over '---' (Snowdon Facades L1 PDF)
+
             'Reference Label': (((f.rec(f.eid((f.rec(tv) or {'fields': {}})['fields'].get('m_dbViewTypeId'))) or {'fields': {}})['fields'].get('m_refLabelStr') or '') if fl.get('m_bIsViewerReference') else '')}      # reference callouts show their view type's label ('typ.')
     for lab in (drawer.dec.titleblock_symbol(sid) or {}).get('labels', []):
         txt = ' '.join(label_str(vals.get(prm.get('name'), '')) for prm in lab.get('params') or []).strip()

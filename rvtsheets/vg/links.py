@@ -54,6 +54,6 @@ def view_links(f, fl):
     for sid in f.byid and {r['id'] for r in f.recs('RvtLinkSymbol')}:
         # display settings are keyed by link TYPE id in Snowdon (one instance per type) but by link INSTANCE id when a type has several instances
         # (2024 vg_links scene: key 301595 = instance 2, 'By linked view' of plan 356 = LINKOVR row) : per-instance settings in 'instances'
-        out[sid] = {'visible': sid not in inv, 'halftone': sid in ht, 'underlay': sid in un, 'custom': cust.get(sid) or next((c for k, c in cust.items() if inst.get(k) == sid), None),
+        out[sid] = {'visible': sid not in inv, 'halftone': sid in ht, 'underlay': sid in un, 'type_custom': cust.get(sid), 'custom': cust.get(sid) or next((c for k, c in cust.items() if inst.get(k) == sid), None),
                     'instances': {k: c for k, c in cust.items() if inst.get(k) == sid}}
     return out

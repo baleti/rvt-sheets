@@ -8,3 +8,15 @@ Package `rvtsheets/vg/`: stage functions on decoded Doc dicts. `tests/test_vg.py
 
 ## Resolution report (for the hidden-line renderer / control panel)
 `resolve_view(dec, doc, vid)` -> {view, template, filters, hidden_categories, elements: {eid: {cls, cat, phase, filters, overrides (merged members), source (member -> category:ID | filter:ID | phase | element), proj/cut {w mm, rgb, dash, pen, halftone}, halftone, transparency}}}.
+
+## Link content (stage 9b, c6-vg)
+`vg/linkdraw.py`, `RVT_LINKS=1` (off by default). resolve_path finds the link file next to the host (corpus number prefixes ignored, RVT_LINK_DIRS); a second ViewDrawer draws the linked view copy with the host frame (X_L = R^T X_H, O_L = R^T (O_H - t)); display mode per INSTANCE id: by linked view = that view (its phase decides: oracle links scene, a phase-1 view hides phase-3 content), by host view = host phase, filter, detail, range moved into link coordinates; halftone mixes with white. Only model layers are taken (no link annotations). Verified on the oracle scene 2026_vg_links; not on Snowdon, whose Revit references were exported with the links unloaded.
+
+## Element-list rules added by c6-vg (all with RVT_* off switches, see PROGRESS.md 2026-10-18)
+RVT_GRID_CROP_PLAN, RVT_CGL_NOBBOX, RVT_CGL_EDGEON, RVT_FAMWALL, RVT_ROOM_SECTION, RVT_RCP_SWEEPS. Parked: elevation markers are per plan in Revit (no stored link found), face splitters listed per view by host face orientation (unproven), ceiling plan 36 below-cut elements.
+
+## c7-vg additions (2026-10-19)
+- RVT_ROOM_UNPLACED=0 off: unplaced rooms (empty bbox sentinel) are listed in views of the room's own phase (m_phaseId) only.
+- RVT_LINK_LISTED=1 on (default off): RvtLinkInstance elements are listed in every view (Revit does this when the link was loaded at export; Snowdon's references were exported unloaded).
+- Unit tests: python3 -m pytest -q tests/test_vg.py tests/test_filters.py tests/test_visibility.py tests/test_linkdraw.py (no corpus needed).
+- Scene check: tools/check_elements.py SCENE.rte gt_views/SCENE.rte.views on host3 under a 3 GB cap (each ~1 min); see the FEATURE-AUDIT tail for the numbers.

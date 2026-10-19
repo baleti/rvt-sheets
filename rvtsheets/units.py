@@ -47,7 +47,7 @@ def _round(x, acc):
 def fmt_length(ft, opt, project=None):
     if opt.get('m_bUseDefault') and project is not None: opt = project
     du = du_of(opt); acc = opt.get('m_accuracy') or 1.0
-    neg = ft < 0; ft = abs(ft)
+    neg = ft < -1e-9; ft = abs(ft)
     if du == 4:                                          # feet and fractional inches; accuracy in feet
         inches = _round(ft * 12, acc * 12)
         f_ = int(inches // 12 + 1e-9); i = inches - f_ * 12
@@ -62,7 +62,9 @@ def fmt_length(ft, opt, project=None):
         inches = _round(ft * 12, acc if opt.get('m_unitTypeId') else acc * 12); fr = Fraction(inches).limit_denominator(256); whole = int(fr); rem = fr - whole       # 2022+ unit ids: accuracy in inches
         s = ('%d' % whole if rem == 0 else '%d %s' % (whole, rem)) + '"'
     elif du == 3: s = _fix(_round(ft, acc), acc)
-    elif du == 6: s = _fix(_round(ft * 12, acc), acc) + '"'
+    elif du == 6:
+        sy_ = opt.get('m_symbolTypeId')
+        s = _fix(_round(ft * 12, acc), acc) + ('' if (isinstance(sy_, dict) and sy_.get('m_typeId') == '') else '"')      # decimal inches: the symbol is an option (Facades dimension style: '6.0000000000' without the quote)
     else:
         k = {0: 0.3048, 1: 30.48, 2: 304.8}.get(du, 304.8)
         s = _fix(_round(ft * k, acc), acc)

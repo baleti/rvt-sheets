@@ -379,7 +379,7 @@ class Decoder:
         fl = r['fields']
         def note(n, kind):
             o = ob(n)
-            d = {'kind': kind, 'origin': o.get('m_orig'), 'up': o.get('m_upVec'), 'base': o.get('m_baseVec'), 'height': o.get('m_height'), 'width': o.get('m_lineWidth'),
+            d = {'kind': kind, 'rtf': (ob(o.get('m_oRtfData')) or {}).get('m_arrRtfStream') if kind == 'text' else None, 'origin': o.get('m_orig'), 'up': o.get('m_upVec'), 'base': o.get('m_baseVec'), 'height': o.get('m_height'), 'width': o.get('m_lineWidth'),
                  'type': self.E(o.get('m_attrId')), 'flags': o.get('m_flags'), 'nowrap': o.get('m_bNoWrapping')}
             if kind == 'label':
                 d['params'] = [{'param': self.E(p.get('m_paramId')), 'name': self.param_names.get(str(self.E(p.get('m_paramId')))), 'sample': p.get('m_sampleText'), 'prefix': p.get('m_prefix'),

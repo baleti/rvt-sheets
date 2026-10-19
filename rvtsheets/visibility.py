@@ -3,7 +3,7 @@ import os
 Returns ids plus, for every element, the phase status (for phase graphic overrides) and the reason when excluded."""
 import json, os
 import numpy as np
-from .reader import ob, path, INVALID
+from .reader import ob, path, INVALID, wref
 
 CAT_TYPES = {int(k): v for k, v in json.load(open(os.path.join(os.path.dirname(__file__), 'data', 'category_types.json'))).items()}
 NEVER_CLASSES = {'GStyleElem', 'PipeSegment', 'Alignment', 'ReferencePoint', 'FormElem', 'ProfileRefPlane'}     # styles / data / constraint elements (ProfileRefPlane: sketch planes of railings/stairs): never drawn in a view
@@ -11,6 +11,8 @@ NOT_IN_3D = {'BasePoint', 'CoordinateSystemDisplayElem', 'CurveElem'}      # pro
 PLAN_MARKERS = {'InteriorElev', 'InteriorElevArrow', 'Section'}
 OWNED_ONLY_KINDS = {'drafting', 'anon_drafting', 'legend', 'rendering', 'schedule', 'graphical_column_schedule', 'sheet'}
 MARKER_CLASSES = {'Section', 'InteriorElevArrow', 'InteriorElev', 'CalloutTag'}
+ABOVE_CUT_KEEP = {'Viewer3d', 'JoistSystem', 'BeamSystem', 'Rebar', 'RebarInSystem', 'AreaReinforcement', 'PathReinforcement', 'PropertyLineSegment', 'Property', 'Grid', 'Level', 'RefPlane', 'InteriorElev', 'InteriorElevArrow', 'Section', 'ExtentElem', 'ModelClipBox'}
+ABOVE_CUT_KEEP_CATS = {-2000151, -2001330, -2001320, -2001300}      # generic models (Residential), structural columns / framing / foundations (Snowdon structural plans list members above the cut)
 DATUM_CLASSES = {'Grid', 'Level', 'RefPlane'}
 SKETCH_CATS = {-2000045, -2000954}            # <Sketch> lines, railing path extension lines: visible only in sketch mode
 AREA_BOUNDARY = -2000079
@@ -32,7 +34,7 @@ class ElementInfo:
             is_type = 'm_symbolInfo' in fl or (r['class'].endswith(('Symbol', 'Type')) and r['class'] != 'SpanDirectionSymbol')       # SpanDirectionSymbol is an instance (floor span annotation)
             self.info[eid] = {'cls': r['class'], 'cat': E(h.get('m_categroryId')) if h else INVALID, 'owner': E(h.get('m_ownerViewId', fl.get('m_ownerDBViewId'))),
                               'dopt': E(h.get('m_designOptionId', fl.get('m_designOptionId'))), 'created': E(fl.get('m_createdPhaseId')), 'demolished': E(fl.get('m_demolishedPhaseId')),
-                              'type': is_type, 'vflags': path(h, 'm_viewRules', 'm_nVisibleViewFlags'), 'has_header': bool(h)}
+                              'fam': E(fl.get('m_famId')) if r['class'] == 'SWall' else INVALID, 'type': is_type, 'vflags': path(h, 'm_viewRules', 'm_nVisibleViewFlags'), 'has_header': bool(h)}
         self._bb = {}
 
     def bbox(self, eid):
@@ -256,6 +258,7 @@ class Visibility:
         if kind == 'plan' and v.get('range'):
             r = v['range']; zlo = min(x for x in (r.get('depth'), r.get('bottom')) if x is not None); zhi = r.get('top')
             if r.get('plan_view_type') == 2 and r.get('cut') is not None and os.environ.get('RVT_CEILING_RANGE', '1') == '1': zlo = r['cut']       # reflected ceiling plans look up: elements from the cut plane to the top (Residential 'attic' ceiling plan 9952 lists 0 of the 15 predicted walls below its cut)
+            rcp_strict = r.get('plan_view_type') == 2 and os.environ.get('RVT_RCP_TOUCH', '1') == '1' and v.get('discipline') != 2      # ceiling plans: floors / stair runs whose top only touches the range bottom are unlisted (Residential RCP 36 / attic: 6 floors + 4 runs)
             ub = r.get('underlay_bottom'); ut = r.get('underlay_top')
             if ub is not None and ut is not None and abs(ub) < 1e8 and abs(ut) < 1e8:      # underlay range (shown halftone)
                 zlo = min(zlo, ub); zhi = max(zhi, ut)
@@ -264,7 +267,7 @@ class Visibility:
             if crop.get('crop_active'):
                 cut = self._crop_test(crop, use_z=False)
             def test(bb):
-                if bb[1][2] < zlo + TOUCH or bb[0][2] > zhi + 1e-6: return False         # an element whose top only touches the bottom of the range (floors on the level below, stair runs ending at the level) is outside it
+                if bb[1][2] < zlo + (1e-6 if rcp_strict and bb[1][2] - bb[0][2] > 1e-3 else TOUCH) or bb[0][2] > zhi + 1e-6: return False         # an element whose top only touches the bottom of the range (floors on the level below, stair runs ending at the level) is outside it
                 return cut(bb) if cut else True
             return test
         sb = v.get('section_box')
@@ -278,10 +281,61 @@ class Visibility:
             if kind == 'section' and not cu and v.get('class') == 'DBViewSection' and os.environ.get('RVT_JOG', '1') == '1':
                 pcs = self._jog_pieces(v, crop)
                 if pcs:
+                    nmin = min(nz for nz, _ in pcs)
                     tests = [self._crop_test(crop, use_z=True, xy=crop.get('crop_active'), near=nz, xr=xr) for nz, xr in pcs]
+                    loose = [self._crop_test(crop, use_z=True, xy=crop.get('crop_active'), near=nmin, xr=xr) for nz, xr in pcs]
+                    self._loose_vol = lambda bb: any(t(bb) for t in loose)      # stairs of a jogged section are listed down to the crop's near clip, not only behind their piece's cut plane
                     return lambda bb: any(t(bb) for t in tests)
             return self._crop_test(crop, use_z=kind == 'section', xy=crop.get('crop_active'), near0=kind == 'section' and near is None and v.get('id') not in self._callout_views(), near=near)
         return lambda bb: True
+
+    def _origin_in_view(self, v, vol):
+        """the coordinate-system display element is listed only in views whose volume contains the model origin: plans by their PRIMARY range (no underlay) and crop, sections / 3D by the view volume
+        (Residential: unlisted in the basement / attic / ceiling plans, the boxed {3D} view and the 'typ. door head' section)"""
+        z = np.zeros((2, 3))
+        if v['kind'] == 'plan' and v.get('range'):
+            r = v['range']; zs = [x for x in (r.get('bottom'), r.get('depth')) if x is not None]
+            zlo = r['cut'] if r.get('plan_view_type') == 2 and r.get('cut') is not None else (min(zs) if zs else -1e9)
+            if not (zlo - 1e-6 <= 0.0 <= (r.get('top') if r.get('top') is not None else 1e9) + 1e-6): return False
+            from .compose import crop_rect_uv
+            cr = crop_rect_uv(v)
+            if cr is not None:
+                O = np.asarray(v['origin'], float); X = np.asarray(v['right'], float); Y = np.asarray(v['up'], float)
+                u, w = float((-O) @ X), float((-O) @ Y)
+                return cr[0] <= u <= cr[2] and cr[1] <= w <= cr[3]
+            return True
+        if v['kind'] == 'section' and (v.get('crop') or {}).get('basis'):
+            # sections / elevations: only the depth matters, not the crop frame: listed iff the origin lies beyond the crop frame's cut plane (z > 0 in the crop basis: Commercial 12 of 12,
+            # rst_basic 12 of 12 views; typ. wall / window / building section of Residential with z -1.7 are the exceptions, the door head with the same z is unlisted)
+            c = v['crop']; l = (np.zeros(3) - np.asarray(c['origin'], float)) @ np.asarray(c['basis'], float).T
+            return bool(l[2] > 0.01)
+        return bool(vol(z))
+
+    def _camera_disc(self, eid):
+        """discipline of the 3D view a camera (Viewer3d) belongs to"""
+        m = self.__dict__.get('_cam_disc')
+        if m is None:
+            m = self._cam_disc = {}
+            for vid, vv in self.doc['views'].items():
+                if vv.get('kind') == '3d':
+                    try: m[self.dec.f.eid(self.dec.f.rec(vid)['fields']['m_viewerId'])] = vv.get('discipline')
+                    except Exception: pass
+        return m.get(eid)
+
+    def _room_on_cut_line(self, eid, v):
+        """does the section line (straight, or jogged: viewer m_frontCut pieces, or the callout's own cutter) cross the room's bbox"""
+        bb = self.info.bbox(eid)
+        if bb is None or not np.all(bb[0] <= bb[1]) or np.abs(bb).max() > 1e20: return True
+        crop = v['crop']; co = np.asarray(crop['origin'], float); B = np.asarray(crop['basis'], float); b = crop['bounds']
+        pts = np.array([[x, y, z] for x in (bb[0][0], bb[1][0]) for y in (bb[0][1], bb[1][1]) for z in (bb[0][2], bb[1][2])])
+        loc = (pts - co) @ B.T; x0, x1, z0, z1 = loc[:, 0].min(), loc[:, 0].max(), loc[:, 2].min(), loc[:, 2].max()
+        cu = (v.get('cutters') or {}).get('Cutter')
+        pcs = None
+        if cu and cu.get('origin') is not None: pcs = [(float((np.asarray(cu['origin'], float) - co) @ B[2]), (-1e9, 1e9))]
+        elif v.get('class') == 'DBViewSection' and os.environ.get('RVT_JOG', '1') == '1': pcs = self._jog_pieces(v, crop)
+        if not pcs: pcs = [(float(b[2][1]), (-1e9, 1e9))]
+        tol = 0.05
+        return any(x1 >= xr[0] - tol and x0 <= xr[1] + tol and z0 - tol <= nz <= z1 + tol for nz, xr in pcs)
 
     def _datum_perpendicular(self, eid, v):
         """sections / elevations list only datum planes perpendicular to the view plane (|n.dir| <= 0.05; Snowdon 7.5 degree grid, rst_basic angled section 'Section Wall2': 21 reference planes + 16 grids unlisted)"""
@@ -407,7 +461,7 @@ class Visibility:
         hid, xflags = self.hidden_categories(v); shown_opts = self.shown_options(v0)
         hidden_el = set(v0.get('hidden_elements') or [])
         pf = self.pfilters.get(v.get('phase_filter'))
-        vol = self.volume(v)
+        self._loose_vol = None; vol = self.volume(v)
         crop_v = None
         if v['kind'] == 'section' and (v.get('crop') or {}).get('crop_active'):
             try:
@@ -420,17 +474,20 @@ class Visibility:
             if not e['has_header'] and e['cls'] in ('Level', 'Grid') and not e['type']:
                 # some datums (2020 Residential level 'first floor') have no element header: category from the class, shown by default
                 e = dict(e, cat={'Level': -2000240, 'Grid': -2000220}[e['cls']], vflags=1, has_header=True)
-            if e['cls'] == 'ExtentElem' and e['owner'] == vid and os.environ.get('RVT_VIEW_META', '1') == '1': out[eid] = None; continue      # the view's own datum-extent element is in its list in every view (Residential 25/25, Commercial 24/24)
+            if e['cls'] == 'ExtentElem' and e['owner'] == vid and v['kind'] != 'graphical_column_schedule' and os.environ.get('RVT_VIEW_META', '1') == '1': out[eid] = None; continue      # the view's own datum-extent element is in its list in every view (Residential 25/25, Commercial 24/24)
             if e['type'] or not e['has_header']: continue
+            if e.get('fam', INVALID) != INVALID and os.environ.get('RVT_FAMWALL', '1') == '1': why[eid] = 'family_member_wall'; continue      # walls with a Family id (in-place family content, Residential 201264 / 205606-8): Revit lists them in no view
             if e['owner'] not in (INVALID, vid): continue
+            if v['kind'] == 'graphical_column_schedule' and e['owner'] != vid and (e['cls'] in ('Level', 'GraphSchedColumnTable') or (e['cls'] == 'FamilyInstance' and e['cat'] == -2001330)) and os.environ.get('RVT_GCS', '1') == '1': out[eid] = None; continue      # a graphical column schedule lists every structural column and every level (rst_basic: 30 of 30 + 9 of 9)
             if v['kind'] in OWNED_ONLY_KINDS and e['owner'] != vid: continue
             if v['kind'] == '3d' and e['cls'] in MARKER_CLASSES: why[eid] = 'marker_in_3d'; continue
             if e['cls'] == 'ModelClipBox' and eid in self._active_clip_boxes() and e['cat'] not in hid and v['kind'] not in OWNED_ONLY_KINDS and os.environ.get('RVT_VIEW_META', '1') == '1': out[eid] = None; continue      # one project-wide clip box (lowest id) is listed in every model view
             if e['cls'] == 'ModelClipBox' and (v.get('section_box') or {}).get('id') != eid: why[eid] = 'other_views_section_box'; continue
+            if e['cls'] == 'ModelClipBox' and not (v.get('section_box') or {}).get('on') and eid not in self._active_clip_boxes() and os.environ.get('RVT_BOX_OFF', '1') == '1': why[eid] = 'section_box_off'; continue      # a 3D view's own section box is listed only while it is active (Residential: the 5 inactive boxes of 5 views unlisted)
             if e['cls'] == 'Level' and v['kind'] == 'section' and crop_v is not None:
                 lz = self._level_z(eid)
                 if lz is not None and not (crop_v[0] - 1e-6 <= lz <= crop_v[1] + 1e-6): why[eid] = 'level_outside_crop'; continue     # a level appears in a section / elevation only when its elevation lies in the crop's vertical range (all views of 4 samples)
-            if e['cls'] in NEVER_CLASSES: why[eid] = 'never_drawn_class'; continue
+            if e['cls'] in NEVER_CLASSES and not (e['cls'] == 'ReferencePoint' and v['kind'] == '3d' and os.environ.get('RVT_REFPOINT_3D', '1') == '1'): why[eid] = 'never_drawn_class'; continue
             if e['cls'] in ('Viewport', 'GCSViewport') and e['owner'] != vid: why[eid] = 'viewport_not_on_this_sheet'; continue
             if e['cat'] in SKETCH_CATS: why[eid] = 'sketch_line'; continue
             if e['cat'] == AREA_BOUNDARY:
@@ -453,6 +510,36 @@ class Visibility:
                 bb_ = self.info.bbox(eid); rg_ = v.get('range') or {}
                 if bb_ is not None and (not np.all(bb_[0] <= bb_[1]) or np.abs(bb_).max() > 1e20): bb_ = None      # unplaced room (empty bbox sentinel): listed by Revit
                 if v['kind'] == 'plan' and bb_ is not None and rg_.get('cut') is not None and rg_.get('plan_view_type') != 2 and (bb_[1][2] < rg_['cut'] - 1e-6 or bb_[0][2] > rg_['cut'] + 1e-6): why[eid] = 'room_not_at_cut'; continue      # a room is listed in a plan only when it spans the cut plane (Residential: first floor cut 4, rooms 0..8 listed, the basement rooms -8..-1 not; attic 13 / Site 32.8)
+            if e['cls'] == 'RoomElem' and v['kind'] == 'section' and (v.get('crop') or {}).get('basis') and os.environ.get('RVT_ROOM_SECTION', '1') == '1' and not self._room_on_cut_line(eid, v):
+                why[eid] = 'room_not_on_section_line'; continue      # a room is listed in a section only where the section line crosses it (Residential: cross section lists the 4 rooms spanning the cut plane, 7 rooms behind it unlisted; building section = jogged line)
+            if e['cls'] == 'FaceSplitter' and v['kind'] == 'section' and v.get('dir') is not None and v.get('discipline') != 2 and os.environ.get('RVT_SPLIT_EDGEON', '1') == '1':
+                try:
+                    sk_ = self.dec.f.rec(self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_sketchId')))['fields']['m_pPlane']['obj']
+                    n_ = np.cross(np.asarray(sk_['m_xVec'], float), np.asarray(sk_['m_yVec'], float)); n_ /= max(np.linalg.norm(n_), 1e-12)
+                    if abs(float(n_ @ np.asarray(v['dir'], float))) < 0.2: why[eid] = 'split_face_edge_on'; continue      # a split line is listed in a section only when its host face faces the viewer (Residential: N/S sections list the wall splits, E/W and the cross section none; floor splits in no section)
+                except Exception: pass
+            if e['cls'] in ('InteriorElev', 'InteriorElevArrow') and v['kind'] == 'plan' and (v.get('crop') or {}).get('crop_active') and os.environ.get('RVT_MARKER_CROP', '1') == '1':
+                try:
+                    from .compose import crop_rect_uv
+                    cr_ = crop_rect_uv(v); fl_ = self.dec.f.rec(eid)['fields']
+                    pos_ = fl_.get('m_pos') or fl_.get('m_targetPos')
+                    if cr_ is not None and pos_ is not None:
+                        O_ = np.asarray(v['origin'], float); X_ = np.asarray(v['right'], float); Y_ = np.asarray(v['up'], float); q_ = np.asarray(pos_, float) - O_
+                        u_, w_ = float(q_ @ X_), float(q_ @ Y_)
+                        if not (cr_[0] <= u_ <= cr_[2] and cr_[1] <= w_ <= cr_[3]): why[eid] = 'marker_outside_crop'; continue      # elevation markers outside a plan's crop region are not listed (Commercial Enlarged Toilet Rooms 1 of 5, Mezzanine 0 of 4)
+                except Exception: pass
+            if e['cls'] == 'Viewer3d' and os.environ.get('RVT_CAMERA_DISC', '1') == '1' and v.get('discipline') is not None:
+                dc_ = self._camera_disc(eid); dv_ = v.get('discipline')
+                if dc_ is not None and not (dv_ == dc_ or dv_ == 4095 or dc_ == 4095):
+                    why[eid] = 'camera_other_discipline'; continue
+                if os.environ.get('RVT_OWN_CAMERA', '0') == '1' and v['kind'] == '3d' and dv_ != 2 and self.dec.f.eid((self.dec.f.rec(v['id']) or {'fields': {}})['fields'].get('m_viewerId')) == eid: why[eid] = 'own_camera'; continue      # a 3D view does not list its own camera (structural '3D View n' do)      # a 3D view's camera is listed only in views of the same discipline (rst_basic: cameras of the 4 structural '3D View n' only in structural views; discipline 4095 = all)
+            if e['cls'] in ('LineLoad', 'AreaLoad', 'PointLoad') and v['kind'] == '3d' and os.environ.get('RVT_LOADS', '1') == '1': why[eid] = 'loads_not_listed'; continue      # structural loads are in no 3D view list (rst_basic: 0 of 40 predicted in the analytical 3D view; plans list them)
+            if e['cls'] == 'WallSweep' and v['kind'] == 'plan' and (v.get('range') or {}).get('plan_view_type') != 2 and v['range'].get('bottom') is not None and abs(v['range']['bottom']) < 1e8 and v.get('discipline') != 2 and os.environ.get('RVT_SWEEP_UNDERLAY', '1') == '1':
+                bb_ = self.info.bbox(eid)
+                if bb_ is not None and bb_[1][2] < min(v['range']['bottom'], v['range'].get('depth') if v['range'].get('depth') is not None else v['range']['bottom']) - 1e-6: why[eid] = 'sweep_in_underlay_only'; continue      # wall sweeps wholly below the primary range (underlay only) are unlisted (Residential attic plan: 8 of 8)
+            if e['cls'] == 'WallSweep' and v['kind'] == 'plan' and (v.get('range') or {}).get('plan_view_type') == 2 and v['range'].get('cut') is not None and os.environ.get('RVT_RCP_SWEEPS', '1') == '1':
+                bb_ = self.info.bbox(eid)
+                if bb_ is not None and bb_[1][2] < v['range']['cut'] - 1e-6: why[eid] = 'sweep_below_rcp_cut'; continue      # reflected ceiling plans list walls below their cut (underlay) but not wall sweeps / reveals (Residential first floor + attic RCPs: 16 of 16 unlisted)
             if v['kind'] == 'section' and e['cls'] == 'VolumeOfInterest' and os.environ.get('RVT_VOI_SECTION', '1') == '1': why[eid] = 'scope_box_in_section'; continue       # Snowdon: 0 of 20 section lists hold a scope box (12 predicted)
             if v.get('discipline') == 2 and e['cls'] == 'SWall' and os.environ.get('RVT_STRUCT_WALLS', '1') == '1':
                 fl_ = self.dec.f.rec(eid)['fields']
@@ -460,7 +547,8 @@ class Visibility:
             if v['kind'] == '3d' and e['cls'] in NOT_IN_3D and os.environ.get('RVT_NOT_IN_3D', '1') == '1' and self._is22(): why[eid] = 'not_in_3d'; continue
             if e['cls'] == 'RefPlane' and self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_designOptionId')) == -4: why[eid] = 'refplane_dopt4'; continue       # reference planes with design option id -4 (Commercial 52, Residential 8) are in no Revit list; those with -1 are (rst_basic 21, Snowdon 16, Residential 2)
             if v['kind'] == 'section' and e['cls'] in DATUM_CLASSES and v.get('dir') and not self._datum_perpendicular(eid, v): why[eid] = 'datum_not_perpendicular'; continue
-            if v['kind'] == 'section' and e['cls'] in ('Grid', 'RefPlane') and not self._datum_meets_crop(eid, v): why[eid] = 'datum_outside_crop'; continue
+            if v['kind'] == 'plan' and e['cls'] == 'RefPlane' and v.get('dir') and os.environ.get('RVT_REFPLANE_PLAN', '1') == '1' and not self._datum_perpendicular(eid, v): why[eid] = 'refplane_not_vertical'; continue      # plans list only vertical reference planes (rst_basic Roof Level / Top of Parapet / Ref Beam system: the 4 horizontal and 2 slanted planes unlisted)
+            if (v['kind'] == 'section' or (v['kind'] == 'plan' and e['cls'] == 'Grid' and os.environ.get('RVT_GRID_CROP_PLAN', '1') == '1')) and e['cls'] in ('Grid', 'RefPlane') and not self._datum_meets_crop(eid, v): why[eid] = 'datum_outside_crop'; continue
             c = e['cat']
             if v.get('filters') and (e['cls'] in ('Section', 'InteriorElev') or c != INVALID) and self._filter_hidden(v, eid, self._filter_cat(eid, e)):
                 why[eid] = 'filter_hidden'; continue
@@ -474,6 +562,10 @@ class Visibility:
                 ok = self.marker_in_section(eid, v)
                 if ok and c not in hid: out[eid] = None
                 else: why[eid] = 'marker_rule'
+                continue
+            if c == INVALID and e['cls'] == 'CoordinateSystemDisplayElem' and os.environ.get('RVT_CSDE', '1') == '1' and v['kind'] in ('plan', 'section', '3d'):
+                if self._origin_in_view(v, vol): out[eid] = None
+                else: why[eid] = 'origin_outside_view'
                 continue
             if c == INVALID: why[eid] = 'no_category'; continue
             if not (e['vflags'] or 0) & 1: why[eid] = 'view_flags'; continue
@@ -495,7 +587,25 @@ class Visibility:
             if e['dopt'] not in (INVALID,) and e['dopt'] != -4 and self.primary_options and e['dopt'] not in shown_opts: why[eid] = 'design_option'; continue
             if e['owner'] == INVALID:
                 bb = self.info.bbox(eid)
-                if bb is not None and not vol(bb): why[eid] = 'outside_view_volume'; continue
+                nobox_ = bb is not None and e['cls'] == 'PartMaker' and not np.all(bb[0] <= bb[1])      # division makers without extent are listed in every view (rst_basic: 8 of 8 in all 32 views)
+                unplaced_room_ = bb is not None and e['cls'] == 'RoomElem' and not np.all(bb[0] <= bb[1]) and os.environ.get('RVT_ROOM_UNPLACED', '1') == '1'
+                if unplaced_room_:
+                    bb = None
+                    rp_ = self.dec.f.eid((self.dec.f.rec(eid)['fields']).get('m_phaseId'))
+                    if rp_ not in (None, INVALID) and v.get('phase') not in (None, INVALID) and rp_ != v.get('phase'): why[eid] = 'unplaced_room_other_phase'; continue      # an unplaced room belongs to one phase and is listed only in views of that phase (VG phases scene: Phase 3 views only)      # unplaced room (empty bbox sentinel): listed in every plan / section (VG phases scene: 9 FN)
+                if bb is not None and not nobox_ and not vol(bb) and not (e['cls'] in ('StairsElement', 'StairsRun', 'StairsSupport') and v['kind'] == 'section' and getattr(self, '_loose_vol', None) is not None and os.environ.get('RVT_JOG_STAIRS', '1') == '1' and self._loose_vol(bb)): why[eid] = 'outside_view_volume'; continue
+                if bb is not None and e['cls'] in ('StairsRun', 'StairsElement', 'StairsSupport') and v['kind'] == 'plan' and v.get('range') and v['range'].get('plan_view_type') != 2 and v['range'].get('cut') is not None and os.environ.get('RVT_STAIR_ABOVE_CUT', '1') == '1' and v.get('discipline') != 2 and bb[0][2] > v['range']['cut'] + 1e-3:
+                    why[eid] = 'stair_above_cut'; continue      # a stair lying wholly above the cut plane is not listed in the plan (Residential basement: descending stair 0..-1.5 above cut -4)
+                sbx_ = v.get('section_box')
+                if bb is not None and v['kind'] == '3d' and sbx_ and sbx_.get('on') and e['cls'] == 'FamilyInstance' and (self.doc['categories'].get(e['cat']) or {}).get('name') == 'Planting' and os.environ.get('RVT_PLANT_CENTRE', '1') == '1':
+                    o_ = np.asarray(sbx_['origin'], float); B_ = np.asarray(sbx_['basis'], float); bn_ = sbx_['bounds']
+                    c_ = ((bb[0] + bb[1]) / 2 - o_) @ B_.T
+                    if not all(bn_[i][1] <= c_[i] <= bn_[i][0] for i in range(3)): why[eid] = 'planting_centre_outside_box'; continue      # RPC plantings (huge bboxes) are listed in a boxed 3D view only with their centre inside the box (Residential {3D}: 2 of 3 outside plantings were listed)
+                if bb is not None and v['kind'] == 'plan' and v.get('range') and v['range'].get('plan_view_type') != 2 and v['range'].get('cut') is not None and bb[0][2] > v['range']['cut'] + 1e-3 and e['cls'] not in ABOVE_CUT_KEEP and e['cat'] not in ABOVE_CUT_KEEP_CATS and os.environ.get('RVT_ABOVE_CUT_ALL', '1') == '1' and v.get('discipline') != 2:
+                    why[eid] = 'wholly_above_cut'; continue      # elements wholly above the cut plane are listed by Revit only for beam systems / generic models (Residential 9 of 10 unlisted: roofs, fascias, railings, equipment, split faces; rst_basic doors 2)
+                if bb is not None and e['cls'] in ('ContFooting', 'BuildingPad') and v['kind'] == 'plan' and v.get('range') and (v['range'].get('cut') or 0) < 100 and os.environ.get('RVT_FOOT_TOUCH', '1') == '1' and v.get('discipline') != 2:
+                    zbs_ = [x for x in (v['range'].get('bottom'), v['range'].get('depth'), v['range'].get('underlay_bottom')) if x is not None and abs(x) < 1e8]
+                    if any(abs(bb[1][2] - x) < 1e-3 for x in zbs_) and bb[1][2] <= min(zbs_) + 1e-3: why[eid] = 'footing_touches_range_bottom'; continue      # continuous footings whose top only touches the range bottom (Residential basement / first floor: 6 of 6 unlisted; rst_basic footings inside the range listed)
                 if bb is not None and e['cat'] in ABOVE_CUT_CATS and v['kind'] == 'plan' and v.get('range') and v['range'].get('plan_view_type') != 2 and os.environ.get('RVT_FRAME_ABOVE', '1') == '1':
                     cz_ = v['range'].get('cut')
                     if cz_ is not None and bb[0][2] > cz_ + 0.01: why[eid] = 'above_cut'; continue          # wholly above the plan's cut plane: never in Revit's list (framing 468 / columns 48 / rebar 30 / foundations 6 / connections 16 / floors 12 predicted, 0 listed, over every oracle plan of 4 files; walls are mixed and stay)
@@ -503,7 +613,7 @@ class Visibility:
                     # ceiling-hosted lighting fixtures wholly above the cut plane are not in a floor plan (Residential plans 32 / 180203 / basement: collector lists none; the ceiling plan, whose cut plane is at the ceiling, lists them)
                     cz = v['range'].get('cut')
                     if cz is not None and bb[0][2] >= cz - 1e-6: why[eid] = 'above_cut_lighting'; continue
-                if bb is None and e['cls'] not in DATUM_CLASSES and e['cls'] not in ('Viewer3d', 'ExtentElem', 'ModelClipBox'): why[eid] = 'no_graphics_no_bbox'; continue
+                if bb is None and e['cls'] not in DATUM_CLASSES and e['cls'] not in ('Viewer3d', 'ExtentElem', 'ModelClipBox') and not (e['cls'] == 'RvtLinkInstance' and os.environ.get('RVT_LINK_LISTED', '0') == '1') and not (e['cls'] == 'RoomElem' and unplaced_room_): why[eid] = 'no_graphics_no_bbox'; continue
             out[eid] = st
         if os.environ.get('RVT_TAG_HOST', '1') == '1':
             for eid in [k for k in out if self.info.info[k]['cls'] == 'IndependentTag']:           # a tag whose tagged element is not in the view is not listed either
@@ -517,15 +627,55 @@ class Visibility:
             for eid in [k for k in out if self.info.info[k]['cls'] == 'LinearDimString']:       # same rules as annot.dimension: Revit lists no dimension whose references are all dangling / whose referenced element is not in the view / whose plane lies below a plan's range
                 fl = self.dec.f.rec(eid)['fields']; wr = fl.get('m_witnessRefs') or []; refs = []
                 for w in wr:
-                    try: refs.append(self.dec.f.eid(((ob(ob(w).get('m_pWitnessRef') or {}) or {}).get('m_geomRef') or {}).get('m_elemId')))
+                    try: refs.append(self.dec.f.eid((wref(w).get('m_geomRef') or {}).get('m_elemId')))
                     except Exception: refs.append(None)
                 if wr and all(x in (None, INVALID, -1) for x in refs): del out[eid]; why[eid] = 'dim_dangling_refs'; continue
-                if os.environ.get('RVT_DIM_REFVIEW', '1') == '1' and any(x not in (None, INVALID, -1) and x in self.info.info and self.info.info[x]['owner'] == INVALID and x not in out and why.get(x) == 'outside_view_volume' for x in refs): del out[eid]; why[eid] = 'dim_ref_not_in_view'; continue
+                if self.dec.f.idbits == 64 and os.environ.get('RVT_DIMREF64', '0') == '1' and any(x not in (None, INVALID, -1) and x in self.info.info and self.dec.f.rec(x) is None for x in refs): del out[eid]; why[eid] = 'dim_ref_no_record'; continue
+                if os.environ.get('RVT_DIM_REFVIEW', '1') == '1' and (self.dec.f.idbits == 32 or os.environ.get('RVT_DIMREF64', '0') != '1') and any(x not in (None, INVALID, -1) and x in self.info.info and self.info.info[x]['owner'] == INVALID and x not in out and why.get(x) == 'outside_view_volume' for x in refs): del out[eid]; why[eid] = 'dim_ref_not_in_view'; continue
                 dl = ob(fl.get('m_pDimLine')) or {}
                 if v['kind'] == 'plan' and dl.get('m_origin') and rgp.get('bottom') is not None and dl['m_origin'][2] < rgp['bottom'] - 0.5: del out[eid]; why[eid] = 'dim_below_range'
         if os.environ.get('RVT_CGL_HOST', '1') == '1':
             for eid in [k for k in out if self.info.info[k]['cls'] == 'CurtainGridLine']:       # a curtain grid line is listed only with its curtain wall (Commercial detail views: 18 grid lines of walls outside the view)
                 try: h = self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_hostId'))
                 except Exception: continue
-                if h in self.info.info and h not in out: del out[eid]; why[eid] = 'host_not_in_view'
+                if h in self.info.info and h not in out and not (v['kind'] == '3d' and os.environ.get('RVT_CGL_HOST_3D', '1') == '1'): del out[eid]; why[eid] = 'host_not_in_view'
+        if os.environ.get('RVT_STAIR_PARENT', '1') == '1' and v['kind'] != 'section':
+            # a stair's runs are listed only with their stair element and its supports only with their run (rst_basic: Level 1 / Level 2 / foundation / pile views list the run and supports of a stair whose element we already dropped, Revit lists none of the set)
+            for eid in [k for k in out if self.info.info[k]['cls'] == 'StairsRun']:
+                try: par = self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_stairsId'))
+                except Exception: continue
+                if par in self.info.info and par not in out: del out[eid]; why[eid] = 'stair_parent_unlisted'
+            for eid in [k for k in out if self.info.info[k]['cls'] == 'StairsSupport' and (os.environ.get('RVT_STAIR_SUPPORT_PARENT', '0') == '1' or (v['kind'] == '3d' and os.environ.get('RVT_STAIR_SUPPORT_3D', '1') == '1'))]:
+                try: par = self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_hostCompId'))
+                except Exception: continue
+                if par in self.info.info and par not in out: del out[eid]; why[eid] = 'stair_run_unlisted'
+        if os.environ.get('RVT_CGL_FLATLINE', '1') == '1' and v['kind'] == 'plan':
+            for eid in [k for k in out if self.info.info[k]['cls'] == 'CurtainGridLine']:      # straight horizontal grid lines are not listed in plans (Commercial 14 of 14), horizontal arcs of curved walls are (1 of 1)
+                bb_ = self.info.bbox(eid)
+                if bb_ is None or np.abs(bb_).max() > 1e20 or abs(bb_[1][2] - bb_[0][2]) > 1e-3: continue
+                try: fc_ = ob(self.dec.f.rec(eid)['fields'].get('m_pFullCurve')) or {}
+                except Exception: continue
+                if fc_ and fc_.get('m_radius') is None: del out[eid]; why[eid] = 'cgl_flat_line_in_plan'
+        if os.environ.get('RVT_CGL_NOBBOX', '1') == '1' and v['kind'] == 'section':
+            for eid in [k for k in out if self.info.info[k]['cls'] == 'CurtainGridLine']:      # no extent known: Revit lists none of them in sections / elevations (Commercial: 77 of 77 absent, while 48 of 54 in 3D views are listed)
+                bb_ = self.info.bbox(eid)
+                if bb_ is None or np.abs(bb_).max() > 1e20: del out[eid]; why[eid] = 'cgl_no_bbox'
+        if os.environ.get('RVT_CGL_EDGEON', '1') == '1' and v['kind'] == 'section' and v.get('right') is not None:
+            # Revit lists no vertical curtain grid lines of a curtain wall seen edge-on (the wall plane contains the view direction): Commercial elevations,
+            # the vertical lines of the side walls are absent while the horizontal line across the wall depth is listed
+            try:
+                import collections
+                O_ = np.asarray(v['origin'], float); X_ = np.asarray(v['right'], float); Y_ = np.asarray(v['up'], float); Z_ = np.asarray(v['dir'], float)
+                byh = collections.defaultdict(list)
+                for eid in [k for k in out if self.info.info[k]['cls'] == 'CurtainGridLine']:
+                    bb_ = self.info.bbox(eid)
+                    if bb_ is None or abs(bb_[1][2] - bb_[0][2]) < 1e-3 or np.abs(bb_).max() > 1e20: continue
+                    d_ = bb_[1] - bb_[0]
+                    if abs(d_[0]) > 1e-3 or abs(d_[1]) > 1e-3: continue                   # vertical lines only
+                    h = self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_hostId'))
+                    byh[h].append((eid, float((bb_[0] - O_) @ X_), float((bb_[0] - O_) @ Z_)))
+                for h, L_ in byh.items():
+                    if len(L_) >= 2 and max(x[1] for x in L_) - min(x[1] for x in L_) < 0.3 and max(x[2] for x in L_) - min(x[2] for x in L_) > 1.0:
+                        for eid, _, _ in L_: del out[eid]; why[eid] = 'cgl_edge_on'
+            except Exception: pass
         return (out, why) if explain else out

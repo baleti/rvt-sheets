@@ -10,7 +10,7 @@ from . import gfx
 
 def fmt_elev(ft, imperial, f=None):
     if imperial:
-        if f is not None and abs(abs(ft) * 12 % 1.0 - 0.0) > 1e-6 and abs(abs(ft) * 12 % 1.0 - 1.0) > 1e-6:       # fractional inches: the project length format (Snowdon level '-3'-5 1/2"')
+        if f is not None and (os.environ.get('RVT_ELEVFMT', '1') == '1' or (abs(abs(ft) * 12 % 1.0 - 0.0) > 1e-6 and abs(abs(ft) * 12 % 1.0 - 1.0) > 1e-6)):       # the project length format (Snowdon '8'-1"', '0"', '-3'-5 1/2"'; 2020 samples '15' - 0"')
             try:
                 from . import units
                 return units.fmt_length(ft, {'m_bUseDefault': 1}, units.length_format(f))
@@ -96,8 +96,8 @@ class Datums:
                     if sd.max() < -far - tol or sd.min() > tol: continue
                 except Exception: pass
             # parameterise along whichever datum axis is the line direction
-            if abs(dline @ x) > abs(dline @ y): ax, lo, hi = x, a0, a1
-            else: ax, lo, hi = y, b0, b1
+            if abs(dline @ x) > abs(dline @ y): ax, lo, hi = x, a0, a1; on_x = True
+            else: ax, lo, hi = y, b0, b1; on_x = False
             e = ext.get(eid) or {}
             # per-view 2D extents (freeEnd/bubbleEnd) override the 3D extents when set (?)
             grid_ext = None
@@ -216,7 +216,7 @@ class Datums:
             # north end (Commercial / rst basic lo = north, Snowdon L2 lo = south but Revit's 1-9 are on top)
             if r['class'] == 'Grid' and not e and v.get('kind') == 'plan':
                 dv = uv1 - uv0
-                if abs(dv[1]) >= abs(dv[0]) and uv0[1] < uv1[1]: uv0, uv1 = uv1, uv0       # north-south lines: bubble at the north end (Commercial, rst basic, Snowdon L2: 1-9 on top)
+                if abs(dv[1]) >= abs(dv[0]) and uv0[1] < uv1[1] and (not on_x or os.environ.get('RVT_GRIDNORTH') == '1'): uv0, uv1 = uv1, uv0       # lines along the surface's xVec keep the envelope low end as the head end (Commercial grid 1 has xVec +y and its head is at the SOUTH end); lines along yVec (Snowdon vertical-plane grids) put it north: bubble at the north end (Commercial, rst basic, Snowdon L2: 1-9 on top)
             ends = [(uv0, uv0 - uv1)]
             if (e.get('m_endBubbleOverrides') or 0) & 1: ends.append((uv1, uv1 - uv0))
             if r['class'] == 'Level': ends = [(uv1, uv1 - uv0)]

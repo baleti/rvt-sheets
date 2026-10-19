@@ -41,6 +41,15 @@ def ob(x):
     return x.get('obj', x) if isinstance(x, dict) and 'obj' in x and 'ptr' in x else x
 
 
+def wref(w):
+    """the witness reference object of a dimension's m_witnessRefs entry: m_pWitnessRef, or (2024 'lazy' refs: m_isLazyRef 1, direct slot null) the one nested in m_pWitnessRefInfoBase"""
+    w = ob(w)
+    if not isinstance(w, dict): return {}
+    o = ob(w.get('m_pWitnessRef'))
+    if not o: o = ob((ob(w.get('m_pWitnessRefInfoBase')) or {}).get('m_pWitnessRef'))
+    return o or {}
+
+
 def path(f, *keys, default=None):
     for k in keys:
         f = ob(f)

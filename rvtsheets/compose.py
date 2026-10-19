@@ -146,6 +146,15 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
                     s.raw('<g data-view="%s" data-shaded="1"%s><image x="%.3f" y="%.3f" width="%.3f" height="%.3f" href="data:image/png;base64,%s" preserveAspectRatio="none"/></g>'
                           % (v['id'], clip, a[0], a[1], b[0] - a[0], b[1] - a[1], base64.b64encode(img[0]).decode()))
             except Exception as ex: log('shaded plan %s failed: %r' % (v['id'], ex))
+        if v['kind'] == 'section' and cr and shaded3d.is_shaded_section(v) and os.environ.get('RVT_SHADED_SECTION', '1') == '1':
+            try:                                                            # surfaces filled with their material colours under the linework
+                import base64
+                img = shaded3d.section_image(vd, v['id'], 2400)
+                if img:
+                    a = tx(cr[0], cr[3]); b = tx(cr[2], cr[1])
+                    s.raw('<g data-view="%s" data-shaded="1"%s><image x="%.3f" y="%.3f" width="%.3f" height="%.3f" href="data:image/png;base64,%s" preserveAspectRatio="none"/></g>'
+                          % (v['id'], clip, a[0], a[1], b[0] - a[0], b[1] - a[1], base64.b64encode(img[0]).decode()))
+            except Exception as ex: log('shaded section %s failed: %r' % (v['id'], ex))
         s.raw('<g data-view="%s"%s>' % (v['id'], clip))
         rest = [p for p in d['prims'] if p.get('elem') not in datum_ids(d)]
         if clip3:

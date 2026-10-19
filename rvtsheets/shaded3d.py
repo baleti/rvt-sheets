@@ -347,6 +347,47 @@ def plan_image(drawer, vid, width_px=2400, max_tris=2_000_000):
     return png, w, h
 
 
+def _clip_attr(T, C, A, K, n, d):
+    """triangles T (k,3,3) clipped to x.n <= d with per-triangle attributes carried to every piece"""
+    from .viewdraw import _clip_tris_halfspace
+    if not len(T): return T, C, A, K
+    s_ = T @ n - d; ins = s_ <= 1e-9
+    allin = ins.all(1); part = ~allin & ins.any(1)
+    Ts = [T[allin]]; Cs = [C[allin]]; As = [A[allin]]; Ks = [K[allin]]
+    for i in np.nonzero(part)[0]:
+        pc = _clip_tris_halfspace(T[i:i + 1], n, d)
+        if len(pc): Ts.append(pc); Cs.append(np.tile(C[i], (len(pc), 1))); As.append(np.full(len(pc), A[i])); Ks.append(np.full(len(pc), K[i]))
+    return np.concatenate(Ts), np.concatenate(Cs), np.concatenate(As), np.concatenate(Ks)
+
+
+def section_image(drawer, vid, width_px=2400, max_tris=2_000_000):
+    """shaded orthographic image of a section / elevation with a shaded visual style (Snowdon Longitudinal: cut concrete grey, steel red-brown):
+    (png, w, h) covering the view's crop rectangle, or None. Geometry is cut at the view's cut plane and clipped at the far plane (viewdraw.planes);
+    cut solids are two-sided shaded, so the interior behind the cut plane shows in the material colour."""
+    got = collect(drawer, vid, max_tris)
+    if got is None: return None
+    T, C, A, (O, X, Y, Z, c, persp), K = got
+    b = c.get('bounds')
+    if not b or not len(T): return None
+    v = drawer.doc['views'][vid]
+    Zs = -Z                                                       # stored direction (towards the eye): w = (x - O) . Zs
+    wc, wf, _ = drawer.planes(v, O, Zs)
+    T, C, A, K = _clip_attr(T, C, A, K, Zs, float(O @ Zs + wc)) if wc is not None else (T, C, A, K)             # keep w <= cut
+    if wf is not None and wf > -1e8 and len(T): T, C, A, K = _clip_attr(T, C, A, K, -Zs, float(-(O @ Zs) - wf))   # keep w >= far
+    if not len(T): return None
+    half = ((b[0][0] - b[0][1]) / 2, (b[1][0] - b[1][1]) / 2); ctr = ((b[0][0] + b[0][1]) / 2, (b[1][0] + b[1][1]) / 2)
+    eye = O + Zs * (float(((T - O) @ Zs).max()) + 10.0)
+    png, w, h = render(T, C, A, eye, X, Y, Z, None, None, width_px, False, ortho_half=half, centre=ctr,
+                       sky=((255, 255, 255), (255, 255, 255)), gain=float(os.environ.get('RVT_SECTION_GAIN', '1.0')),
+                       sun=tuple(-Z))                                  # headlight: faces towards the viewer keep the exact material colour (Revit's PDF fills Snowdon steel (72,36,33) flat)
+    return png, w, h, (ctr[0] - abs(half[0]), ctr[1] - abs(half[1]), ctr[0] + abs(half[0]), ctr[1] + abs(half[1]))
+
+
+def is_shaded_section(v):
+    """section / elevation drawn with a shaded style (ViewDisplayMgr.m_model.m_surfaces 3..7; 7 = Snowdon 2024 Longitudinal, whose Revit export is filled)"""
+    return v.get('kind') == 'section' and ((v.get('display') or {}).get('m_model') or {}).get('m_surfaces') in (3, 4, 5, 6, 7)
+
+
 def is_shaded_plan(v):
     """plan drawn with a shaded style (ViewDisplayMgr.m_model.m_surfaces 3..6)"""
     return v.get('kind') == 'plan' and ((v.get('display') or {}).get('m_model') or {}).get('m_surfaces') in (3, 4, 5, 6)

@@ -39,6 +39,32 @@ def _raster(tris, W, H, u0, v0, px, zb):
 
 
 @njit(cache=True)
+def _raster_rgba(tris, x_off, y_off, u0, v0, px, zb, img, rgba, eps):
+    """paint the triangles (n,3,3) [u,v,w] into img (h,w,4) (a window starting at pixel x_off, y_off of the depth buffer) with rgba where
+    the triangle's own depth is the nearest surface of its pixel (within eps)"""
+    H = zb.shape[0]; W = zb.shape[1]; h = img.shape[0]; w = img.shape[1]
+    for t in range(tris.shape[0]):
+        x0 = (tris[t, 0, 0] - u0) / px; y0 = (tris[t, 0, 1] - v0) / px; z0 = tris[t, 0, 2]
+        x1 = (tris[t, 1, 0] - u0) / px; y1 = (tris[t, 1, 1] - v0) / px; z1 = tris[t, 1, 2]
+        x2 = (tris[t, 2, 0] - u0) / px; y2 = (tris[t, 2, 1] - v0) / px; z2 = tris[t, 2, 2]
+        den = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+        if abs(den) < 1e-12: continue
+        xmin = max(int(np.floor(min(x0, x1, x2))), x_off); xmax = min(int(np.ceil(max(x0, x1, x2))), x_off + w - 1, W - 1)
+        ymin = max(int(np.floor(min(y0, y1, y2))), y_off); ymax = min(int(np.ceil(max(y0, y1, y2))), y_off + h - 1, H - 1)
+        for yy in range(ymin, ymax + 1):
+            py = yy + 0.5
+            for xx in range(xmin, xmax + 1):
+                pxx = xx + 0.5
+                a = ((y1 - y2) * (pxx - x2) + (x2 - x1) * (py - y2)) / den
+                b = ((y2 - y0) * (pxx - x2) + (x0 - x2) * (py - y2)) / den
+                c = 1.0 - a - b
+                if a < -1e-6 or b < -1e-6 or c < -1e-6: continue
+                z = a * z0 + b * z1 + c * z2
+                if z + eps >= zb[yy, xx]:
+                    for q in range(4): img[yy - y_off, xx - x_off, q] = rgba[q]
+
+
+@njit(cache=True)
 def _visible(segs, n_samp, u0, v0, px, zb, eps, out):
     """segs: (m,2,3); out: (m, n_samp) bool visibility of samples"""
     H = zb.shape[0]; W = zb.shape[1]
@@ -78,6 +104,23 @@ class DepthBuffer:
             if os.environ.get('RVT_NO_RUST_RASTER') != '1' and rvt_fast.hlr_raster(tris, self.W, self.H, self.u0, self.v0, self.px, self.zb): return    # bit-identical to _raster, row bands in parallel
         except Exception: pass
         _raster(tris, self.W, self.H, self.u0, self.v0, self.px, self.zb)
+
+    def paint(self, groups, eps):
+        """groups: [(tris (n,3,3) uvw, (r, g, b, a))] painted back to front onto a transparent window of the depth buffer wherever they are the nearest
+        surface: (png bytes, (u0, v0, u1, v1)) or None. Later groups paint over earlier ones."""
+        groups = [(np.ascontiguousarray(t, dtype=np.float64), c) for t, c in groups if len(t)]
+        if not groups: return None
+        allt = np.concatenate([t for t, _ in groups])
+        xs = (allt[:, :, 0] - self.u0) / self.px; ys = (allt[:, :, 1] - self.v0) / self.px
+        x0 = max(int(np.floor(xs.min())), 0); x1 = min(int(np.ceil(xs.max())) + 1, self.W); y0 = max(int(np.floor(ys.min())), 0); y1 = min(int(np.ceil(ys.max())) + 1, self.H)
+        if x1 <= x0 or y1 <= y0: return None
+        img = np.zeros((y1 - y0, x1 - x0, 4), dtype=np.uint8)
+        for t, c in groups: _raster_rgba(t, x0, y0, self.u0, self.v0, self.px, self.zb, img, np.asarray(c, dtype=np.uint8), eps)
+        if not img[:, :, 3].any(): return None
+        import io
+        from PIL import Image
+        buf = io.BytesIO(); Image.fromarray(img[::-1]).save(buf, 'PNG', optimize=False, compress_level=3)       # v grows upwards, image rows downwards
+        return buf.getvalue(), (self.u0 + x0 * self.px, self.v0 + y0 * self.px, self.u0 + x1 * self.px, self.v0 + y1 * self.px)
 
     def visible_parts(self, segs, eps):
         """segs (m,2,3) -> list of visible sub-segments [(p0, p1)] in uvw"""

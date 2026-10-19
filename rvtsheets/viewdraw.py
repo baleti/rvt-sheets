@@ -5,7 +5,7 @@ clipped to the view depth range -> cut regions at the cut plane + projected feat
 -> symbolic 2D curves projected -> styles resolved (style.Resolver)."""
 import math, collections, time, os, sys
 import numpy as np
-from .reader import INVALID, ob, ob as ob_, path
+from .reader import INVALID, ob, ob as ob_, path, wref
 IN = 1 / 12.0
 from .scene import Walker, ViewCtx
 from .hlr import DepthBuffer
@@ -234,6 +234,24 @@ class ViewDrawer:
             return wc, wf, Z
         return None, -1e9, Z
 
+    def _dim_link_hidden(self, eid, vid):
+        """a dimension whose reference is a Revit link instance disappears with the link: the view's link display (m_pRvtLinkOverrides.m_invisibleSet) hides the link TYPE
+        (Snowdon L1_43_High: the dimensions on link 2 are absent from Revit's PDF, those on the visible 'Arch Core' link stay)"""
+        try:
+            from .vg.links import view_links, link_instances
+            c = self.__dict__.setdefault('_lnk', {})
+            if 'inst' not in c: c['inst'] = link_instances(self.f)
+            if not c['inst']: return False
+            if vid not in c: c[vid] = view_links(self.f, self.f.rec(vid)['fields'])
+            vl, li = c[vid], c['inst']
+            for w in (self.f.rec(eid)['fields'].get('m_witnessRefs') or []):
+                g = ob(wref(w).get('m_geomRef'))
+                e = self.f.eid(g.get('m_elemId')) if g else None
+                if e in li and (vl.get(li[e]['symbol']) or {}).get('visible') is False: return True
+                if e in li and ((g.get('m_foreignElemIdRef') or {}).get('m_id64') in (None, 2 ** 64 - 1, 2 ** 32 - 1)) and os.environ.get('RVT_DIMLINK2', '0') == '1': return True      # the reference names the link instance but no linked element: Revit cannot resolve it (Snowdon '_Working Links' dimensions are absent from its PDFs)
+        except Exception: return False
+        return False
+
     def draw(self, vid, *a, **k):
         v = self.doc['views'].get(vid) or self.doc['views'].get(str(vid))
         from .compose import crop_rect_uv
@@ -248,7 +266,15 @@ class ViewDrawer:
         try:
             pieces = self._jog_pieces(v) if v and not getattr(self, '_piece', None) else None
             if pieces: return self._draw_jogged(vid, v, pieces, a, k)
-            return self._draw(vid, *a, **k)
+            d = self._draw(vid, *a, **k)
+            if v and v.get('kind') == 'plan' and os.environ.get('RVT_LINKS', '0') == '1' and not getattr(self, '_in_link', False):
+                try:
+                    from .vg.linkdraw import link_prims
+                    self._in_link = True
+                    try: d['prims'] = list(d['prims']) + link_prims(self, vid, v, d)
+                    finally: self._in_link = False
+                except Exception as ex: self.stats['link_error'] += 1; self.__dict__.setdefault('_link_err', repr(ex))
+            return d
         finally: patterns.CLIP = None; patterns.WORLD_UV = None
 
     def _jog_pieces(self, v):
@@ -407,6 +433,7 @@ class ViewDrawer:
                 if bb_ is not None and bb_[0][2] > v['range']['cut'] + 0.01: self.stats['above_cut_hidden'] += 1; continue
             if info['cls'] in ('Grid', 'Level'): datum_ids.append(eid); continue
             if info['cls'] == 'LinearDimString':
+                if os.environ.get('RVT_DIMLINK', '1') == '1' and self._dim_link_hidden(eid, vid): self.stats['dim_hidden_link'] += 1; continue      # dimensions to a link instance that this view hides
                 try: prims += self.ann.dimension(eid, O, Mv, scale, res); self.stats['dimensions'] += 1
                 except Exception as ex: self.stats['dimension_error'] += 1
                 continue
@@ -919,6 +946,21 @@ class ViewDrawer:
                 for eid, cid, T2, uvw, fid, gs, ov in clipped:
                     if ov.get('_frs') is not None: self.surface_hatch(eid, cid, uvw, ov['_frs'], db, eps, scale, prims, ov)
             except Exception: self.stats['surface_error'] += 1
+        if v['kind'] in ('section', '3d') and os.environ.get('RVT_SOLID_FILL', '1') == '1':
+            try:                                                        # solid surface fills of view / filter overrides (Snowdon 'Structure Only': columns by level, framing by z offset): flat colour on the visible front faces, under the linework
+                groups = []
+                for eid, cid, T2, uvw, fid, gs, ov in clipped:
+                    pat_ = self.doc['fill_patterns'].get(ov.get('surf_fg_pattern')) if ov.get('surf_fg_pattern') not in (None, -1) else None
+                    if not pat_ or not pat_.get('solid') or not isinstance(ov.get('surf_fg_color'), list) or ov.get('surf_fg_visible') is False: continue
+                    n_ = np.cross(uvw[:, 1] - uvw[:, 0], uvw[:, 2] - uvw[:, 0]); fr_ = uvw[n_[:, 2] > 1e-9]
+                    if len(fr_): groups.append((fr_, list(ov['surf_fg_color'])[:3] + [int(round(255 * (1 - (ov.get('transparency') or 0) / 100.0)))]))
+                got = db.paint(groups, eps * 1.5) if groups else None
+                if got:
+                    import base64
+                    a_, b_, c_, d_ = got[1]
+                    prims.append({'t': 'image', 'uri': 'data:image/png;base64,' + base64.b64encode(got[0]).decode(), 'center': [(a_ + c_) / 2, (b_ + d_) / 2], 'w': c_ - a_, 'h': d_ - b_, 'angle': 0.0, 'elem': None, 'layer': 'surface_fill'})
+                    self.stats['solid_fill_elems'] = len(groups)
+            except Exception: self.stats['solid_fill_error'] += 1
         self._apply_draw_order(v, vid, prims)
         # family symbolic lines in sections/elevations (door swings, window and furniture elevation symbols) are hidden by what is in
         # front of them like model edges (2020 Residential elevations showed every interior door through the walls); tolerance 3"

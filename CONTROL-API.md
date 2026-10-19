@@ -35,3 +35,10 @@ elements {eid: {cls, cat, phase, filters [ids matched, priority order], override
 source {member: "category:ID"|"filter:ID"|"phase"|"element"}, proj {w (mm at the view scale), rgb, dash [mm]|null, pen, halftone}, cut {same}, halftone, transparency (0-100), phase}}}`.
 Order of precedence per member: element override > filters (earlier in the view's list win) > phase-status override > category (sub-category falls back to parent) > object style.
 Members absent from `overrides` come from the object style (`proj`/`cut` already contain the resolved line style). Fill patterns: `overrides.surf_fg_pattern` etc. are fill pattern ids (doc fill_patterns); when absent the material's surface pattern applies (reader materials).
+
+## Update 2026-10-19 (c6-annot)
+- Text of tags / dimensions / level heads now follows Revit's PDF word for word on the Snowdon corpus (tools/pdf_text_all.py, tools/pdf_text_regress.sh): consumers can rely on `text` strings of prims with `elem` of class IndependentTag / BeamSystemTag / LinearDimString / Level / Grid / Section / InteriorElev being what Revit prints (dimension prefix / suffix / override, alternate units `part: alt_text` with digit grouping, unplaced markers '-' / '---').
+- `BeamSystemTag` text prims carry a rotation (`x` direction vector): perpendicular to the held beams of the tagged JoistSystem (Revit 'Beam System Tag Direction', not stored on the tag).
+- Static RTF text notes of annotation family instances (`FamilyInstance` detail items / generic annotations) are emitted as `text` prims with the instance `elem`.
+- Dimension prims whose references are link instances hidden in the view are not emitted (stat `dim_hidden_link`).
+- New env switches (all default on unless noted): RVT_DIMFIELDS, RVT_BST_DIR, RVT_TAGTYPEID, RVT_TAGBYNAME, RVT_ELEMID64, RVT_ELEVFMT, RVT_UNPLACED_MARK, RVT_SYMTEXT, RVT_TAGQ, RVT_DIMLINK; off by default: RVT_DIMLINK2, RVT_DIMREF64, RVT_GRIDNORTH=1 (old plan grid head rule).

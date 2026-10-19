@@ -8,7 +8,7 @@ Evidence: tools/check_elements.py (element sets vs FilteredElementCollector), to
 | category visibility (hidden categories, annotation/model/analytical/import flags) | done | element sets P/R 0.95-0.99 |
 | category overrides (weights, colours, patterns, halftone, transparency, cut/surface fill) | done | rosettas e |
 | subcategory overrides | partial | via category parent lookup |
-| element overrides, hidden elements | done / partial | m_explicitlyHiddenElements read; hidden dims of Snowdon L2 (595385/6) are hidden by an unknown mechanism |
+| element overrides, hidden elements | done / partial | m_explicitlyHiddenElements read; Snowdon L2 dims 595385/6 are not hidden: Revit has no bounding box for them (references to elements outside the view, oracle dimprobe) and lists none; the dimension-reference rule in visibility.py drops them (P .9941 on Snowdon) |
 | view filters (rules, enabled, visibility, overrides) | done | 2026-10-15: inverse rules decoded, 'Family and Type' resolved, filters now also hide annotation + marker elements (Sections/Callouts/Elevations categories); missing-parameter inverse rule = no match |
 | phase / phase filter | done (lists + resolved overrides) | oracle scene 2024_vg_phases: element phase status = Revit's ElementOnPhaseStatus 213/213; per-filter presentation (ByCategory / Overridden / DontShow) resolved: 'VG custom' view (Existing = Overridden: grey 127 pen 2, no cut fill; Temporary = Overridden blue; New ByCategory black; Demolished not shown) equals Revit's PNG; DXF/image numbers not measured |
 | discipline | partial | marker rules by discipline (coordination hides markers); no other effect modelled |
@@ -81,3 +81,25 @@ Reference: Revit PNG (3000 px) and, since 2026-10-17, PDF 206143.pdf (gt_views).
 
 ## c3-vg measured list agreement (2026-10-17, element lists vs Revit's FilteredElementCollector, tools/check_elements.py)
 Snowdon 2024/2026 P .9939 R .9984; Residential P .949 R .983; Commercial P .962 R .995; rst_basic P .986 R .982. Mechanisms added: design options (primary from DesignOptionSet), perpendicular + in-crop datums in sections, 3D grids/levels clipped by section box (2022+), view meta elements (extent, active section boxes), rooms across the cut, ceiling-plan volume, dimension reference rules, scope boxes not in sections. Open: elevation markers in template rosetta plan, CoordinateSystemDisplayElem rule, property lines outside range, hidden-line transparency semantics (needs Revit PNG compare).
+
+## c6-sheets update (2026-10-19)
+| area | status | notes |
+|---|---|---|
+| filter rule parameters (framing 'z Offset Value') | partial | Snowdon 600158: 364 of 942 framing instances have no decoded value; Revit colours 100+ beams, we match 18 (NOT = 0) / 12 (< -0.5): reader question open (NEEDS-FROM-SHEETS.md tail, tools/filter_probe.py, zoff_probe.py) |
+| grids in plans (Snowdon Parapet 2 876061) | done | black dash-dot, bubbles at Revit's ends (the 10-17 review pair was stale); line weight a little lighter than Revit's |
+| section cut of structural framing / columns / foundations (Snowdon Longitudinal 579975) | missing | only 5 elements are cut (4 walls + 1 floor); Revit fills cut steel dark red-brown and cut concrete grey; materials carry cut patterns (Steel 1121, Concrete 748) but framing/column solids never reach the cut path (family pieces with non-drawable or hidden graphics styles are kept as occluders only, viewdraw.py pieces['solids'] loop); tools/cutfill_probe.py, prim_probe.py (host1) |
+| section marker colour | missing | Revit draws the Longitudinal section flags red (view-specific line colour), ours black |
+| shaded 3D DXF tier | n/a | Revit's DXF of shaded views has datums only; score on the image tier |
+
+### c7-vg measured evidence on the Revit-authored V/G scenes (2026-10-19, tools/check_elements.py vs gt_views, element lists of Revit's FilteredElementCollector per view; identical on the 2024 and 2026 builds)
+| scene | precision | recall | what the false positives / misses are |
+|---|---|---|---|
+| vg_worksets | .832 | 1.000 | FP = per-plan elevation markers only |
+| vg_phases | .689 | 1.000 | FP = per-plan markers (145); unplaced room phase rule fixed R .972 -> 1.0 |
+| vg_discipline | .828 | 1.000 | FP = markers |
+| vg_hide | .766 | 1.000 | FP = markers |
+| vg_filters | .873 | 1.000 | FP = markers |
+| vg_templates / templates_var | .840 / .842 | 1.000 | FP = markers |
+| vg_markers | .794 | .9625 | marker 301634 (API-created) is listed only in the plan it was created for; no stored link marker -> plan found (arrows, viewer, section view, all plan records searched) |
+| vg_links | .877 (RVT_LINK_LISTED=1; .846 / .767 without) | 1.000 | link instances are listed when the link was loaded at export; not derivable from the file |
+| view templates, TPLCTL | non-controlled set identical to Revit's TPLCTL list for 7 of 7 templates in 4 scene files (2024/2026 templates, templates_var) |
