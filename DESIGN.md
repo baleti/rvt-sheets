@@ -1,7 +1,7 @@
 # rvt-sheets: design
 
 Goal: draw Revit SHEETS and the VIEWS placed on them, from the .rvt alone, as close to what Revit itself draws as we can measure.
-Own analysis only (no ODA, no code from rvt-rs or others). Autodesk sample files stay local.
+Own analysis only (no code from rvt-rs or others). Autodesk sample files stay local.
 
 ## 1. Sources
 * Reader (session 176, `~/rvt-research`, imported read-only): `rvt_xcache.get_x(file)` -> every record decoded schema-driven (`recs[(id, class)] = {id, class, fields, ...}`),

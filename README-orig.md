@@ -1,6 +1,6 @@
 # rvt-sheets
 
-Revit sheets and views drawn from the .rvt file alone (no Revit, no ODA): title blocks, viewports, plans, sections/elevations,
+Revit sheets and views drawn from the .rvt file alone (no Revit): title blocks, viewports, plans, sections/elevations,
 drafting views, legends, orthographic 3D, annotations (text, dimensions, tags, grids/levels), view filters/overrides/templates,
 phases, line weights/patterns, fill patterns. Uses the reader in ~/rvt-research (read-only). Fidelity numbers: PROGRESS.md; coverage: COVERAGE.md.
 
