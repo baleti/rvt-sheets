@@ -4,6 +4,7 @@ Returns ids plus, for every element, the phase status (for phase graphic overrid
 import json, os
 import numpy as np
 from .reader import ob, path, INVALID, wref
+from .viewrules import property_line_candidate
 
 CAT_TYPES = {int(k): v for k, v in json.load(open(os.path.join(os.path.dirname(__file__), 'data', 'category_types.json'))).items()}
 NEVER_CLASSES = {'GStyleElem', 'PipeSegment', 'Alignment', 'ReferencePoint', 'FormElem', 'ProfileRefPlane'}     # styles / data / constraint elements (ProfileRefPlane: sketch planes of railings/stairs): never drawn in a view
@@ -622,13 +623,17 @@ class Visibility:
                 # DXF of Residential / Commercial plans (14 views): property lines are in the views whose crop volume reaches 1000 ft ('bounds' z [1000, 0.1]: Level 1 157296, first floor 180203, Mezzanine
                 # ceiling plan 214395, none in the [100, 0] ones: 32 / 36 / attic) and in site plans (range top 200); RVT_PROPLINE_Z=0 restores the range rule
                 zb_ = ((v.get('crop') or {}).get('bounds') or [None, None, [0]])[2][0]
-                if os.environ.get('RVT_PROPLINE_Z', '1') == '1':
-                    site_ = rg.get('top') is not None and rg['top'] >= 100 and rg.get('plan_view_type') != 2 and rg['top'] < 1e8
-                    if v['kind'] != 'plan' or bb is None or not ((zb_ or 0) >= 999 or site_): why[eid] = 'property_line_rule'; continue
-                else:
-                    if v['kind'] != 'plan' or bb is None or rg.get('plan_view_type') == 2 or rg.get('top') is None: why[eid] = 'property_line_rule'; continue
-                    zlo_ = min(x for x in (rg.get('bottom'), rg.get('depth')) if x is not None)
-                    if bb[0][2] < zlo_ - 1e-6 or bb[0][2] > rg['top'] + 1e-6: why[eid] = 'property_line_range'; continue
+                legacy_ = os.environ.get('RVT_PROPLINE_Z', '1') != '1'
+                candidate_ = property_line_candidate(
+                    v['kind'], rg.get('plan_view_type'), rg.get('top'), zb_,
+                    legacy=legacy_, bbox_z=None if bb is None else bb[0][2],
+                    range_bottom=rg.get('bottom'), range_depth=rg.get('depth'))
+                if bb is None or not candidate_:
+                    # Preserve the distinction between range and eligibility exclusions.
+                    why[eid] = ('property_line_range' if legacy_ and bb is not None
+                                and v['kind'] == 'plan' and rg.get('plan_view_type') != 2
+                                and rg.get('top') is not None else 'property_line_rule')
+                    continue
                 ct = None
             if ct == 'Internal' or (ct in TYPE_FLAG and xflags.get(TYPE_FLAG[ct])): why[eid] = 'category_type_' + str(ct); continue
             if c in hid or par in hid: why[eid] = 'category_hidden'; continue

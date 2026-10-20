@@ -115,3 +115,6 @@ Snowdon 2024/2026 P .9939 R .9984; Residential P .949 R .983; Commercial P .962 
 | 3D levels | partial | envelope edges at the far corner with the view's filter colours (magenta); frame offset vs Revit's DXF unresolved |
 | structural framing tags | done | tags of straight framing run along the beam (L1 offsets 7 mm -> 1 mm) |
 | spot elevations without leader | partial | placement frame / alignment depends on the picked beam's direction sign: fits L1, not L2 (RVT_SPOT_OFFFRAME / RVT_SPOT_LEFT experiments, default off) |
+
+### c7-vg re-measure after the dev merge (2026-10-20, same scenes, 2024 = 2026 except markers): precision / recall of Revit's per-view element lists
+inverse .987 / 1.000 (5 FP = markers; all 7 NOT / HasNoValue filters right after the HasValue decoder fix) | phases 1.000 / 1.000 | links (RVT_LINK_LISTED=1) 1.000 / 1.000 | filters 1.000 / 1.000 | worksets 1.000 / 1.000 | discipline 1.000 / 1.000 | templates 1.000 / 1.000 | hide .994 / 1.000 | markers 1.000 / .981 (2026 .994 / .975). Corpus files: Snowdon Structural .9957 / .9988, Commercial .9961 / .9983, Residential .9927 / .9959, rst_basic .9953 / .9994.

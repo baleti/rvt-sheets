@@ -12,17 +12,5 @@ for l in sys.stdin:
 " >> $out   # file view x onlyRevit onlyOurs
 done
 if [ "$1" = update ]; then cp $out tools/pdf_text.baseline; echo baseline updated; else
-python3 - $out tools/pdf_text.baseline <<'PY'
-import sys
-def load(f):
-    d={}
-    for l in open(f):
-        p=l.split()
-        if len(p)>=5: d[(p[0],p[1])]=(int(p[3]),int(p[4]))
-    return d
-n,b=load(sys.argv[1]),load(sys.argv[2]); bad=0
-for k,v in n.items():
-    if k in b and (v[0]>b[k][0] or v[1]>b[k][1]): print('WORSE',k,'onlyRevit/onlyOurs',b[k],'->',v); bad+=1
-print('views',len(n),'worse',bad)
-PY
+python3 tools/regress_compare.py $out tools/pdf_text.baseline
 fi

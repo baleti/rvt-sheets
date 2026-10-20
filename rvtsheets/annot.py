@@ -8,6 +8,7 @@ import math
 import os, sys
 import numpy as np
 from .reader import ob, path, INVALID, wref
+from .dimgeom import current_face, remeasured_value
 from . import units
 
 IN = 1 / 12.0
@@ -27,15 +28,16 @@ def _area_of_scheme_region(drawer, area_rec):
     try:
         from shapely.geometry import Point
         from .areapoly import boundary_polygons
-        f = drawer.f; sch = f.eid(area_rec['fields'].get('m_areaSchemeId'))
+        f = drawer.f; sch = f.eid(area_rec['fields'].get('m_areaSchemeId')); lvl = f.eid(area_rec['fields'].get('m_assocLevelId'))
         c = getattr(drawer, '_area_cache', None)
         if c is None: c = drawer._area_cache = {}
-        if sch not in c:
+        if (sch, lvl) not in c:
             lines = []; arcs = []
             for e, i in drawer.vis.info.info.items():
                 if i['cls'] != 'CurveElem' or i['cat'] != -2000079: continue
                 r = f.rec(e)
                 if f.eid(r['fields'].get('m_areaSchemeId')) != sch: continue
+                if f.eid(r['fields'].get('m_assocLevelId')) != lvl and os.environ.get('RVT_AREA_LEVEL', '1') == '1': continue      # boundary lines belong to one level's area plan (Snowdon: 8 levels share one scheme)
                 cr = ob(path(ob(r['fields'].get('m_pCurveDriver')) or {}, 'm_pCrv')) or {}
                 ep = cr.get('m_endParams')
                 # a boundary line picked from a wall stores the wall's location curve and the side offset to the wall finish (m_schemeSegments[0].m_offset, feet,
@@ -49,11 +51,11 @@ def _area_of_scheme_region(drawer, area_rec):
                 o = np.asarray(cr.get('m_origin') or [], float); d = np.asarray(cr.get('m_dirVec') or [], float)
                 if len(o) < 2 or len(d) < 2 or not ep: continue
                 lines.append((o[:2], d[:2], ep[0], ep[1], off))
-            c[sch] = boundary_polygons(lines, arcs)
+            c[(sch, lvl)] = boundary_polygons(lines, arcs)
         pt = area_rec['fields'].get('m_point')
         if not pt: return None
         P = Point(pt[0], pt[1])
-        for poly in c[sch]:
+        for poly in c[(sch, lvl)]:
             if poly.contains(P): return float(poly.area)
     except Exception: return None
     return None
@@ -216,10 +218,10 @@ class Annotations:
                 zs = T[:, :, 2].max(1); zs = zs[np.abs(zs - P[2]) <= 1.0]
                 return float(zs.max()) if len(zs) else float(P[2])
             z = l1 * T[:, 0, 2] + l2 * T[:, 1, 2] + l3 * T[:, 2, 2]
-            z = z[hit]; z = z[np.abs(z - P[2]) <= 1.5]
+            z = z[hit]; z0 = z; z = z[np.abs(z - P[2]) <= 1.5]
+            if not len(z) and len(z0) and os.environ.get('RVT_SPOT_MOVED', '1') == '1': return float(z0.max())      # the picked element moved since the spot was saved (Snowdon R2 beams: stored 58'-4", Revit 53'-2" / 53'-4 1/2" on the lowered beams)
             return float(z.max()) if len(z) else float(P[2])
         except Exception:
-            import os
             if os.environ.get('RVTSHEETS_DEBUG'): raise
             return float(P[2])
 
@@ -392,6 +394,59 @@ class Annotations:
         refs = [P(p) for p in fl.get('m_refPnts') or []]
         if len(refs) < 2: return []
         ts = [float((p - o) @ d) for p in refs]
+        moved_ = set()
+        if os.environ.get('RVT_DIMREMEASURE', '1') == '1':
+            # Revit re-measures: a reference to a straight wall face follows the wall's CURRENT face (Snowdon L2: stored 8'-6" between walls 585306 / 585174, one moved by 1.5": Revit prints 8'-4");
+            # the face nearest the stored point is the referenced one
+            try:
+                dw_ = np.asarray(dl['m_dirVec'], float)
+                if abs(dw_[2]) < 1e-6 and np.linalg.norm(dw_[:2]) > 1e-9:
+                    dw_ = dw_[:2] / np.linalg.norm(dw_[:2]); rpw_ = fl.get('m_refPnts') or []
+                    for i_, w_ in enumerate(fl.get('m_witnessRefs') or []):
+                        if i_ >= len(refs): break
+                        el_ = self.f.eid((wref(w_).get('m_geomRef') or {}).get('m_elemId'))
+                        if el_ in (None, INVALID, -1): continue
+                        wr_ = self.f.rec(el_)
+                        if not wr_ or wr_['class'] != 'SWall': continue
+                        wf_ = wr_['fields']; cr_ = ob(path(ob(wf_.get('m_pCurveDriver')) or {}, 'm_pCrv')) or {}
+                        if not cr_.get('m_origin') or cr_.get('m_radius'): continue
+                        u_ = np.asarray(cr_['m_dirVec'], float)[:2]; nrm_ = np.array([-u_[1], u_[0]])
+                        if abs(float(nrm_ @ dw_)) < 0.999: continue              # only walls the dimension runs across
+                        tp_ = self.f.rec(self.f.eid(wf_.get('m_WallAttributesId'))); cs_ = ob(((tp_ or {'fields': {}})['fields']).get('m_pCompoundStructure')) or {}
+                        half_ = sum((ob(x).get('m_layerWidth') or 0) for x in cs_.get('m_layers') or []) / 2
+                        if half_ <= 0: continue
+                        cen_ = float((np.asarray(cr_['m_origin'], float)[:2] + nrm_ * float(wf_.get('m_locLineOffset') or 0.0)) @ dw_)
+                        pt_ = float(np.asarray(rpw_[i_], float)[:2] @ dw_)
+                        f_ = current_face(cen_, half_, pt_)
+                        if f_ is not None:
+                            refs[i_] = refs[i_] + d * (f_ - pt_) * float(np.sign(float(Mv[:2, :2] @ dw_ @ d)) or 1.0); moved_.add(i_)
+                if moved_:
+                    ts = [float((p - o) @ d) for p in refs]; self.d.stats['dim_remeasured'] += 1
+            except Exception: moved_ = set()
+        bad_ = set()
+        if os.environ.get('RVT_DIMLINKREL', '1') == '1':
+            # references to link instances whose link is not loaded (relative-path links: every Snowdon link) cannot be measured: Revit omits the segments touching them (Snowdon L1_43_High / Parking / L5: ~70 link
+            # dimension values absent from Revit's PDF; L2 dim 596981 keeps only its Grid-to-wall segment)
+            try:
+                from .vg.links import link_instances
+                li_ = link_instances(self.f)
+                for i_, w_ in enumerate(fl.get('m_witnessRefs') or []):
+                    el_ = self.f.eid((wref(w_).get('m_geomRef') or {}).get('m_elemId'))
+                    sym_ = (li_.get(el_) or {}).get('symbol')
+                    if sym_ is not None and (self.f.rec(sym_) or {'fields': {}})['fields'].get('m_relative'): bad_.add(i_)
+            except Exception: bad_ = set()
+        vs_ = getattr(self.d, '_vis_elems', None)
+        if vs_ is not None and os.environ.get('RVT_DIMSEG', '1') == '1':
+            # a reference to an element that is not in the view's list (Snowdon Parking: walls of another phase / range) drops the segments touching it, the rest of the dimension stays (Revit PDF)
+            for i_, w_ in enumerate(fl.get('m_witnessRefs') or []):
+                el_ = self.f.eid((wref(w_).get('m_geomRef') or {}).get('m_elemId'))
+                if el_ in (None, INVALID, -1) or el_ in vs_ or i_ >= len(refs): continue
+                r_ = self.f.rec(el_)
+                if r_ and r_['class'] in ('SWall', 'Floor', 'Column', 'FamilyInstance', 'ArcWall') and os.environ.get('RVT_DIMSEG', '1') == '1': bad_.add(i_)
+        if bad_:
+            if True:
+                self.d.stats['dim_unloaded_link_refs'] += 1
+                if len(refs) - len(bad_) < 2: return []
         st = self.doc['text_types']
         typ = self.f.rec(self.f.eid(fl.get('m_styleSymbolId')))
         tf = typ['fields'] if typ else {}
@@ -414,7 +469,7 @@ class Annotations:
             m = re.search(r'(\d+)/(\d+)"', nm)
             if m: tick = int(m.group(1)) / int(m.group(2)) * IN * scale
         out = []
-        t0, t1 = min(ts), max(ts)
+        t0, t1 = min(t for i_, t in enumerate(ts) if i_ not in bad_), max(t for i_, t in enumerate(ts) if i_ not in bad_)
         out.append({'t': 'line', 'pts': [(o + d * t0).tolist(), (o + d * t1).tolist()], 'style': line, 'elem': eid, 'layer': 'annotation', 'part': 'line'})
         # references to family instances (window/door centre planes) take the type's centerline tick mark ('Dot Open 1/16"') instead of the linear tick
         wr = fl.get('m_witnessRefs') or []
@@ -432,6 +487,7 @@ class Annotations:
             m_ = _re.search(r'(\d+)/(\d+)"', path(cst['fields'], 'm_symbolInfo', 'm_name') or '')
             if m_: cdia = int(m_.group(1)) / int(m_.group(2)) * IN * scale
         for i_, (p, t) in enumerate(zip(refs, ts)):
+            if i_ in bad_: continue
             q = o + d * t                       # foot on the dimension line
             v = q - p; L = np.linalg.norm(v)
             gap_i = gap
@@ -459,10 +515,11 @@ class Annotations:
         else: d_txt = d
         for i, sg in enumerate(segs):
             if i + 1 >= len(ts): break
+            if i in bad_ or i + 1 in bad_: continue
             val = None
             vals = sg.get('m_values') or []
             if vals and vals[0].get('m_value', -1) >= 0: val = vals[0]['m_value']
-            if val is None: val = abs(ts[i + 1] - ts[i])
+            if val is None or (moved_ and (i in moved_ or i + 1 in moved_)): val = remeasured_value(ts, i)
             txt = units.fmt_length(val, ob(tf.get('m_oLinFormatOptions')) or {}, self.proj_len)
             try:                                                           # value text fields of the segment: prefix / suffix / override (Snowdon 'From Origin ' dimensions)
                 tfv = ob((vals[0] if vals else {}).get('m_oTextFields')) or {}

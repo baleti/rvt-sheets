@@ -23,7 +23,7 @@ def _hash_files(files):
     return h.hexdigest()[:12]
 
 
-NOT_DRAWING = {'server.py', 'warm.py', 'cache.py', 'drawings.py', 'pdf.py', '__init__.py'}     # serving code: changing it keeps the cache
+NOT_DRAWING = {'server.py', 'warm.py', 'cache.py', 'cachereport.py', 'drawings.py', 'pdf.py', '__init__.py'}     # serving code: changing it keeps the cache
 
 
 def code_version():

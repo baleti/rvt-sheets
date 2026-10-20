@@ -138,6 +138,8 @@ class Decoder:
         if vp is not None:
             pid = self.E(path(vp, 'm_parameter')); rule['param'] = pid; rule['param_name'] = self.param_names.get(str(pid))
             rule['elem_or_symbol'] = path(vp, 'm_elemOrSymbol')
+        elif 'm_parameter' in o:        # HasValue / HasNoValue rules carry the parameter directly (no value provider): VG inverse scene filter 'c'
+            pid = self.E(o.get('m_parameter')); rule['param'] = pid; rule['param_name'] = self.param_names.get(str(pid))
         ev = o.get('m_oEvaluator')
         if isinstance(ev, dict): rule['evaluator'] = self.f.tagname(ev.get('ptr'))
         for k in ('m_ruleValue', 'm_ruleString', 'm_epsilon', 'm_caseSensitive'):
