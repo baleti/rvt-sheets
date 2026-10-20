@@ -33,7 +33,7 @@ class ElementInfo:
             h = f.eh.get(eid) or {}
             is_type = 'm_symbolInfo' in fl or (r['class'].endswith(('Symbol', 'Type')) and r['class'] != 'SpanDirectionSymbol')       # SpanDirectionSymbol is an instance (floor span annotation)
             self.info[eid] = {'cls': r['class'], 'cat': E(h.get('m_categroryId')) if h else INVALID, 'owner': E(h.get('m_ownerViewId', fl.get('m_ownerDBViewId'))),
-                              'dopt': E(h.get('m_designOptionId', fl.get('m_designOptionId'))), 'created': E(fl.get('m_createdPhaseId')), 'demolished': E(fl.get('m_demolishedPhaseId')),
+                              'dopt': E(h.get('m_designOptionId', fl.get('m_designOptionId'))), 'rphase': E(fl.get('m_phaseId')) if r['class'] == 'RoomElem' and E(fl.get('m_areaSchemeId')) in (INVALID, None, -1) else INVALID, 'created': E(fl.get('m_createdPhaseId')), 'demolished': E(fl.get('m_demolishedPhaseId')),
                               'fam': E(fl.get('m_famId')) if r['class'] == 'SWall' else INVALID, 'type': is_type, 'vflags': path(h, 'm_viewRules', 'm_nVisibleViewFlags'), 'has_header': bool(h)}
         self._bb = {}
 
@@ -79,13 +79,20 @@ class Visibility:
     def marker_in_plan(self, eid, e, v):
         """elevation/section markers in plan views (?): an arrow/section head is drawn unless Viewer.m_viewerFlags bit 0 is set and while the
         view scale is not coarser than its view's 'Hide at scales coarser than' (param -1006613); an elevation body (InteriorElev) when any arrow is"""
+        import numpy as np
         f = self.dec.f
         # view discipline (Revit per-view element lists, 2020 Residential/Commercial/rst_basic, 2024 Snowdon Structural, 2026 writer test file):
         # Coordination plans list no section/elevation markers, Structural plans no elevation markers, Architectural plans show them
         disc = v.get('discipline')
-        if disc == 4095 and e['cls'] in ('InteriorElev', 'InteriorElevArrow'): return False      # coordination plans list no elevation markers; sections do show (2026 rosette 'VR plan') when no filter hides them
-        if disc == 2 and e['cls'] in ('InteriorElev', 'InteriorElevArrow'): return False
+        if disc == 4095 and e['cls'] in ('InteriorElev', 'InteriorElevArrow') and os.environ.get('RVT_MARKER_DISC', '1') == '1': return False      # coordination plans list no elevation markers; sections do show (2026 rosette 'VR plan') when no filter hides them
+        if disc == 2 and e['cls'] in ('InteriorElev', 'InteriorElevArrow') and os.environ.get('RVT_MARKER_DISC', '1') == '1': return False
         if e['cls'] == 'InteriorElev':
+            cp_ = v.get('crop') or {}
+            if cp_.get('crop_active') and cp_.get('basis') and os.environ.get('RVT_MARKER_CROP', '1') == '1':
+                pos_ = (f.rec(eid) or {'fields': {}})['fields'].get('m_pos')          # a marker outside an active plan crop is not listed (2024 rosetta markers scene: dependent view cropped to one text note)
+                if pos_:
+                    co_ = np.asarray(cp_['origin'], float); CB_ = np.asarray(cp_['basis'], float); bb_ = cp_['bounds']; q_ = (np.asarray(pos_, float) - co_) @ CB_.T
+                    if not (min(bb_[0]) - 0.5 <= q_[0] <= max(bb_[0]) + 0.5 and min(bb_[1]) - 0.5 <= q_[1] <= max(bb_[1]) + 0.5): return False
             arrows = self._arrows().get(eid, [])
             return any(self.marker_in_plan(a, self.info.info.get(a, {'cls': 'InteriorElevArrow'}), v) for a in arrows) if arrows else None
         r = f.rec(eid)
@@ -94,11 +101,25 @@ class Visibility:
         # elevation arrows: flags do not decide (2026 template arrows have 0 and are listed in every architectural plan; the earlier rule
         # 'bit 1 = shown' came from structural files, explained by the discipline above). Sections: keep bit 1 (Snowdon 1/5 never listed)
         pass
+        # an elevation marker belongs to the phase of the view it was created in = the phase of its elevation view: other-phase plans do not list it (2024 rosetta markers scene:
+        # 'create' plan phase 7019 lists the marker, its duplicates of phase 64113 do not)
+        if r['class'] == 'InteriorElevArrow':
+            cp_ = v.get('crop') or {}; par_ = f.eid(fl.get('m_parentId'))
+            if cp_.get('crop_active') and cp_.get('basis') and par_ not in (None, INVALID) and os.environ.get('RVT_MARKER_CROP', '1') == '1':
+                pos_ = (f.rec(par_) or {'fields': {}})['fields'].get('m_pos')
+                if pos_:
+                    co_ = np.asarray(cp_['origin'], float); CB_ = np.asarray(cp_['basis'], float); bb_ = cp_['bounds']; q_ = (np.asarray(pos_, float) - co_) @ CB_.T
+                    if not (min(bb_[0]) - 0.5 <= q_[0] <= max(bb_[0]) + 0.5 and min(bb_[1]) - 0.5 <= q_[1] <= max(bb_[1]) + 0.5): return False
+        if r['class'] == 'InteriorElevArrow' and os.environ.get('RVT_ARROW_PHASE', '1') == '1':
+            tv_ = self.doc['views'].get(f.eid(fl.get('m_dbViewId')))
+            if tv_ and tv_.get('phase') not in (None, INVALID, -1) and v.get('phase') not in (None, INVALID, -1) and tv_['phase'] != v['phase']: return False
         # 'show in one view only' (detail sections / callouts drawn in another view): only in their parent view
         if fl.get('m_showInOneViewOnly') and f.eid(fl.get('m_parentDBViewId')) != v.get('id'): return False
         # 'hide at scales coarser than' stored on the marker as 1/N (building section 1:48: shown in 1:48 plans, not in 1:96 ones)
         cs = fl.get('m_coarserScale')
         if cs and (v.get('scale') or 0) > round(1.0 / cs) + 1e-6: return False
+        if r['class'] == 'Section' and v.get('kind') == 'plan' and (fl.get('m_viewerFlags') or 0) & 7 == 7 and disc != 4095 and os.environ.get('RVT_SECFLAG7', '0') == '1':
+            return False         # viewer flags 7 sections: only coordination plans ('VR plan') list their marker; the 2026 rosetta 'Level 2' floor plan and ceiling plan (cut inside the extent) hide it
         if r['class'] == 'Section' and v.get('range'):
             import numpy as np
             bs = fl.get('m_boundedSpace') or {}
@@ -191,6 +212,17 @@ class Visibility:
             self._ev = {self.dec.f.eid(r['fields'].get('m_dbViewId')) for r in self.dec.f.recs('InteriorElevArrow')}
         return self._ev
 
+    def _link_visible(self, eid, vid):
+        """a link instance without a bounding box (nothing loaded to measure) is still in the view's list while its link type is visible in the view (2024 vg_links scene); Snowdon: only where the link is not hidden per view"""
+        try:
+            from .vg.links import view_links, link_instances
+            c = self.__dict__.setdefault('_lv', {})
+            if vid not in c: c[vid] = view_links(self.dec.f, self.dec.f.rec(vid)['fields'])
+            sym = (link_instances(self.dec.f).get(eid) or {}).get('symbol')
+            if (self.dec.f.rec(sym) or {'fields': {}})['fields'].get('m_relative'): return False       # relative-path links (every Snowdon link) are not loaded: Revit lists none of their instances; the oracle scene's absolute-path links are listed
+            return bool((c[vid].get(sym) or {}).get('visible', False))
+        except Exception: return False
+
     def _arrows(self):
         if getattr(self, '_arr', None) is None:
             self._arr = {}
@@ -240,6 +272,15 @@ class Visibility:
         for g, keys in (('filters', ('filters',)), ('detail_level', ('detail_level',)), ('phase_filter', ('phase_filter',)), ('discipline', ('discipline',))):
             if T.controls(tv, g): ks += [k for k in keys if k not in ks]
         return ks
+
+    def _nobox_room_plans(self, level):
+        """ids of the uncropped, non-ceiling plans whose primary level is `level` (candidates for listing a room without extent)"""
+        c = getattr(self, '_nbp', None)
+        if c is None: c = self._nbp = {}
+        if level not in c:
+            c[level] = sorted(k for k, w in self.doc['views'].items() if w.get('kind') == 'plan' and not w.get('template') and (w.get('range') or {}).get('plan_view_type') == 1
+                              and not (w.get('crop') or {}).get('crop_active') and ((w.get('range') or {}).get('levels') or [None])[0] == level and w.get('class', 'DBViewPlan') == 'DBViewPlan')
+        return c[level]
 
     def effective(self, v):
         """view settings with the view template applied (template controls V/G, phase filter, detail level... when assigned): first approximation
@@ -474,12 +515,16 @@ class Visibility:
             if not e['has_header'] and e['cls'] in ('Level', 'Grid') and not e['type']:
                 # some datums (2020 Residential level 'first floor') have no element header: category from the class, shown by default
                 e = dict(e, cat={'Level': -2000240, 'Grid': -2000220}[e['cls']], vflags=1, has_header=True)
-            if e['cls'] == 'ExtentElem' and e['owner'] == vid and v['kind'] != 'graphical_column_schedule' and os.environ.get('RVT_VIEW_META', '1') == '1': out[eid] = None; continue      # the view's own datum-extent element is in its list in every view (Residential 25/25, Commercial 24/24)
+            prim_ = v.get('primary') if os.environ.get('RVT_DEPENDENT', '1') == '1' else None
+            if prim_ in (None, INVALID, -1) or v['kind'] != 'plan': prim_ = None
+            own_ = vid if prim_ is None or e['owner'] != prim_ else e['owner']         # a dependent view lists the view-specific elements of its primary view too (2024 rosetta 'dependent': text note + datum extent of the primary)
+            if prim_ is not None and e['cls'] == 'Viewer' and self.dec.f.eid((self.dec.f.rec(eid) or {'fields': {}})['fields'].get('m_dbViewId')) == vid: out[eid] = None; continue      # a dependent view lists its own viewer element
+            if e['cls'] == 'ExtentElem' and e['owner'] in (vid, prim_) and v['kind'] != 'graphical_column_schedule' and os.environ.get('RVT_VIEW_META', '1') == '1': out[eid] = None; continue      # the view's own datum-extent element is in its list in every view (Residential 25/25, Commercial 24/24)
             if e['type'] or not e['has_header']: continue
             if e.get('fam', INVALID) != INVALID and os.environ.get('RVT_FAMWALL', '1') == '1': why[eid] = 'family_member_wall'; continue      # walls with a Family id (in-place family content, Residential 201264 / 205606-8): Revit lists them in no view
-            if e['owner'] not in (INVALID, vid): continue
+            if e['owner'] not in (INVALID, vid, prim_): continue
             if v['kind'] == 'graphical_column_schedule' and e['owner'] != vid and (e['cls'] in ('Level', 'GraphSchedColumnTable') or (e['cls'] == 'FamilyInstance' and e['cat'] == -2001330)) and os.environ.get('RVT_GCS', '1') == '1': out[eid] = None; continue      # a graphical column schedule lists every structural column and every level (rst_basic: 30 of 30 + 9 of 9)
-            if v['kind'] in OWNED_ONLY_KINDS and e['owner'] != vid: continue
+            if v['kind'] in OWNED_ONLY_KINDS and e['owner'] not in (vid, prim_): continue
             if v['kind'] == '3d' and e['cls'] in MARKER_CLASSES: why[eid] = 'marker_in_3d'; continue
             if e['cls'] == 'ModelClipBox' and eid in self._active_clip_boxes() and e['cat'] not in hid and v['kind'] not in OWNED_ONLY_KINDS and os.environ.get('RVT_VIEW_META', '1') == '1': out[eid] = None; continue      # one project-wide clip box (lowest id) is listed in every model view
             if e['cls'] == 'ModelClipBox' and (v.get('section_box') or {}).get('id') != eid: why[eid] = 'other_views_section_box'; continue
@@ -574,12 +619,25 @@ class Visibility:
             if e['cls'] == 'PropertyLineSegment':
                 # Revit lists and draws them (site plans) although their own category is internal, only inside the PRIMARY view range (not the underlay, not ceiling plans)
                 rg = v.get('range') or {}; bb = self.info.bbox(eid)
-                if v['kind'] != 'plan' or bb is None or rg.get('plan_view_type') == 2 or rg.get('top') is None: why[eid] = 'property_line_rule'; continue
-                zlo_ = min(x for x in (rg.get('bottom'), rg.get('depth')) if x is not None)
-                if bb[0][2] < zlo_ - 1e-6 or bb[0][2] > rg['top'] + 1e-6: why[eid] = 'property_line_range'; continue
+                # DXF of Residential / Commercial plans (14 views): property lines are in the views whose crop volume reaches 1000 ft ('bounds' z [1000, 0.1]: Level 1 157296, first floor 180203, Mezzanine
+                # ceiling plan 214395, none in the [100, 0] ones: 32 / 36 / attic) and in site plans (range top 200); RVT_PROPLINE_Z=0 restores the range rule
+                zb_ = ((v.get('crop') or {}).get('bounds') or [None, None, [0]])[2][0]
+                if os.environ.get('RVT_PROPLINE_Z', '1') == '1':
+                    site_ = rg.get('top') is not None and rg['top'] >= 100 and rg.get('plan_view_type') != 2 and rg['top'] < 1e8
+                    if v['kind'] != 'plan' or bb is None or not ((zb_ or 0) >= 999 or site_): why[eid] = 'property_line_rule'; continue
+                else:
+                    if v['kind'] != 'plan' or bb is None or rg.get('plan_view_type') == 2 or rg.get('top') is None: why[eid] = 'property_line_rule'; continue
+                    zlo_ = min(x for x in (rg.get('bottom'), rg.get('depth')) if x is not None)
+                    if bb[0][2] < zlo_ - 1e-6 or bb[0][2] > rg['top'] + 1e-6: why[eid] = 'property_line_range'; continue
                 ct = None
             if ct == 'Internal' or (ct in TYPE_FLAG and xflags.get(TYPE_FLAG[ct])): why[eid] = 'category_type_' + str(ct); continue
             if c in hid or par in hid: why[eid] = 'category_hidden'; continue
+            if e.get('rphase', INVALID) not in (INVALID, None) and v.get('phase') not in (None, INVALID) and e['rphase'] != v['phase'] and os.environ.get('RVT_ROOM_PHASE', '1') == '1':
+                why[eid] = 'room_phase'; continue         # rooms exist in their own phase only (2024 rosetta markers scene: the room is listed in the views of its phase, not in the duplicates of another phase)
+            if e['cls'] == 'Viewer3d' and os.environ.get('RVT_VIEWER3D_PHASE', '1') == '1':
+                tv3_ = self.doc['views'].get(self.dec.f.eid((self.dec.f.rec(eid) or {'fields': {}})['fields'].get('m_dbViewId')))
+                if tv3_ and tv3_.get('phase') not in (None, INVALID, -1) and v.get('phase') not in (None, INVALID, -1) and tv3_['phase'] != v['phase']:
+                    why[eid] = 'viewer3d_phase'; continue         # a 3D view's camera element belongs to the phase of that view (2026 rosetta sheet scene: listed only in the phase-7019 plan)
             st = self.phase_status(e, v.get('phase'))
             if st in ('past', 'future'): why[eid] = 'phase_' + st; continue
             if st and pf and pf.get('presentation'):
@@ -587,6 +645,8 @@ class Visibility:
             if e['dopt'] not in (INVALID,) and e['dopt'] != -4 and self.primary_options and e['dopt'] not in shown_opts: why[eid] = 'design_option'; continue
             if e['owner'] == INVALID:
                 bb = self.info.bbox(eid)
+                if bb is not None and e['cls'] == 'PropertyLineSegment' and v['kind'] == 'plan' and (v.get('range') or {}).get('plan_view_type') == 2 and os.environ.get('RVT_PROPLINE_Z', '1') == '1':
+                    bb = np.array([[bb[0][0], bb[0][1], v['range']['cut']], [bb[1][0], bb[1][1], v['range']['cut']]])       # ceiling plan: property lines are tested against the crop only
                 nobox_ = bb is not None and e['cls'] == 'PartMaker' and not np.all(bb[0] <= bb[1])      # division makers without extent are listed in every view (rst_basic: 8 of 8 in all 32 views)
                 unplaced_room_ = bb is not None and e['cls'] == 'RoomElem' and not np.all(bb[0] <= bb[1]) and os.environ.get('RVT_ROOM_UNPLACED', '1') == '1'
                 if unplaced_room_:
@@ -613,14 +673,16 @@ class Visibility:
                     # ceiling-hosted lighting fixtures wholly above the cut plane are not in a floor plan (Residential plans 32 / 180203 / basement: collector lists none; the ceiling plan, whose cut plane is at the ceiling, lists them)
                     cz = v['range'].get('cut')
                     if cz is not None and bb[0][2] >= cz - 1e-6: why[eid] = 'above_cut_lighting'; continue
-                if bb is None and e['cls'] not in DATUM_CLASSES and e['cls'] not in ('Viewer3d', 'ExtentElem', 'ModelClipBox') and not (e['cls'] == 'RvtLinkInstance' and os.environ.get('RVT_LINK_LISTED', '0') == '1') and not (e['cls'] == 'RoomElem' and unplaced_room_): why[eid] = 'no_graphics_no_bbox'; continue
+                room_nobox_ = bb is None and e['cls'] == 'RoomElem' and v['kind'] == 'plan' and os.environ.get('RVT_ROOM_NOBOX', '1') == '1' and vid == max([k for k in self._nobox_room_plans(self.dec.f.eid(self.dec.f.rec(eid)['fields'].get('m_levelId'))) if k < eid] or [None], key=lambda k: -1 if k is None else k)      # a room without extent (not placed, no bbox) is listed in ONE uncropped floor plan of its level: the newest candidate older than the room (the plan it was created in; element ids are chronological). Snowdon 7 of 7, Commercial 1 of 1, Residential 1 of 1
+                if bb is None and e['cls'] not in DATUM_CLASSES and e['cls'] not in ('Viewer3d', 'ExtentElem', 'ModelClipBox') and not room_nobox_ and not (e['cls'] == 'RvtLinkInstance' and (os.environ.get('RVT_LINK_LISTED', '0') == '1' or (os.environ.get('RVT_LINK_NOBOX', '1') == '1' and self._link_visible(eid, vid)))) and not (e['cls'] == 'RoomElem' and unplaced_room_): why[eid] = 'no_graphics_no_bbox'; continue
             out[eid] = st
         if os.environ.get('RVT_TAG_HOST', '1') == '1':
-            for eid in [k for k in out if self.info.info[k]['cls'] == 'IndependentTag']:           # a tag whose tagged element is not in the view is not listed either
+            for eid in [k for k in out if self.info.info[k]['cls'] in ('IndependentTag', 'RoomTag')]:           # a tag whose tagged element is not in the view is not listed either (room tags: m_taggedRoomElemId, rooms of another phase)
                 try:
-                    h = self.dec.f.eid(ob((self.dec.f.rec(eid)['fields'].get('m_taggedElementId')) or {}).get('m_linkInstOrHostId'))
+                    tf_ = self.dec.f.rec(eid)['fields']
+                    h = self.dec.f.eid(ob(tf_.get('m_taggedElementId') or tf_.get('m_taggedRoomElemId')).get('m_linkInstOrHostId'))
                 except Exception: continue
-                if h not in (None, INVALID) and h in self.info.info and self.info.info[h]['owner'] == INVALID and h not in out:
+                if h not in (None, INVALID) and h in self.info.info and self.info.info[h]['owner'] == INVALID and h not in out and (self.info.info[eid]['cls'] != 'RoomTag' or self.info.info[h].get('rphase', INVALID) not in (INVALID, None)):
                     del out[eid]; why[eid] = 'tagged_element_not_in_view'
         if os.environ.get('RVT_DIM_REFS', '1') == '1':
             rgp = v.get('range') or {}

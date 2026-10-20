@@ -119,6 +119,7 @@ class SheetComposer:
             M_ = np.asarray(q.get('R') or np.eye(3), float); oo = np.asarray(q.get('o') or [0, 0, 0], float)
             if R is not None: oo = gfx.transform_pts([oo.tolist()], R, o)[0]
             sx, sy = q.get('scale') or [1, 1]
+            sx = 1.0 if sx is None else sx; sy = 1.0 if sy is None else sy          # 2017/2018 title block images store no scale (robust sweep: 48 sheet failures)
             # image placement matrix (GImage m_Trf, composed with the symbol instance rotation): angle of its local x axis in the sheet
             Mr = np.asarray(R, float) @ M_ if R is not None else M_
             ang = float(np.arctan2(Mr[1, 0], Mr[0, 0]))

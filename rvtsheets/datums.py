@@ -81,6 +81,29 @@ class Datums:
             env = path(srf, 'm_Envelope', 'm_corners') or [[-50, -50], [50, 50]]
             (a0, b0), (a1, b1) = env
             n = np.cross(x, y)
+            if v.get('kind') == '3d' and r['class'] == 'Level' and os.environ.get('RVT_3D_LEVELS', '1') == '1' and not (v.get('crop') or {}).get('proj_method') == 2:
+                # 3D views draw a level as two edges of its datum plane envelope: those meeting at the corner farthest from the eye (Revit's Snowdon 'Structure Only': long dashed lines
+                # along the building, magenta by the 'Levels - Building' filter)
+                cs_ = [o + x * a0 + y * b0, o + x * a1 + y * b0, o + x * a1 + y * b1, o + x * a0 + y * b1]
+                k_ = int(np.argmin([float((c_ - O) @ Z) for c_ in cs_]))
+                cid = self.d.vis.info.info.get(eid, {}).get('cat', -2000240)
+                ov_ = {}
+                try:                                               # the view's filter / category / element overrides (Snowdon 'Levels - Building': magenta lines)
+                    ev_ = self.d.vis.effective(v)
+                    fv_, fo_ = self.d.fe.view_filters(ev_, eid, cid, (self.d.doc['categories'].get(cid) or {}).get('parent', INVALID)) if ev_.get('filters') else (True, [])
+                    if not fv_: continue
+                    ov_ = res.overrides(eid, cid, fo_, None)
+                except Exception: ov_ = {}
+                st = res.line(None, cid, 'proj', eid, annotation=True, ov=ov_)
+                t = self.f.rec(self.f.eid(fl.get('m_attrId'))) or {'fields': {}}; tf = t['fields']
+                lc = self.f.rec(self.f.eid((tf.get('m_lineAndTextAttr') or {}).get('m_categoryId'))); gsl = (lc or {}).get('fields', {}).get('m_gstyleIds') or []
+                if gsl: st = res.line(self.f.eid(gsl[0]), cid, 'proj', eid, annotation=True, ov=ov_)
+                cseg = self.f.eid(tf.get('m_categoryForCenterSegment'))
+                if cseg not in (None, INVALID): st = dict(st, dash=res.line(None, cseg, 'proj', eid, annotation=True).get('dash'))
+                for j_ in (1, 3):
+                    q_ = cs_[(k_ + j_) % 4]
+                    prims.append({'t': 'line', 'pts': [((cs_[k_] - O) @ Mv.T)[:2].tolist(), ((q_ - O) @ Mv.T)[:2].tolist()], 'style': st, 'elem': eid, 'layer': 'datum', 'part': 'line'})
+                continue
             # datum line in this view = intersection of the datum plane with the view plane: direction perpendicular to both normals
             dline = np.cross(n, Z)
             if np.linalg.norm(dline) < 1e-6: continue                   # datum plane parallel to the view: not shown

@@ -27,6 +27,17 @@ def length_format(f):
     return {'m_displayUnits': 2, 'm_accuracy': 1.0}
 
 
+def area_grouping(f):
+    """digit grouping of the project's area format ('1310 SF' Residential / Commercial, '13,032 SF' Snowdon); default on"""
+    for r in f.recs('UnitsElem'):
+        u = ob(r['fields'].get('m_units')) or {}
+        arr = u.get('m_formatOptionsArr') or []
+        if len(arr) > 1: return bool(ob(arr[1]).get('m_bUseGrouping'))
+        for e in u.get('m_formatOptionsMap') or []:
+            if (ob(e).get('first') or {}).get('m_typeId', '').startswith('autodesk.spec.aec:area-'): g_ = ob(ob(e).get('second')).get('m_bUseGrouping'); return True if g_ is None else bool(g_)
+    return True
+
+
 def is_2022_plus(f):
     """file written by Revit 2022 or later (unit options in m_formatOptionsMap)"""
     for r in f.recs('UnitsElem'):

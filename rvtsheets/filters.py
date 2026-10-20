@@ -1,3 +1,4 @@
+import os
 """Evaluate ParameterFilterElement rule trees (decode.Decoder._rule_tree) on elements, using the reader's per-element parameter
 values (rvt_params: {name: value}). Unknown parameters make a rule false (Revit: elements without the parameter do not pass)."""
 from .reader import INVALID
@@ -19,6 +20,8 @@ class FilterEval:
     def value(self, eid, rule):
         pe = (self.params().get(eid) or {}).get('params') or {}
         name = rule.get('param_name')
+        for sfx in (('|Double', '|Integer', '|String') if isinstance(name, str) else ()):         # values the reader derives from the record (beam 'z Offset Value' from the cell list) are stored under the typed key and override the plain one (Snowdon framing: 18 -> 165 non-zero)
+            if name + sfx in pe and os.environ.get('RVT_TYPED_PARAM', '1') == '1': return pe[name + sfx]
         if name in pe:
             v = pe[name]
             if name == 'Family and Type' and isinstance(v, int):

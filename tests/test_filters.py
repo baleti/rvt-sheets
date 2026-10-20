@@ -21,6 +21,14 @@ def S(name, op, s, cs=False): return {'rule': 'FilterStringRule', 'param_name': 
 def N(name, op, v, eps=1e-6): return {'rule': 'FilterNumericValueRule', 'param_name': name, 'evaluator': 'FilterNumeric' + op, 'rulevalue': v, 'epsilon': eps}
 
 
+class TypedKeys(unittest.TestCase):
+    def test_typed_key_wins_and_nameless_rule_is_safe(self):
+        e = ev({1: {'params': {'z Offset Value': 0.0, 'z Offset Value|Double': -0.25}}})
+        self.assertEqual(e.value(1, {'param_name': 'z Offset Value'}), -0.25)
+        self.assertIsNone(e.value(1, {'param_name': None}))          # rules without a parameter name (robust sweep: Snowdon Electrical view 161499)
+        self.assertIsNone(e.value(1, {}))
+
+
 class Rules(unittest.TestCase):
     P = {1: {'params': {'Mark': 'Door-A1', 'Width': 3.0, 'Family and Type': 9}}, 2: {'params': {'Mark': 'wall'}}, 9: {'class': 'FamilySymbol', 'params': {'Type Name': 'Single', 'Family Name': 'Door'}}}
 

@@ -704,7 +704,7 @@ class ViewDrawer:
                     if not (z0_ <= cut_w <= z1_): uvw[:, :, 2] += cut_w - (z0_ + z1_) / 2      # the family's cut-profile extrusion follows the cut plane (Snowdon steel columns in L4: base-level slab moved to the cut)
                 m = self.solid_material(T[2] if len(T) > 2 else None)
                 ov2 = dict(ov, _mat=m) if m is not None else ov
-                if (v['kind'] in ('section', '3d') or (v['kind'] == 'plan' and cid == -2000032 and not is_rcp)) and len(T) > 2 and T[2] is not None: ov2 = dict(ov2, _frs=T[2])   # plans: floor top surface pattern (Commercial 'Sand' dots under the room colours)
+                if (v['kind'] in ('section', '3d') or (v['kind'] == 'plan' and ((cid == -2000032 and not is_rcp) or (cid == -2000035 and os.environ.get('RVT_PLAN_ROOFPAT', '0') == '1')))) and len(T) > 2 and T[2] is not None: ov2 = dict(ov2, _frs=T[2])   # plans: floor top surface pattern (Commercial 'Sand' dots under the room colours)
                 solids.append((eid, cid, uvw, fid, s.get('gs'), ov2))
             if info['cls'] == 'BaseRailing' and v['kind'] in ('section', 'plan') and os.environ.get('RVT_RAILMESH', '1') == '1':
                 # railings: the balusters / rails live in symbol instances that the walker leaves without solids; the reader's element mesh has them (Commercial Building Section A-FLOR-HRAL: the mezzanine railing rails)
@@ -1973,6 +1973,7 @@ class ViewDrawer:
             if not ok.any(): continue
             seg3 = np.concatenate([S[ok], np.repeat(w[ok][:, None, None], 2, 1)], 2)
             vis = db.visible_parts(seg3, eps * 1.5)
+            if os.environ.get('RVT_DBG_SURF'): print('SURF', eid, 'segs', len(segs), 'ok', int(ok.sum()), 'vis', len(vis), 'cut_w', cw_, 'w range', float(np.nanmin(w)), float(np.nanmax(w)))
             col = ov.get('surf_fg_color') if isinstance(ov.get('surf_fg_color'), list) else (sp.get('color') or [0, 0, 0])
             if vis: prims.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis], 'style': {'w': 0.1, 'rgb': col, 'dash': None}, 'elem': eid, 'layer': 'surface_fill'})
 

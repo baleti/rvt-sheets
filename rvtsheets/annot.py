@@ -25,22 +25,30 @@ def _area_of_scheme_region(drawer, area_rec):
     contains the Area's point (Residential area plan: 1310 SF)"""
     try:
         from shapely.geometry import Point
-        from shapely.ops import unary_union, polygonize
-        from shapely.geometry import LineString
+        from .areapoly import boundary_polygons
         f = drawer.f; sch = f.eid(area_rec['fields'].get('m_areaSchemeId'))
         c = getattr(drawer, '_area_cache', None)
         if c is None: c = drawer._area_cache = {}
         if sch not in c:
-            segs = []
+            lines = []; arcs = []
             for e, i in drawer.vis.info.info.items():
                 if i['cls'] != 'CurveElem' or i['cat'] != -2000079: continue
                 r = f.rec(e)
                 if f.eid(r['fields'].get('m_areaSchemeId')) != sch: continue
                 cr = ob(path(ob(r['fields'].get('m_pCurveDriver')) or {}, 'm_pCrv')) or {}
-                o = np.asarray(cr.get('m_origin') or [], float); d = np.asarray(cr.get('m_dirVec') or [], float); ep = cr.get('m_endParams')
+                ep = cr.get('m_endParams')
+                # a boundary line picked from a wall stores the wall's location curve and the side offset to the wall finish (m_schemeSegments[0].m_offset, feet,
+                # positive = right of the travel direction): Revit measures the area at the offset curve (Residential area plan 1310 SF, Commercial L1 12299 SF)
+                try: off = float(ob((ob(path(ob(r['fields'].get('m_data')) or {}, 'm_oUserData')) or {}).get('m_schemeSegments')[0]).get('m_offset') or 0.0)
+                except Exception: off = 0.0
+                if cr.get('m_radius') and ep and cr.get('m_center') is not None:
+                    xv = np.asarray(cr['m_xVec'], float)[:2]; yv = np.asarray(cr['m_yVec'], float)[:2]; ce = np.asarray(cr['m_center'], float)[:2]
+                    arcs.append((ce, float(cr['m_radius']), xv, yv, ep[0], ep[1], off))
+                    continue
+                o = np.asarray(cr.get('m_origin') or [], float); d = np.asarray(cr.get('m_dirVec') or [], float)
                 if len(o) < 2 or len(d) < 2 or not ep: continue
-                segs.append(LineString([tuple(np.round((o + d * ep[0])[:2], 5)), tuple(np.round((o + d * ep[1])[:2], 5))]))
-            c[sch] = list(polygonize(unary_union(segs))) if segs else []
+                lines.append((o[:2], d[:2], ep[0], ep[1], off))
+            c[sch] = boundary_polygons(lines, arcs)
         pt = area_rec['fields'].get('m_point')
         if not pt: return None
         P = Point(pt[0], pt[1])
@@ -701,6 +709,17 @@ class Tags:
             # tag orientation: 0 horizontal, 1 vertical, 2 model (rotation angle): Snowdon L2 column tags at 45 deg, beam tags at 90 deg
             if oc.get('m_orientation') == 1: ang = math.pi / 2
             elif oc.get('m_orientation') == 2: ang = float(oc.get('m_rotationAngle') or 0.0)
+            elif r['class'] == 'IndependentTag' and os.environ.get('RVT_TAG_ALONG', '1') == '1' and tagged not in (None, INVALID, -1) and (self.d.vis.info.info.get(tagged) or {}).get('cat') == -2001320:
+                # horizontal-orientation tags of straight structural framing run along the beam, read upright (Snowdon L1 124186 vs Revit's DXF: beams along y 90 deg, along x 0 deg)
+                try:
+                    cd_ = ob((self.f.rec(tagged)['fields'].get('m_pCurveDriver') or {})) or {}
+                    dv_ = (Mv @ np.asarray(path(cd_, 'm_pCrv', 'm_dirVec'), float))[:2]
+                    if np.linalg.norm(dv_) > 1e-6:
+                        ang = math.atan2(dv_[1], dv_[0])
+                        while ang > math.pi / 2 + 1e-6: ang -= math.pi
+                        while ang <= -math.pi / 2 + 1e-6: ang += math.pi
+                        if abs(ang) < 1e-4: ang = 0.0
+                except Exception: pass
             elif r['class'] == 'BeamSystemTag' and os.environ.get('RVT_BST_DIR', '1') == '1':
                 # 'Beam System Tag Direction' (not stored on the tag): Revit runs the note perpendicular to the held beams (Snowdon Parapet 2 beams along x: text vertical 90 deg;
                 # sawtooth region beams -25 deg: 65 deg; L2 / L3 N-S beams: horizontal), read upright
@@ -777,7 +796,7 @@ class Tags:
                         if k_ != prm['param'] and pn_.get(str(k_)) == nm and isinstance(x_, (int, float, str)) and not isinstance(x_, bool) and x_ not in ('', None) and not (isinstance(x_, int) and x_ > 1 << 24):
                             v = x_; break
                 if prm.get('param') == -1002001 and not v and tsym not in (None, INVALID): v = self.type_name(tsym)       # Type Name: the (master) symbol's own name
-                if v is None and nm == 'Area' and tr and tr['class'] == 'RoomElem' and f_isarea(self, tr) and os.environ.get('RVTSHEETS_AREA_POLY'): v = _area_of_scheme_region(self.d, tr)      # off by default: polygon of the boundary lines gives 1277 SF where Revit prints 1310 (Residential area plan)
+                if v is None and nm == 'Area' and tr and tr['class'] == 'RoomElem' and f_isarea(self, tr) and os.environ.get('RVT_AREA_POLY', '1') == '1': v = _area_of_scheme_region(self.d, tr)      # polygon of the boundary lines at their wall-finish offsets (RVT_AREA_POLY=0 off)
                 if v is None and nm == 'Area' and tr and tr['class'] == 'RoomElem':      # room area: Revit computes it from the boundary; here the floor face of the room volume
                     try:
                         import rvt_elemmesh as E
@@ -804,7 +823,7 @@ class Tags:
                     if (ob(prm['fmt'].get('m_symbolTypeId') if isinstance(prm['fmt'].get('m_symbolTypeId'), dict) else {}) or {}).get('m_typeId', '') == '': pass
                 if isinstance(v, float):
                     if any(w in nm for w in ('Length', 'Width', 'Height', 'Elevation', 'Offset', 'Thickness', 'Depth', 'Perimeter')): v = units.fmt_length(v, {'m_bUseDefault': 1}, units.length_format(self.f))
-                    elif 'Area' in nm: v = ('{:,} SF'.format(int(round(v)))) if units.is_imperial(self.f) else ('%.2f m²' % (v * 0.09290304))
+                    elif 'Area' in nm: v = (('{:,} SF' if units.area_grouping(self.f) else '{} SF').format(int(round(v)))) if units.is_imperial(self.f) else ('%.2f m²' % (v * 0.09290304))
                     else: v = '%g' % v
                 parts.append((prm.get('prefix') or '') + label_str(v) + (prm.get('suffix') or ''))
                 seps.append('\n' if prm.get('linebreak') else ' ' * int(prm.get('spaces') if prm.get('spaces') is not None else 1))
@@ -907,7 +926,9 @@ class Markers:
                 loop = [tip.tolist()] + arc[::-1] + [tip.tolist()]
             if af.get('m_ahFilled', 1): out.append({'t': 'fill', 'loops': [loop], 'color': [0, 0, 0], 'elem': eid, 'layer': 'annotation_fill'})
             else: out.append({'t': 'line', 'pts': loop, 'style': st, 'elem': eid, 'layer': 'annotation'})
-            out += self.arrow_labels(eid, a, d, c, rad, af, sym, scale)
+            for q in self.arrow_labels(eid, a, d, c, rad, af, sym, scale):
+                if os.environ.get('RVT_BODY_ONCE', '1') == '1' and any(o_['t'] == 'text' and o_['text'] == q['text'] and o_['origin'] == q['origin'] for o_ in out): continue      # one body, one sheet number: the 3-arrow Commercial marker 196763 printed 'A - 03' three times (Revit DXF: once)
+                out.append(q)
         return out
 
     def arrow_labels(self, eid, a, d, c, rad, af, sym, scale):
@@ -955,9 +976,13 @@ def section_marker(drawer, eid, O, Mv, scale, res, vid, pts=None):
     at = f.rec(f.eid(vt['fields'].get('m_sectionAttrId'))) if vt else None
     af = at['fields'] if at else {}
     P = np.asarray([((np.asarray(p, float) - O) @ Mv.T)[:2] for p in pts])
+    clipped_ = False
     if not given and (doc['views'].get(vid) or {}).get('kind') == 'plan':
+        P0_ = P
         P = _section_visible(P, fl.get('m_boundedSpace') or {}, O, Mv, (doc['views'].get(vid) or {}), scale)
         if P is None: return []
+        if os.environ.get('RVT_DBG_SEC'): print('SEC', eid, np.round(P0_[:, :2], 1).tolist(), np.round(P[:, :2], 1).tolist())
+        clipped_ = len(P) != len(P0_) or not np.allclose(P[0], P0_[0], atol=1e-6) or not np.allclose(P[-1], P0_[-1], atol=1e-6)
     st = res.line(None, -2000200, 'proj', eid, annotation=True)
     out = [{'t': 'line', 'pts': P.tolist(), 'style': st, 'elem': eid, 'layer': 'annotation', 'part': 'line'}]
     bs = fl.get('m_boundedSpace') or {}
@@ -969,7 +994,8 @@ def section_marker(drawer, eid, O, Mv, scale, res, vid, pts=None):
 
             'Reference Label': ((vt or {'fields': {}})['fields'].get('m_refLabelStr') or '') if fl.get('m_bIsViewerReference') else ''}      # reference sections ('Reference Other View') show their view type's label ('typ.')
     # jogged sections (Residential A-2, Commercial 173630: Revit DXF) carry the full head at BOTH ends; straight ones head + tail box (A-3)
-    tail_key = 'm_sectionHeadFamilyTagId' if len(pts) > 2 else 'm_sectionTailFamilyTagId'
+    # Commercial 173630 (flipped) draws head + tail tick in the uncropped Level 1 / Mezzanine plans (DXF 157296 / 36 / 214395: one 'A - 01') but both heads in the cropped plan 32; RVT_SECTION_TAILFLIP=0 restores both-ends
+    tail_key = 'm_sectionHeadFamilyTagId' if len(pts) > 2 and not (fl.get('m_sectionFlipped') and not (((drawer.doc['views'].get(vid) or {}).get('crop') or {}).get('crop_active') and not clipped_) and os.environ.get('RVT_SECTION_TAILFLIP', '1') == '1') else 'm_sectionTailFamilyTagId'
     for end, sym_key in ((0, 'm_sectionHeadFamilyTagId'), (len(P) - 1, tail_key)):
         sid = f.eid(af.get(sym_key))
         if sid in (None, INVALID): continue

@@ -33,7 +33,12 @@ def cls(e):
 G = collections.defaultdict(list)
 for r, o, d in m:
     lx, ly = vec.left_edge_xy(o); dx = lx - (sc * r['x'] + tx); dy = ly - (sc * r['y'] + ty)
-    G[(cls(o.get('e')), o.get('font'), round(o['h'], 1), r.get('layer'))].append((dx, dy, o['t'], o.get('e')))
+    G[(cls(o.get('e')), o.get('font'), round(o['h'], 1), r.get('layer'))].append((dx, dy, o['t'], o.get('e'), o.get('rot'), o.get('anchor'), r.get('rot'), r.get('anchor'), sorted(r.keys())))
+if os.environ.get('TP_DETAIL'):
+    for key, L in G.items():
+        if key[3] == os.environ['TP_DETAIL']:
+            for x in L[:40]: print('DETAIL', key[0], x[2], x[3], 'dx %+.1f dy %+.1f' % (x[0], x[1]), 'ours rot/anchor', x[4], x[5], 'rev rot/anchor', x[6], x[7], x[8])
+    print('okeys', sorted(m[0][1].keys()))
 for key, L in sorted(G.items(), key=lambda kv: -len(kv[1])):
     a = np.array([(x[0], x[1]) for x in L])
     print('%-22s %-14s h%-5s %-14s n=%3d  dx med %+5.1f [%+5.1f..%+5.1f]  dy med %+5.1f [%+5.1f..%+5.1f]' % (key[0], str(key[1])[:14], key[2], key[3], len(L), np.median(a[:, 0]), a[:, 0].min(), a[:, 0].max(), np.median(a[:, 1]), a[:, 1].min(), a[:, 1].max()), [(x[2][:14], x[3]) for x in L[:2]])

@@ -42,3 +42,8 @@ Members absent from `overrides` come from the object style (`proj`/`cut` already
 - Static RTF text notes of annotation family instances (`FamilyInstance` detail items / generic annotations) are emitted as `text` prims with the instance `elem`.
 - Dimension prims whose references are link instances hidden in the view are not emitted (stat `dim_hidden_link`).
 - New env switches (all default on unless noted): RVT_DIMFIELDS, RVT_BST_DIR, RVT_TAGTYPEID, RVT_TAGBYNAME, RVT_ELEMID64, RVT_ELEVFMT, RVT_UNPLACED_MARK, RVT_SYMTEXT, RVT_TAGQ, RVT_DIMLINK; off by default: RVT_DIMLINK2, RVT_DIMREF64, RVT_GRIDNORTH=1 (old plan grid head rule).
+
+## Update 2026-10-19 (c7-annot)
+- Area tags: the Area element's value follows the area scheme boundary lines at their wall-finish offsets (text now '1310 SF' / '12299 SF' per the project's area format grouping); consumers see them as ordinary `text` prims with the Area (RoomElem with m_areaSchemeId) `elem`. Env: RVT_AREA_POLY=0 off.
+- Property line segments (IndependentTag-free, cls `PropertyLineSegment`, `layer: projection`) are emitted per the view's crop z bounds / site range rule (RVT_PROPLINE_Z=0 restores the range rule).
+- Section markers: `part` unchanged; which ends carry a full head symbol now depends on flip / crop clipping (RVT_SECTION_TAILFLIP=0 old rule); interior elevation markers emit the body's sheet-number text once (RVT_BODY_ONCE=0).
