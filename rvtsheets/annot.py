@@ -1,3 +1,4 @@
+import sys
 """Stage 5: annotations generated from their records (Revit stores no graphics for them).
 Linear dimensions (LinearDimString): references' points (m_refPnts) projected on the dimension line (m_pDimLine origin + direction),
 witness lines (gap / extension), tick marks (LeaderStyle of the dimension type), segment texts at m_ArrSegInfo[i].m_origin.
@@ -251,10 +252,22 @@ class Annotations:
             if bb is not None:
                 ext = np.abs((Mv @ (np.asarray(bb[1], float) - np.asarray(bb[0], float)))[:2])
                 if ext[1] > ext[0] * 1.5: ang = math.pi / 2
+            if os.environ.get('RVT_SPOT_DBG'):
+                try:
+                    tb_ = self.f.rec(self.f.eid((ob(pk) or {}).get('m_elemId'))); dv_ = (Mv @ np.asarray(path(ob(tb_['fields'].get('m_pCurveDriver')) or {}, 'm_pCrv', 'm_dirVec'), float))[:2]
+                    cr_ = path(ob(tb_['fields'].get('m_pCurveDriver')) or {}, 'm_pCrv'); o0_ = np.asarray(cr_['m_origin'], float); d3_ = np.asarray(cr_['m_dirVec'], float); ep_ = cr_['m_endParams']
+                    e0_ = (Mv @ (o0_ + d3_ * ep_[0] - P))[:2]; e1_ = (Mv @ (o0_ + d3_ * ep_[1] - P))[:2]
+                    print('SPOTDBG', eid, round(ang, 2), [round(float(x), 2) for x in dv_], [round(float(x), 2) for x in off], 'E', [round(float(x), 2) for x in e0_], [round(float(x), 2) for x in e1_], 'B', [round(float(x), 2) for x in (fl.get('m_bendOrPosPtOffset') or [])], 'L', fl.get('m_leaderLine'), fl.get('m_bendLeader'), file=sys.stderr)
+                except Exception as ex: print('SPOTDBG', eid, 'err', ex, file=sys.stderr)
+            if os.environ.get('RVT_SPOT_OFFFRAME', '0') == '1':
+                # the stored text offset is rotated by the text angle and then mirrored in x (Snowdon L1: 30 spot elevations, horizontal text (-ox, oy), text along +y (oy, ox) vs Revit's DXF)
+                ca_, sa_ = math.cos(ang), math.sin(ang)
+                b = a + (Mv @ np.array([-(ca_ * off[0] - sa_ * off[1]), sa_ * off[0] + ca_ * off[1], off[2]]))[:2]
+                b = b + np.array([ca_, sa_]) * (0.0115 * (scale if scale else 1))       # 3.5 mm of paper along the text: horizontal text starts there, text along +y ends there (Revit DXF, Snowdon L1)
             opt = ob(tf.get('m_oLinFormatOptions')) or {}
             txt = units.fmt_length(self._spot_z(fl, P), opt, self.proj_len)
             return [{'t': 'text', 'text': txt, 'origin': b.tolist(), 'x': [math.cos(ang), math.sin(ang)], 'size': size, 'font': font.get('name') or 'Arial',
-                     'halign': 1, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'}]
+                     'halign': (0 if ang < 0.5 else 2) if os.environ.get('RVT_SPOT_LEFT', '0') == '1' else 1, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'}]
         off = np.asarray(fl.get('m_bendOrPosPtOffset') or [0, 0, 0], float)
         b = a + (Mv @ off)[:2] if fl.get('m_leaderLine') else a
         sh = float(tf.get('m_leaderShoulderLength') or 0) * (scale if scale else 1)

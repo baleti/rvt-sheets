@@ -103,3 +103,15 @@ Snowdon 2024/2026 P .9939 R .9984; Residential P .949 R .983; Commercial P .962 
 | vg_markers | .794 | .9625 | marker 301634 (API-created) is listed only in the plan it was created for; no stored link marker -> plan found (arrows, viewer, section view, all plan records searched) |
 | vg_links | .877 (RVT_LINK_LISTED=1; .846 / .767 without) | 1.000 | link instances are listed when the link was loaded at export; not derivable from the file |
 | view templates, TPLCTL | non-controlled set identical to Revit's TPLCTL list for 7 of 7 templates in 4 scene files (2024/2026 templates, templates_var) |
+
+## c7-sheets update (2026-10-20)
+| area | status | notes |
+|---|---|---|
+| filter rule parameters (framing 'z Offset Value') | done | derived reader values live under typed keys (name|Double): FilterEval.value prefers them; Snowdon 600158 'Z Offset' filter matches 165 (Revit's dump: 165 non-zero); yellow rim beams drawn |
+| section marker colour (Snowdon Longitudinal) | done | head fill = colour of the region's graphic style (red), black fills / outlines hidden |
+| section cut fills of Snowdon Longitudinal 579975 | done (fills) | m_surfaces 7 accepted for shaded sections, standalone views draw the section image under the linework; piles' mesh shorter than their linework |
+| dimension colour | done | dimension type's line category colours line + text (orange level dims) |
+| solid surface fills of overrides (section / 3D) | done | depth-tested flat colour image under the linework (columns by level in 600158); plans not enabled |
+| 3D levels | partial | envelope edges at the far corner with the view's filter colours (magenta); frame offset vs Revit's DXF unresolved |
+| structural framing tags | done | tags of straight framing run along the beam (L1 offsets 7 mm -> 1 mm) |
+| spot elevations without leader | partial | placement frame / alignment depends on the picked beam's direction sign: fits L1, not L2 (RVT_SPOT_OFFFRAME / RVT_SPOT_LEFT experiments, default off) |

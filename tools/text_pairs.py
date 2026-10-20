@@ -33,11 +33,11 @@ def cls(e):
 G = collections.defaultdict(list)
 for r, o, d in m:
     lx, ly = vec.left_edge_xy(o); dx = lx - (sc * r['x'] + tx); dy = ly - (sc * r['y'] + ty)
-    G[(cls(o.get('e')), o.get('font'), round(o['h'], 1), r.get('layer'))].append((dx, dy, o['t'], o.get('e'), o.get('rot'), o.get('anchor'), r.get('rot'), r.get('anchor'), sorted(r.keys())))
+    G[(cls(o.get('e')), o.get('font'), round(o['h'], 1), r.get('layer'))].append((dx, dy, o['t'], o.get('e'), o.get('rot'), o.get('anchor'), r.get('rot'), r.get('anchor'), sorted(r.keys()), dict(ours=(round(o['x'],1), round(o['y'],1), o.get('anchor'), round(o['h'],2)), rev=(round(sc * r['x'] + tx, 1), round(sc * r['y'] + ty, 1), round(r['h'], 2), r.get('style')), left=tuple(round(v, 1) for v in vec.left_edge_xy(o)))))
 if os.environ.get('TP_DETAIL'):
     for key, L in G.items():
         if key[3] == os.environ['TP_DETAIL']:
-            for x in L[:40]: print('DETAIL', key[0], x[2], x[3], 'dx %+.1f dy %+.1f' % (x[0], x[1]), 'ours rot/anchor', x[4], x[5], 'rev rot/anchor', x[6], x[7], x[8])
+            for x in L[:40]: print('DETAIL', key[0], x[2], x[3], 'dx %+.1f dy %+.1f' % (x[0], x[1]), 'ours rot/anchor', x[4], x[5], 'RAW', x[9], 'rev rot/anchor', x[6], x[7], x[8])
     print('okeys', sorted(m[0][1].keys()))
 for key, L in sorted(G.items(), key=lambda kv: -len(kv[1])):
     a = np.array([(x[0], x[1]) for x in L])

@@ -691,6 +691,7 @@ class Visibility:
                 for w in wr:
                     try: refs.append(self.dec.f.eid((wref(w).get('m_geomRef') or {}).get('m_elemId')))
                     except Exception: refs.append(None)
+                if os.environ.get('RVT_DIM_LINKREF', '1') == '1' and os.environ.get('RVT_LINK_LISTED', '0') != '1' and any(x in self.info.info and self.info.info[x]['cls'] == 'RvtLinkInstance' for x in refs): del out[eid]; why[eid] = 'dim_ref_in_unloaded_link'; continue      # dimensions that reference geometry of a linked model are not listed when the link was unloaded at export (Snowdon L1_43_High: 20 of 20 FP dimensions, 0 of the TP ones)
                 if wr and all(x in (None, INVALID, -1) for x in refs): del out[eid]; why[eid] = 'dim_dangling_refs'; continue
                 if self.dec.f.idbits == 64 and os.environ.get('RVT_DIMREF64', '0') == '1' and any(x not in (None, INVALID, -1) and x in self.info.info and self.dec.f.rec(x) is None for x in refs): del out[eid]; why[eid] = 'dim_ref_no_record'; continue
                 if os.environ.get('RVT_DIM_REFVIEW', '1') == '1' and (self.dec.f.idbits == 32 or os.environ.get('RVT_DIMREF64', '0') != '1') and any(x not in (None, INVALID, -1) and x in self.info.info and self.info.info[x]['owner'] == INVALID and x not in out and why.get(x) == 'outside_view_volume' for x in refs): del out[eid]; why[eid] = 'dim_ref_not_in_view'; continue
