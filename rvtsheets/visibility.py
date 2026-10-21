@@ -628,6 +628,11 @@ class Visibility:
                     v['kind'], rg.get('plan_view_type'), rg.get('top'), zb_,
                     legacy=legacy_, bbox_z=None if bb is None else bb[0][2],
                     range_bottom=rg.get('bottom'), range_depth=rg.get('depth'))
+                if not candidate_ and not legacy_ and os.environ.get('RVT_PROPLINE_LIST', '1') == '1':
+                    # the element LIST follows Revit's collector (range rule too: Residential 'first floor' 32 lists 4 segments the DXF does not draw); drawing keeps the stricter rule (viewdraw)
+                    candidate_ = property_line_candidate(
+                        v['kind'], rg.get('plan_view_type'), rg.get('top'), zb_, legacy=True, bbox_z=None if bb is None else bb[0][2],
+                        range_bottom=rg.get('bottom'), range_depth=rg.get('depth'))
                 if bb is None or not candidate_:
                     # Preserve the distinction between range and eligibility exclusions.
                     why[eid] = ('property_line_range' if legacy_ and bb is not None
@@ -658,6 +663,10 @@ class Visibility:
                     bb = None
                     rp_ = self.dec.f.eid((self.dec.f.rec(eid)['fields']).get('m_phaseId'))
                     if rp_ not in (None, INVALID) and v.get('phase') not in (None, INVALID) and rp_ != v.get('phase'): why[eid] = 'unplaced_room_other_phase'; continue      # an unplaced room belongs to one phase and is listed only in views of that phase (VG phases scene: Phase 3 views only)      # unplaced room (empty bbox sentinel): listed in every plan / section (VG phases scene: 9 FN)
+                if bb is not None and e['cls'] == 'PropertyLineSegment' and v['kind'] == 'plan' and os.environ.get('RVT_PROPLINE_NOVOL', '1') == '1' and property_line_candidate('plan', 1, (v.get('range') or {}).get('top'), ((v.get('crop') or {}).get('bounds') or [None, None, [0]])[2][0]): nobox_ = True       # deep-crop views list the segments whatever the crop rectangle (Residential basement 156499: 4 of 4 listed, crop does not reach them)
+                if bb is not None and e['cls'] == 'CoordinateSystemDisplayElem' and v['kind'] == 'plan' and os.environ.get('RVT_COORD_ELEM', '1') == '1':
+                    if (v.get('crop') or {}).get('crop_active'): why[eid] = 'coord_elem_cropped'; continue       # Snowdon: the 9 plans with an active crop region do not list it
+                    nobox_ = True       # the origin marker is listed in every plan that shows its category whatever the view range (Snowdon: 12 plans above / below z 0 listed)
                 if bb is not None and not nobox_ and not vol(bb) and not (e['cls'] in ('StairsElement', 'StairsRun', 'StairsSupport') and v['kind'] == 'section' and getattr(self, '_loose_vol', None) is not None and os.environ.get('RVT_JOG_STAIRS', '1') == '1' and self._loose_vol(bb)): why[eid] = 'outside_view_volume'; continue
                 if bb is not None and e['cls'] in ('StairsRun', 'StairsElement', 'StairsSupport') and v['kind'] == 'plan' and v.get('range') and v['range'].get('plan_view_type') != 2 and v['range'].get('cut') is not None and os.environ.get('RVT_STAIR_ABOVE_CUT', '1') == '1' and v.get('discipline') != 2 and bb[0][2] > v['range']['cut'] + 1e-3:
                     why[eid] = 'stair_above_cut'; continue      # a stair lying wholly above the cut plane is not listed in the plan (Residential basement: descending stair 0..-1.5 above cut -4)

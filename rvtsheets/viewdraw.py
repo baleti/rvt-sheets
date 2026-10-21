@@ -11,6 +11,7 @@ from .scene import Walker, ViewCtx
 from .hlr import DepthBuffer
 from .style import Resolver
 from .visibility import Visibility
+from .viewrules import property_line_candidate
 from . import patterns, gfx
 from .visibility import CAT_TYPES, PHASE_IDX
 from . import gfx
@@ -480,6 +481,10 @@ class ViewDrawer:
                 except Exception: self.stats['stairs_path_error'] += 1
                 continue
             if info['cls'] == 'PropertyLineSegment':
+                rg_ = v.get('range') or {}
+                if os.environ.get('RVT_PROPLINE_LIST', '1') == '1' and os.environ.get('RVT_PROPLINE_Z', '1') == '1' and not property_line_candidate(
+                        v['kind'], rg_.get('plan_view_type'), rg_.get('top'), ((v.get('crop') or {}).get('bounds') or [None, None, [0]])[2][0]):
+                    self.stats['property_line_listed_not_drawn'] += 1; continue        # listed by Revit's collector, not drawn in the DXF (visibility.py)
                 try: prims += self.property_line(eid, O, Mv, res, v)
                 except Exception: self.stats['property_line_error'] += 1
                 continue

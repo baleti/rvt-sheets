@@ -73,7 +73,6 @@ def hatch(geom, pattern, scale, view_rot=0.0):
         n = int(R / off) + 2
         if 2 * n > MAX_LINES: n = MAX_LINES // 2
         segs = [s * k for s in g.get('segments') or []]
-        ends = []                                                    # (p0, p1) pairs, built into LineStrings in one vectorised call below
         js = np.arange(int(jc) - n, int(jc) + n + 1)
         if not segs:
             bases = o[None, :] + js[:, None] * (off * nrm + shift * d)[None, :]
@@ -87,17 +86,9 @@ def hatch(geom, pattern, scale, view_rot=0.0):
                 SKIPPED['dashes'] += 1
                 if os.environ.get('RVT_STIPPLE', '1') == '1' and pattern.get('target', 0) == 0: return stipple(geom, scale)
                 return []
-            for j in js:
-                base = o + j * (off * nrm + shift * d)
-                tc = float((np.array([cx, cy]) - base) @ d)
-                t = math.floor((tc - R) / per) * per
-                while t < tc + R:
-                    for i, s_ in enumerate(segs):
-                        L = abs(s_)
-                        if i % 2 == 0:                                  # dash (a zero-length dash is a dot)
-                            ends.append((base + t * d, base + (t + (L if L > 1e-6 * k else DOT_MM / 304.8 * scale)) * d))
-                        t += L
-            lines_arr = np.asarray(ends, float).reshape(-1, 2, 2)
+            bases = o[None, :] + js[:, None] * (off * nrm + shift * d)[None, :]
+            tcs = (np.array([cx, cy])[None, :] - bases) @ d
+            lines_arr = _dash_endpoints(bases, tcs, R, d, segs, per, k, scale)
         if not len(lines_arr): continue
         lines = shapely.linestrings(lines_arr)
         cl = geom.intersection(shapely.multilinestrings(lines))
@@ -106,6 +97,39 @@ def hatch(geom, pattern, scale, view_rot=0.0):
             c = list(ls.coords)
             for a_, b_ in zip(c, c[1:]): out.append([list(a_), list(b_)])
     return out
+
+
+def _dash_endpoints(bases, tcs, R, d, segs, per, k, scale):
+    """Build line/period/dash ordered endpoints using the original float additions."""
+    lengths = np.abs(segs)
+    dash_lengths = np.where(lengths[::2] > 1e-6 * k,
+                            lengths[::2], DOT_MM / 304.8 * scale)
+    starts = np.floor((tcs - R) / per) * per
+    stops = tcs + R
+    chunks = []
+    while len(starts):
+        # Include spare periods, then test their actual accumulated starts: a
+        # closed-form period count can disagree at a floating-point boundary.
+        periods = max(1, int(np.ceil(np.max(stops - starts) / per)) + 2)
+        steps = np.empty((len(starts), periods * len(segs) + 1))
+        steps[:, 0] = starts
+        steps[:, 1:] = np.tile(lengths, periods)
+        # Seed the accumulation with each line's phase, rather than adding it
+        # afterwards, to reproduce every t += abs(segment) of the scalar loop.
+        np.cumsum(steps, axis=1, out=steps)
+        positions = steps[:, :-1].reshape(len(starts), periods, len(segs))
+        rows, cycles = np.nonzero(positions[:, :, 0] < stops[:, None])
+        ts = positions[rows, cycles, ::2]
+        p0 = bases[rows, None, :] + ts[:, :, None] * d
+        p1 = bases[rows, None, :] + (ts + dash_lengths)[:, :, None] * d
+        chunks.append(np.stack((p0, p1), axis=2).reshape(-1, 2, 2))
+        # Usually the spare periods finish every line. Continue in bulk if
+        # accumulated roundoff requires more, preserving the while condition.
+        active = steps[:, -1] < stops
+        starts = steps[active, -1]
+        bases = bases[active]
+        stops = stops[active]
+    return chunks[0] if len(chunks) == 1 else np.concatenate(chunks)
 
 
 STIPPLE_PER_MM2 = 0.05      # Revit thins very fine stipples (Sand: 0.25 dots / mm2 on paper by definition) to about 0.05 dots / mm2 in its 1:96 plan export (speckled room floors)

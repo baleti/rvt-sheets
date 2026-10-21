@@ -1,7 +1,7 @@
 """Grids (plan views, sections) and levels (sections/elevations): datum line from the datum plane (DatumPlane.m_pSurface origin, xVec
 along the line, envelope = extents along xVec / yVec), per-view extents from the view's ExtentElem, head symbols (type m_familyTagId)
 with their labels at paper size (x view scale). Output prims in view coordinates (model feet)."""
-import os
+import os, sys
 import math
 import numpy as np
 from .reader import ob, path, INVALID
@@ -239,7 +239,8 @@ class Datums:
             # north end (Commercial / rst basic lo = north, Snowdon L2 lo = south but Revit's 1-9 are on top)
             if r['class'] == 'Grid' and not e and v.get('kind') == 'plan':
                 dv = uv1 - uv0
-                if abs(dv[1]) >= abs(dv[0]) and uv0[1] < uv1[1] and (not on_x or os.environ.get('RVT_GRIDNORTH') == '1'): uv0, uv1 = uv1, uv0       # lines along the surface's xVec keep the envelope low end as the head end (Commercial grid 1 has xVec +y and its head is at the SOUTH end); lines along yVec (Snowdon vertical-plane grids) put it north: bubble at the north end (Commercial, rst basic, Snowdon L2: 1-9 on top)
+                if abs(dv[1]) >= abs(dv[0]) and uv0[1] < uv1[1] and (not on_x or os.environ.get('RVT_GRIDNORTH') == '1') and not (os.environ.get('RVT_GRIDXFLIP', '1') == '1' and x[2] < -0.9): uv0, uv1 = uv1, uv0       # lines along the surface's xVec keep the envelope low end as the head end (Commercial grid 1 has xVec +y and its head is at the SOUTH end); lines along yVec (Snowdon vertical-plane grids, xVec +z) put it north, but with xVec -z (Facades L5 'Block 37 Left' etc., Revit's heads are at the south end) the low end stays: bubble at the north end (Commercial, rst basic, Snowdon L2: 1-9 on top)
+            if os.environ.get('RVT_GRID_DBG'): print('GRIDDBG', eid, repr(name), 'on_x', on_x, 'ext', {k: (round(x_, 2) if isinstance(x_, float) else x_) for k, x_ in e.items() if k in ('m_freeEnd', 'm_bubbleEnd', 'm_freeEnd3d', 'm_bubbleEnd3d', 'm_endBubbleOverrides')}, 'uv0', np.round(uv0, 2).tolist(), 'uv1', np.round(uv1, 2).tolist(), 'grid_ext', grid_ext is not None, file=sys.stderr)
             ends = [(uv0, uv0 - uv1)]
             if (e.get('m_endBubbleOverrides') or 0) & 1: ends.append((uv1, uv1 - uv0))
             if r['class'] == 'Level': ends = [(uv1, uv1 - uv0)]
