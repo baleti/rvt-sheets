@@ -49,8 +49,29 @@ def body(prims, scale, tx, layer_order=('underlay', 'room_fill', 'symbolic_fill'
         # detail draw order (views with m_aDrawOrder): model content first, then each detail element (its masking fills, hatches, lines)
         key = lambda p: (p.get('order', -2), order.get(p.get('layer'), 99))
     else: key = lambda p: order.get(p.get('layer'), 99)
+    dd = os.environ.get('RVT_DEDUPE', '1') == '1'; seen = set()
+    rq = lambda q: (round(q[0], 4), round(q[1], 4))
     for p in sorted(prims, key=key):
         if clip is not None and not _inside(p, clip): continue
+        if dd:
+            # a line / segment that repeats an earlier one in the same style and layer is drawn once (shared edges of adjacent faces, family lines drawn twice: Facades South
+            # carries 49% duplicate projection ink; Revit's PDF has each stroke once); the seen set restarts at every fill / image, so nothing moves across a masking fill
+            if p['t'] in ('fill', 'image'): seen = set()
+            elif p['t'] in ('line', 'segs') and p.get('style'):
+                st_ = p['style']; sk = (st_.get('w'), tuple(st_.get('rgb') or ()), tuple(st_.get('dash') or ()), p.get('layer'))
+                if p['t'] == 'line' and len(p.get('pts') or []) > 1:
+                    f_ = tuple(rq(q) for q in p['pts']); k_ = (sk, min(f_, f_[::-1]))
+                    if k_ in seen: continue
+                    seen.add(k_)
+                elif p['t'] == 'segs' and p.get('segs'):
+                    keep_ = []
+                    for sg in p['segs']:
+                        f_ = tuple(rq(q) for q in sg); k_ = (sk, min(f_, f_[::-1]))
+                        if k_ in seen: continue
+                        seen.add(k_); keep_.append(sg)
+                    if len(keep_) != len(p['segs']):
+                        if not keep_: continue
+                        p = dict(p, segs=keep_)
         e = ' data-e="%s"' % p.get('elem')
         if mclip and (p.get('layer') in MODEL_LAYERS or p.get('layer') == 'mask'): e += ' clip-path="url(#cropclip)"'      # model content is cut at the crop region (Revit shows nothing of it beyond)
         if p['t'] == 'line': out.append('<path d="%s" %s%s/>' % (D(p['pts']), stroke(p['style']), e))

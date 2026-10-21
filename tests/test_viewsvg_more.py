@@ -15,6 +15,11 @@ from unittest.mock import Mock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _no_dedupe(monkeypatch):
+    monkeypatch.setenv('RVT_DEDUPE', '0')      # these tests feed repeated identical prims on purpose (tests/test_dedupe.py covers the de-duplication)
+
+
 @pytest.fixture
 def renderer(monkeypatch):
     name = '_viewsvg_more'

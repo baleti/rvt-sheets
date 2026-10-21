@@ -7,6 +7,11 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _no_dedupe(monkeypatch):
+    monkeypatch.setenv('RVT_DEDUPE', '0')      # these tests feed repeated identical prims on purpose (tests/test_dedupe.py covers the de-duplication)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
