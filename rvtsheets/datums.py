@@ -302,8 +302,12 @@ class Datums:
         from .sheet import SheetComposer
         for lab in (sym or {}).get('labels', []):
             txt = ' '.join(str(vals.get(prm.get('name'), prm.get('sample') or '')) for prm in lab.get('params') or [])
+            if os.environ.get('RVT_GRID_DBG'): print('GRIDLAB', eid, repr(txt), {k: (str(v)[:70]) for k, v in lab.items()}, file=sys.stderr)
             tt = self.doc['text_types'].get(lab['type']) or {}
             font = self.doc['fonts'].get(tt.get('font')) or {}
+            if lab.get('width') and not lab.get('nowrap') and txt and ' ' in txt and os.environ.get('RVT_GRID_WRAP', '1') == '1':       # the head family's label width wraps long names (Facades 'Block 37 Left' -> three lines like Revit)
+                from .viewdraw import wrap_text
+                txt = wrap_text(txt, lab['width'] * scale, (font.get('size') or 0.0078) * scale / 0.72, font.get('name') or 'Arial', bool(tt.get('bold')))
             org = gfx.transform_pts([lab['origin']], R, o)[0]
             xd = (np.asarray(R, float) @ np.asarray(lab['base'], float))[:2]
             out.append({'t': 'text', 'text': txt, 'origin': org[:2], 'x': [1.0, 0.0], 'size': (font.get('size') or 0.0078) * scale,
