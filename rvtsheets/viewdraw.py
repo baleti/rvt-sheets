@@ -393,6 +393,7 @@ class ViewDrawer:
         elems, self._vis_why = self.vis.elements(vid, explain=True)
         self._vis_elems = set(elems)                 # tags of elements that are not in this view are not drawn (rst basic cross section: CHS / foundation tags)
         prims = []; solids = []      # per element: (eid, cat, tris_uvw, gs)
+        meshfixed_ = set()
         occ_owner = []; carve_boxes = {}
         topo = []                    # topography surfaces (meshes, no solids): poche in sections
         occluders = []               # bodies that only hide (internal graphics styles), view coordinates
@@ -703,6 +704,22 @@ class ViewDrawer:
                 T = self._tess(s)
                 if T is None or not len(T[0]): continue
                 tris, fid = T[0], T[1]
+                if info['cls'] == 'SWall' and os.environ.get('RVT_WALL_MESHFIX', '1') == '1':
+                    # wall pieces whose saved graphics are a stray 10 x 10 ft box (vg phases scene: 4 demolished pieces at openings, header bbox 3 x 1.1 ft; only when the solid box is > 8x the header box): the reader's element mesh is right
+                    hb_ = self.vis.info.bbox(eid)
+                    if hb_ is not None:
+                        a_ = np.asarray(tris, float).reshape(-1, 3)
+                        vs_, vh_ = float(np.prod(np.maximum(a_.max(0) - a_.min(0), 1e-3))), float(np.prod(np.maximum(np.asarray(hb_[1], float) - np.asarray(hb_[0], float), 1e-3)))
+                        if ((a_.min(0)[:2] < hb_[0][:2] - 0.5).any() or (a_.max(0)[:2] > hb_[1][:2] + 0.5).any()) and vs_ > 8.0 * vh_:
+                            if eid in meshfixed_: continue
+                            try:
+                                import rvt_elemmesh as E_
+                                tr_ = np.asarray(E_.element_mesh(self.f.g, eid).get('tris') or [], float).reshape(-1, 3, 3)
+                                mb_ = tr_.reshape(-1, 3)
+                                if len(tr_) and (mb_.min(0)[:2] >= hb_[0][:2] - 0.6).all() and (mb_.max(0)[:2] <= hb_[1][:2] + 0.6).all():       # the mesh must agree with the header box, else the walker solid stays
+                                    if os.environ.get('RVT_SOLID_DBG'): print('MESHFIX', eid, 'solid', a_.min(0).round(1).tolist(), a_.max(0).round(1).tolist(), 'header', np.asarray(hb_).round(1).tolist(), 'mesh', tr_.reshape(-1, 3).min(0).round(1).tolist(), tr_.reshape(-1, 3).max(0).round(1).tolist(), file=sys.stderr)
+                                    tris, fid = tr_, np.arange(len(tr_)); meshfixed_.add(eid); self.stats['wall_meshfix'] += 1
+                            except Exception: self.stats['wall_meshfix_error'] += 1
                 uvw = (tris - O) @ Mv.T
                 if s.get('cutnode') and cut_w is not None and v['kind'] == 'plan' and os.environ.get('RVT_CUTNODE', '1') == '1':
                     z0_, z1_ = float(uvw[:, :, 2].min()), float(uvw[:, :, 2].max())
@@ -786,6 +803,7 @@ class ViewDrawer:
         for c in clipped:
             if noocc_all_ or c[1] in noocc_: continue
             if os.environ.get('RVT_ONLYOCC') and str(c[1]) not in os.environ['RVT_ONLYOCC'].split(','): continue
+            if os.environ.get('RVT_TRANSP_OCC', '1') == '1' and (c[6] or {}).get('transparency'): self.stats['transparent_not_occluder'] += 1; continue      # a surface made transparent by an override does not hide what lies behind it (oracle filters scene A: floor outline under 50 % transparent walls)
             if c[1] == -2003500 and v['kind'] == 'section': continue        # stacked-wall parents duplicate their child walls (and cover curtain-wall storefronts): not occluders (Commercial east/south elevation DXF R 0.66/0.69 -> 0.80/0.85)
             db.add(self._carve_tris(c[2], carve_boxes[c[0]]) if c[0] in carve_boxes else c[2])
         for T in ([] if os.environ.get('RVT_NOOCC2') else occluders):
@@ -848,7 +866,7 @@ class ViewDrawer:
                                     segs = [(np.array(a), np.array(b)) for l in loops2 for a, b in zip(l, l[1:])]
                                     self.stats['cut_openings'] += 1
                     except Exception: self.stats['carve_error'] += 1
-                caps.append(loops2)
+                if not (os.environ.get('RVT_TRANSP_OCC', '1') == '1' and ov.get('transparency')): caps.append(loops2)       # a transparent cut face hides nothing below it
                 prim = {'t': 'cut', 'loops': loops2, 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in segs], 'style': st, 'elem': eid, 'cat': cid, 'layer': 'cut'}
                 fill = self.cut_fill(eid, cid, gs, ov, ev.get('detail_level') or 2)
                 if fill and ov.get('halftone'):
@@ -911,8 +929,14 @@ class ViewDrawer:
                                     c_ = list(g.coords); ns.append([list(c_[0]), list(c_[-1])])
                         p_['segs'] = ns
             except Exception: self.stats['wall_wins_error'] += 1
+        wire_ = False
+        if os.environ.get('RVT_WIREFRAME', '1') == '1':
+            from .vg import display as _disp      # oracle discipline scenes: Wireframe plans show hidden edges, except in the Structural discipline (identical to hidden line)
+            surf_ = ((v.get('display') or {}).get('m_model') or {}).get('m_surfaces')
+            wire_ = not _disp.drawing_rules(_disp.display_style(surf_), v['kind'], v.get('discipline'))['occlude']
+            if wire_: self.stats['wireframe_view'] += 1
         # cut caps (the cut faces at the cut plane) hide what lies below them
-        for ci_, loops2 in enumerate(caps):
+        for ci_, loops2 in enumerate([] if wire_ else caps):
             if os.environ.get('RVT_CAPSKIP') and (os.environ['RVT_CAPSKIP'] == 'all' or ci_ in [int(x) for x in os.environ['RVT_CAPSKIP'].split(',')]): continue
             reg = patterns.region([l for l in loops2 if len(l) > 3 and np.allclose(l[0], l[-1], atol=1e-6)])
             if reg is None: continue
@@ -940,6 +964,7 @@ class ViewDrawer:
             if cut_w is not None: E = E[~((np.abs(E[:, 0, 2] - cut_w) < 1e-6) & (np.abs(E[:, 1, 2] - cut_w) < 1e-6))]       # edges ON the cut plane belong to the cut outline
             if cid in UNOBSCURED_CATS or (cid == -2001300 and v['kind'] == 'plan' and (v.get('range') or {}).get('bottom') is not None and (self.vis.info.bbox(eid) is not None) and self.vis.info.bbox(eid)[1][2] >= v['range']['bottom'] - 1e-6 and self.vis.info.bbox(eid)[1][2] >= (v['range'].get('cut') or 0) - 12.0):                 # rebar: drawn through its host (Revit 'view unobscured' in the sample views); foundation slabs inside a plan's primary range show through the slab above them (Snowdon Parking pile caps / strip footings)
                 vis = [(a, b) for a, b in E if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
+            elif wire_: vis = [(a, b) for a, b in E if np.hypot(*(b[:2] - a[:2])) > px * 0.5]      # wireframe display: nothing hides an edge
             else: vis = [(a, b) for a, b in db.visible_parts(E, eps) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]      # end-on edges collapse to points
             if not vis: continue
             st = res.line(gs, cid, 'proj', eid, ov=ov)
@@ -978,6 +1003,9 @@ class ViewDrawer:
             vis = [(a, b) for a, b in db.visible_parts(E, max(eps_s, p.pop('_eps', 0.0))) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
             if vis: out.append(dict(p, t='segs', segs=[[a[:2].tolist(), b[:2].tolist()] for a, b in vis], pts=None))
         prims = out
+        if v['kind'] == 'plan' and os.environ.get('RVT_SHADED_PLAN', '1') == '1':
+            try: prims = self._shade_plan(prims, clipped, v)
+            except Exception: self.stats['shade_plan_error'] += 1
         for k_, v_ in gfx.UNKNOWN_CLASSES.items(): self.stats['unknown_gnode ' + k_] = v_
         self.stats['seconds'] = round(time.time() - t0, 1)
         return {'prims': self._finish(prims, O, Mv), 'stats': dict(self.stats), 'conds_unknown': {str(k): v for k, v in W.unknown_conds.items()}}
@@ -1007,6 +1035,47 @@ class ViewDrawer:
             for p in prims:
                 if p.get('layer') in ('cut', 'cut_fill', 'projection'): continue        # model content stays below detail items
                 p['order'] = rank.get(p.get('elem'), top if p.get('layer') in ('text', 'annotation', 'annotation_fill', 'datum') else unlisted)
+
+    def _shade_plan(self, prims, clipped, v):
+        """shaded display model (m_surfaces 3) in a plan: Revit paints the visible faces flat grey (134) and draws no model edges (m_edges 0): floors and cut faces become fills,
+        model projection / cut outlines are dropped (oracle discipline scene 'Architectural Shading', PNG)"""
+        surf = ((v.get('display') or {}).get('m_model') or {}).get('m_surfaces')
+        if surf not in (3, 7) or v.get('discipline') == 2: return prims
+        flat = surf == 7        # consistent colours: unlit material colour, edges stay (oracle PNG 'Architectural FlatColors': grey 128 fills + hidden-line edges)
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        mats_ = self.materials()
+        def shade(ov):          # Revit lights the material's shading colour: oracle seed materials 128 / 127 -> 134 / 134 in the PNG
+            c = (mats_.get((ov or {}).get('_mat')) or {}).get('color')
+            k = 1.0 if flat else 134 / 128.0
+            return [min(255, int(round(x * k))) for x in c[:3]] if c and len(c) >= 3 else ([128, 128, 128] if flat else [134, 134, 134])
+        fills = []; groups = collections.defaultdict(list)
+        for eid, cid, T2, uvw, fid, gs, ov in clipped:
+            if cid != -2000032: continue
+            col = tuple(shade(ov))
+            for t in T2[:, :, :2]:
+                pg = Polygon(t)
+                if pg.is_valid and pg.area > 1e-9: groups[col].append(pg)
+        for col, polys in groups.items():
+            u = unary_union(polys).buffer(0)
+            for pg in getattr(u, 'geoms', [u]):
+                if pg.geom_type == 'Polygon': fills.append({'t': 'fill', 'loops': [[list(q) for q in pg.exterior.coords]] + [[list(q) for q in r.coords] for r in pg.interiors], 'color': list(col), 'elem': None, 'layer': 'surface_fill'})
+        ovm = {}
+        for eid, cid, T2, uvw, fid, gs, ov in clipped: ovm.setdefault(eid, ov)
+        out = []
+        if flat:
+            for p in prims:
+                if p.get('t') == 'cut': fills.append({'t': 'fill', 'loops': p['loops'], 'color': shade(ovm.get(p.get('elem'))), 'elem': p.get('elem'), 'layer': 'cut_fill'})
+            self.stats['consistent_plan'] += 1
+            return fills + prims
+        for p in prims:
+            if p.get('layer') == 'projection': self.stats['shaded_edges_dropped'] += 1; continue
+            if p.get('t') == 'cut':
+                out.append({'t': 'fill', 'loops': p['loops'], 'color': shade(ovm.get(p.get('elem'))), 'elem': p.get('elem'), 'layer': 'cut_fill'}); continue
+            if p.get('layer') == 'cut_fill' and p.get('t') == 'segs': continue
+            out.append(p)
+        self.stats['shaded_plan'] += 1
+        return fills + out
 
     def insulation(self, eid, O, Mv, res):
         """batt insulation (CurveElem, 'Insulation Batting Lines', m_data.m_oUserData: m_width W, m_scale = bulge ratio): Revit's export

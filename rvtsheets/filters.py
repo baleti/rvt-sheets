@@ -7,6 +7,9 @@ from .reader import INVALID
 TYPE_NAME_PARAMS = ('Type Name', 'Family Name')
 
 
+EMPTY_TEXT_PARAMS = ('Mark', 'Comments')
+
+
 class FilterEval:
     def __init__(self, dec, doc):
         self.dec = dec; self.doc = doc; self._p = None
@@ -35,6 +38,7 @@ class FilterEval:
         if isinstance(tid, int) and name in TYPE_NAME_PARAMS:       # only the naming parameters: a general type fallback made Snowdon's 'NOT' filters match (and hide) 2300 elements Revit lists
             tp = (self.params().get(tid) or {}).get('params') or {}
             if name in tp: return tp[name]
+        if name in EMPTY_TEXT_PARAMS and (self.params().get(eid) or {}).get('class') in ('SWall', 'Floor', 'FamilyInstance', 'RoofBase', 'FootPrintRoof') and os.environ.get('RVT_EMPTY_MARK', '1') == '1': return ''      # instance text parameters every element has: an empty one is not stored (oracle inverse scene: wall with empty Mark passes 'Mark NOT equals M0')
         return None
 
     def rule_ok(self, eid, r):

@@ -5,7 +5,7 @@ import os, sys
 import math
 import numpy as np
 from .reader import ob, path, INVALID
-from . import gfx
+from . import gfx, gridhead
 
 
 def fmt_elev(ft, imperial, f=None):
@@ -222,8 +222,15 @@ class Datums:
                 lc = self.f.rec(self.f.eid((tf.get('m_lineAndTextAttr') or {}).get('m_categoryId')))
                 gsl = (lc or {}).get('fields', {}).get('m_gstyleIds') or []
                 if gsl: st = res.line(self.f.eid(gsl[0]), cid, 'proj', eid, annotation=True)
+            if r['class'] == 'Grid' and os.environ.get('RVT_GRID_TYPESTYLE', '1') == '1' and not tf.get('m_centerSegmentStyle'):
+                # grid type without a custom centre segment: the whole line takes the type's line style (GridAttributes.m_lineAndTextAttr category: Snowdon 'Str_Grid' pen 3 dash-dot,
+                # Revit's PDF draws every grid dash at 0.203 mm where the Grid category's object style is pen 1)
+                gc_ = self.f.rec(self.f.eid((tf.get('m_lineAndTextAttr') or {}).get('m_categoryId')))
+                gsl_ = (gc_ or {}).get('fields', {}).get('m_gstyleIds') or []
+                if gsl_: st = res.line(self.f.eid(gsl_[0]), cid, 'proj', eid, annotation=True)
             cseg = self.f.eid(tf.get('m_categoryForCenterSegment'))
-            if cseg not in (None, INVALID):
+            whole_ = r['class'] == 'Grid' and os.environ.get('RVT_GRID_TYPESTYLE', '1') == '1' and not tf.get('m_centerSegmentStyle')
+            if cseg not in (None, INVALID) and not (whole_ and st.get('dash')):
                 st2 = res.line(None, cseg, 'proj', eid, annotation=True)
                 st = dict(st, dash=st2.get('dash'))
             prims.append({'t': 'line', 'pts': [uv0.tolist(), uv1.tolist()], 'style': st, 'elem': eid, 'layer': 'datum', 'part': 'line'})
@@ -232,14 +239,7 @@ class Datums:
             vals = {'Name': name, 'Elevation': fmt_elev(float(o[2]), imperial, self.f)}
             ends = []
             # bubble at end 1 (envelope low end, verified against Revit's S101 export); per-view ExtentElem m_endBubbleOverrides bit 0 adds end 2
-            if grid_ext is not None: pass
-            elif r['class'] == 'Grid' and v.get('kind') == 'section' and uv0[1] < uv1[1]:
-                uv0, uv1 = uv1, uv0                                  # grids in sections/elevations: the head is at the top end
-            # plan grids without per-view extents: east-west lines keep the envelope's low end (p0: Commercial west, rst basic D-H east), north-south lines the
-            # north end (Commercial / rst basic lo = north, Snowdon L2 lo = south but Revit's 1-9 are on top)
-            if r['class'] == 'Grid' and not e and v.get('kind') == 'plan':
-                dv = uv1 - uv0
-                if abs(dv[1]) >= abs(dv[0]) and uv0[1] < uv1[1] and (not on_x or os.environ.get('RVT_GRIDNORTH') == '1') and not (os.environ.get('RVT_GRIDXFLIP', '1') == '1' and x[2] < -0.9): uv0, uv1 = uv1, uv0       # lines along the surface's xVec keep the envelope low end as the head end (Commercial grid 1 has xVec +y and its head is at the SOUTH end); lines along yVec (Snowdon vertical-plane grids, xVec +z) put it north, but with xVec -z (Facades L5 'Block 37 Left' etc., Revit's heads are at the south end) the low end stays: bubble at the north end (Commercial, rst basic, Snowdon L2: 1-9 on top)
+            uv0, uv1 = gridhead.order_ends(uv0, uv1, r['class'], v.get('kind'), grid_ext is not None, bool(e), on_x, float(x[2]), os.environ.get('RVT_GRIDNORTH') == '1', os.environ.get('RVT_GRIDXFLIP', '1') == '1')
             if os.environ.get('RVT_GRID_DBG'): print('GRIDDBG', eid, repr(name), 'on_x', on_x, 'ext', {k: (round(x_, 2) if isinstance(x_, float) else x_) for k, x_ in e.items() if k in ('m_freeEnd', 'm_bubbleEnd', 'm_freeEnd3d', 'm_bubbleEnd3d', 'm_endBubbleOverrides')}, 'uv0', np.round(uv0, 2).tolist(), 'uv1', np.round(uv1, 2).tolist(), 'grid_ext', grid_ext is not None, file=sys.stderr)
             ends = [(uv0, uv0 - uv1)]
             if (e.get('m_endBubbleOverrides') or 0) & 1: ends.append((uv1, uv1 - uv0))

@@ -20,3 +20,11 @@ RVT_GRID_CROP_PLAN, RVT_CGL_NOBBOX, RVT_CGL_EDGEON, RVT_FAMWALL, RVT_ROOM_SECTIO
 - RVT_LINK_LISTED=1 on (default off): RvtLinkInstance elements are listed in every view (Revit does this when the link was loaded at export; Snowdon's references were exported unloaded).
 - Unit tests: python3 -m pytest -q tests/test_vg.py tests/test_filters.py tests/test_visibility.py tests/test_linkdraw.py (no corpus needed).
 - Scene check: tools/check_elements.py SCENE.rte gt_views/SCENE.rte.views on host3 under a 3 GB cap (each ~1 min); see the FEATURE-AUDIT tail for the numbers.
+
+## Update 2026-10-21 (c8-vg): rules added after oracle comparison (all with an env off switch)
+- Display model (stage 8): `DBView.m_pViewDisplayMgr.m_model.m_surfaces` 1 wireframe / 2 hidden line / 3 shaded / 7 consistent colours; `vg/display.py drawing_rules(style, kind, discipline)`; wireframe draws all edges without depth-buffer occlusion or cut caps (not in the Structural discipline). RVT_WIREFRAME=0. Shaded / consistent colour plan surfaces are NOT filled yet.
+- Transparency: a surface made transparent by a view / filter override neither occludes nor caps (viewdraw, RVT_TRANSP_OCC=0).
+- Filters: unstored empty Mark / Comments count as empty text, so 'Mark NOT equals X' matches (filters.py, RVT_EMPTY_MARK=0).
+- Element lists: property line segments are listed by the legacy range rule or the deep-crop rule and skip the crop rectangle in deep-crop views (RVT_PROPLINE_LIST / RVT_PROPLINE_NOVOL); the DXF rule still decides drawing. CoordinateSystemDisplayElem (origin marker) is listed in plans without an active crop whatever the range (RVT_COORD_ELEM).
+- Wall pieces whose walker solid disagrees with the header box use the reader mesh (dev, RVT_WALL_MESHFIX).
+- Evidence tooling: tools/vg_dxf_all.sh (68 oracle views vs Revit DXF), tools/fpfn_summary.py, elem_views.py, elem_geom.py, fp_detail.py, fp_attrs.py, crop_pt.py; image scores via c8-qa qa-view.

@@ -9,7 +9,7 @@ import os, sys
 import numpy as np
 from .reader import ob, path, INVALID, wref
 from .dimgeom import current_face, remeasured_value
-from . import units
+from . import units, spotplace
 
 IN = 1 / 12.0
 
@@ -261,11 +261,10 @@ class Annotations:
                     e0_ = (Mv @ (o0_ + d3_ * ep_[0] - P))[:2]; e1_ = (Mv @ (o0_ + d3_ * ep_[1] - P))[:2]
                     print('SPOTDBG', eid, round(ang, 2), [round(float(x), 2) for x in dv_], [round(float(x), 2) for x in off], 'E', [round(float(x), 2) for x in e0_], [round(float(x), 2) for x in e1_], 'B', [round(float(x), 2) for x in (fl.get('m_bendOrPosPtOffset') or [])], 'L', fl.get('m_leaderLine'), fl.get('m_bendLeader'), file=sys.stderr)
                 except Exception as ex: print('SPOTDBG', eid, 'err', ex, file=sys.stderr)
-            neg_ = endh_ = False
+            hal_ = 0 if abs(ang) < 0.5 else 2
             if os.environ.get('RVT_SPOT_OFFFRAME', '1') == '1':
                 # Revit's DXF (Snowdon L1 / L2 / L3): the stored text offset is rotated by the text angle and then mirrored in x; with a negative offset y (L2, L3) the
                 # along-text offset is mirrored too (rotated text always; horizontal text on beams running along -x) and the text is start-aligned
-                sc_ = scale if scale else 1
                 dirx_ = 1.0
                 try:
                     dv_ = (Mv @ np.asarray(path(ob(self.f.rec(self.f.eid((ob(pk) or {}).get('m_elemId')))['fields'].get('m_pCurveDriver')) or {}, 'm_pCrv', 'm_dirVec'), float))[:2]
@@ -275,20 +274,11 @@ class Annotations:
                         if ang > math.pi / 2 + 1e-9: ang -= math.pi
                         elif ang <= -math.pi / 2 + 1e-9: ang += math.pi
                 except Exception: pass
-                ca_, sa_ = math.cos(ang), math.sin(ang)
-                rot_ = abs(ang) > 0.5
-                neg_ = off[1] < 0 and rot_ and os.environ.get('RVT_SPOT_NEG', '1') == '1'
-                endh_ = off[1] < 0 and not rot_ and dirx_ < -0.5 and os.environ.get('RVT_SPOT_NEG', '1') == '1'      # horizontal text left of the point (beam towards -x, leader to the left): end-aligned
-                o0_ = -off[0] if neg_ else off[0]
-                b = a + (Mv @ np.array([-(ca_ * o0_ - sa_ * off[1]), sa_ * o0_ + ca_ * off[1], off[2]]))[:2]
-                if neg_: b = b + np.array([1.0, 0.0]) * (0.0115 * sc_) + np.array([ca_, sa_]) * (-0.0034 * sc_)       # +3.5 mm across, -1.05 mm along the text (measured vs the DXF)
-                elif rot_: b = b + np.array([-0.003, -0.0085]) * sc_                                                # L1 rotated: -0.9 mm across, -2.6 mm along (3.5 - 6.1)
-                elif endh_: b = b + np.array([ca_, sa_]) * (0.0197 * sc_)       # 6 mm (Snowdon L2/L3 DXF)
-                else: b = b + np.array([ca_, sa_]) * (0.0115 * sc_)       # 3.5 mm of paper along the text: horizontal text starts there
+                b, hal_ = spotplace.place(a, off, Mv, ang, dirx_, scale, os.environ.get('RVT_SPOT_NEG', '1') == '1')
             opt = ob(tf.get('m_oLinFormatOptions')) or {}
             txt = units.fmt_length(self._spot_z(fl, P), opt, self.proj_len)
             return [{'t': 'text', 'text': txt, 'origin': b.tolist(), 'x': [math.cos(ang), math.sin(ang)], 'size': size, 'font': font.get('name') or 'Arial',
-                     'halign': (0 if ((abs(ang) < 0.5 and not endh_) or neg_) else 2) if os.environ.get('RVT_SPOT_LEFT', '1') == '1' else 1, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'}]
+                     'halign': hal_ if os.environ.get('RVT_SPOT_LEFT', '1') == '1' else 1, 'valign': 1, 'anchor': True, 'elem': eid, 'layer': 'text'}]
         off = np.asarray(fl.get('m_bendOrPosPtOffset') or [0, 0, 0], float)
         b = a + (Mv @ off)[:2] if fl.get('m_leaderLine') else a
         sh = float(tf.get('m_leaderShoulderLength') or 0) * (scale if scale else 1)

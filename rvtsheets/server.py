@@ -122,7 +122,7 @@ def make_app(resolver):
         """cache state without decoding: {cached, sheets, total, views, views_total, key, failed}"""
         m = model(req.match_info['mid'])
         d = m._summary
-        if d is None: return web.json_response({'cached': False, 'sheets': 0, 'total': None, 'views': 0, 'views_total': None, 'key': m.key, 'stale': False})
+        if d is None: return web.json_response({'cached': False, 'sheets': 0, 'total': None, 'views': 0, 'views_total': None, 'key': m.key, 'failed': None, 'stale': False, 'current_key': m.current_key})
         cs = sum(1 for x in d['sheets'] if m.is_cached('sheet', x['id'])); cv = sum(1 for x in d['views'] if m.is_cached('view', x['id']))
         try: failed = len(json.loads(m.cache.read('failed.json')))
         except Exception: failed = None
