@@ -268,6 +268,10 @@ class ViewDrawer:
             pieces = self._jog_pieces(v) if v and not getattr(self, '_piece', None) else None
             if pieces: return self._draw_jogged(vid, v, pieces, a, k)
             d = self._draw(vid, *a, **k)
+            if v and v.get('kind') == 'graphical_column_schedule' and os.environ.get('RVT_GCS_TABLE', '1') == '1':
+                from .gcsched import rebuild
+                try: d['prims'] = rebuild(d, self.f, v, d['prims'], self)
+                except Exception as ex: self.stats['gcs_error'] += 1
             if v and v.get('kind') == 'plan' and os.environ.get('RVT_LINKS', '1') == '1' and not getattr(self, '_in_link', False):
                 try:
                     from .vg.linkdraw import link_prims
@@ -982,7 +986,19 @@ class ViewDrawer:
                 groups = []
                 for eid, cid, T2, uvw, fid, gs, ov in clipped:
                     pat_ = self.doc['fill_patterns'].get(ov.get('surf_fg_pattern')) if ov.get('surf_fg_pattern') not in (None, -1) else None
-                    if not pat_ or not pat_.get('solid') or not isinstance(ov.get('surf_fg_color'), list) or ov.get('surf_fg_visible') is False: continue
+                    if ov.get('surf_fg_visible') is False: continue
+                    if (not pat_ or not pat_.get('solid') or not isinstance(ov.get('surf_fg_color'), list)) and ov.get('surf_fg_pattern') in (None, -1) and ov.get('_frs') is not None and os.environ.get('RVT_MAT_SOLID', '1') == '1':
+                        # no override: the face material's own surface pattern when it is a solid fill (rst_basic 'Metal - Steel': solid maroon 128,64,64 on every steel column / beam in sections and elevations)
+                        mats_ = self.materials(); n_ = np.cross(uvw[:, 1] - uvw[:, 0], uvw[:, 2] - uvw[:, 0]); bycol_ = collections.defaultdict(list)
+                        for i_ in np.nonzero(n_[:, 2] > 1e-9)[0]:
+                            try: mid_ = int(ov['_frs'][i_])
+                            except Exception: continue
+                            sp_ = (mats_.get(mid_) or {}).get('surface_pattern') or {}
+                            pm_ = self.doc['fill_patterns'].get(sp_.get('id')) if sp_.get('id') is not None else None
+                            if pm_ and pm_.get('solid') and isinstance(sp_.get('color'), list): bycol_[tuple(sp_['color'][:3])].append(i_)
+                        for col_, ix_ in bycol_.items(): groups.append((uvw[ix_], list(col_) + [int(round(255 * (1 - (ov.get('transparency') or 0) / 100.0)))]))
+                        continue
+                    if not pat_ or not pat_.get('solid') or not isinstance(ov.get('surf_fg_color'), list): continue
                     n_ = np.cross(uvw[:, 1] - uvw[:, 0], uvw[:, 2] - uvw[:, 0]); fr_ = uvw[n_[:, 2] > 1e-9]
                     if len(fr_): groups.append((fr_, list(ov['surf_fg_color'])[:3] + [int(round(255 * (1 - (ov.get('transparency') or 0) / 100.0)))]))
                 got = db.paint(groups, eps * 1.5) if groups else None
@@ -1033,9 +1049,12 @@ class ViewDrawer:
             if any(p.get('layer') == 'mask' and p.get('elem') in set(owned) for p in prims): dord = owned; unlisted = -2
         if dord:
             rank = {e: i for i, e in enumerate(dord)}; top = len(dord)
+            unl_top = os.environ.get('RVT_UNLISTED_TOP', '1') == '1' and unlisted == -1
+            own_ = {e for e in {p.get('elem') for p in prims} if e is not None and self.vis.info.info.get(e, {}).get('owner') == vid} if unl_top else set()
             for p in prims:
                 if p.get('layer') in ('cut', 'cut_fill', 'projection'): continue        # model content stays below detail items
                 p['order'] = rank.get(p.get('elem'), top if p.get('layer') in ('text', 'annotation', 'annotation_fill', 'datum') else unlisted)
+                if p['order'] == unlisted and unl_top and p.get('elem') in own_: p['order'] = top - 0.5      # a view-owned element missing from the stored order was created later: Snowdon 916437 break lines (ids 917465 / 917564) mask the beam
 
     def _shade_plan(self, prims, clipped, v):
         """shaded display model (m_surfaces 3) in a plan: Revit paints the visible faces flat grey (134) and draws no model edges (m_edges 0): floors and cut faces become fills,

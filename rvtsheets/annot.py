@@ -487,7 +487,7 @@ class Annotations:
             for i_, w_ in enumerate(wr):
                 try:
                     g_ = wref(w_)['m_geomRef']; r_ = self.f.rec(self.f.eid(g_['m_elemId']))
-                    if r_ and r_['class'] == 'FamilyInstance': cen.add(i_)
+                    if r_ and r_['class'] == 'FamilyInstance' and (os.environ.get('RVT_CEN_STRUCT', '0') == '1' or self.d.vis.info.info.get(r_['id'], {}).get('cat') not in (-2001320, -2001330, -2001300)): cen.add(i_)      # structural framing / columns / foundations take the linear tick (rst_basic 1214432 EQ dimension on joists: slash ticks in Revit's PNG, windows / doors keep the centerline dot)
                 except Exception: pass
         cdia = 1 / 16 * IN * scale
         cst = self.f.rec(self.f.eid(tf.get('m_centerlineTickMarkStyleId')))

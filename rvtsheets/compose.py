@@ -57,7 +57,7 @@ def sheet_svg(dec, sheet_id, doc=None, drawer=None, log=print):
     except Exception as ex: log('sheet-owned elements failed: %r' % ex)
     for k, item in enumerate(dr['viewports']):
         vp = item['vp']; v = doc['views'].get(vp['view'])
-        if v['kind'] not in ('plan', 'section', 'drafting', 'legend', '3d'):
+        if v['kind'] not in ('plan', 'section', 'drafting', 'legend', '3d', 'graphical_column_schedule'):
             o = vp['offset']; s.text({'text': '[%s view not drawn yet: %s]' % (v['kind'], v['name']), 'origin': [o[0], o[1], 0], 'size': 2.5 / FT_MM}); continue
         if v['kind'] == '3d' and (v.get('crop') or {}).get('proj_method') == 2 and not (vp.get('scale') or 0) and (shaded3d.is_shaded(v) or shaded3d.has_sky(vd, v)):
             # perspective 3D: shaded image placed in the viewport (size = crop tangents x D ft, image centre = viewport offset + D x crop centre
