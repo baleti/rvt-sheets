@@ -87,8 +87,8 @@ Snowdon 2024/2026 P .9939 R .9984; Residential P .949 R .983; Commercial P .962 
 |---|---|---|
 | filter rule parameters (framing 'z Offset Value') | partial | Snowdon 600158: 364 of 942 framing instances have no decoded value; Revit colours 100+ beams, we match 18 (NOT = 0) / 12 (< -0.5): reader question open (NEEDS-FROM-SHEETS.md tail, tools/filter_probe.py, zoff_probe.py) |
 | grids in plans (Snowdon Parapet 2 876061) | done | black dash-dot, bubbles at Revit's ends (the 10-17 review pair was stale); line weight a little lighter than Revit's |
-| section cut of structural framing / columns / foundations (Snowdon Longitudinal 579975) | missing | only 5 elements are cut (4 walls + 1 floor); Revit fills cut steel dark red-brown and cut concrete grey; materials carry cut patterns (Steel 1121, Concrete 748) but framing/column solids never reach the cut path (family pieces with non-drawable or hidden graphics styles are kept as occluders only, viewdraw.py pieces['solids'] loop); tools/cutfill_probe.py, prim_probe.py (host1) |
-| section marker colour | missing | Revit draws the Longitudinal section flags red (view-specific line colour), ours black |
+| section cut of structural framing / columns / foundations (Snowdon Longitudinal 579975) | done (c7, 2026-10-19 shaded section image) | only 5 elements are cut (4 walls + 1 floor); Revit fills cut steel dark red-brown and cut concrete grey; materials carry cut patterns (Steel 1121, Concrete 748) but framing/column solids never reach the cut path (family pieces with non-drawable or hidden graphics styles are kept as occluders only, viewdraw.py pieces['solids'] loop); tools/cutfill_probe.py, prim_probe.py (host1) | (row updated 2026-10-22: cut steel / concrete fills present and aligned vs the Revit PNG; piles below the image extent unfilled)
+| section marker colour | done | head flag fill takes the region type graphic style colour (red in Snowdon), PROGRESS 2026-10-19 c7-sheets |
 | shaded 3D DXF tier | n/a | Revit's DXF of shaded views has datums only; score on the image tier |
 
 ### c7-vg measured evidence on the Revit-authored V/G scenes (2026-10-19, tools/check_elements.py vs gt_views, element lists of Revit's FilteredElementCollector per view; identical on the 2024 and 2026 builds)
@@ -108,7 +108,7 @@ Snowdon 2024/2026 P .9939 R .9984; Residential P .949 R .983; Commercial P .962 
 | area | status | notes |
 |---|---|---|
 | filter rule parameters (framing 'z Offset Value') | done | derived reader values live under typed keys (name|Double): FilterEval.value prefers them; Snowdon 600158 'Z Offset' filter matches 165 (Revit's dump: 165 non-zero); yellow rim beams drawn |
-| section marker colour (Snowdon Longitudinal) | done | head fill = colour of the region's graphic style (red), black fills / outlines hidden |
+| section marker colour | done | head flag fill takes the region type graphic style colour (red in Snowdon), PROGRESS 2026-10-19 c7-sheets |
 | section cut fills of Snowdon Longitudinal 579975 | done (fills) | m_surfaces 7 accepted for shaded sections, standalone views draw the section image under the linework; piles' mesh shorter than their linework |
 | dimension colour | done | dimension type's line category colours line + text (orange level dims) |
 | solid surface fills of overrides (section / 3D) | done | depth-tested flat colour image under the linework (columns by level in 600158); plans not enabled |

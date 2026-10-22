@@ -73,7 +73,7 @@ def body(prims, scale, tx, layer_order=('underlay', 'room_fill', 'symbolic_fill'
                         if not keep_: continue
                         p = dict(p, segs=keep_)
         e = ' data-e="%s"' % p.get('elem')
-        if mclip and (p.get('layer') in MODEL_LAYERS or p.get('layer') == 'mask'): e += ' clip-path="url(#cropclip)"'      # model content is cut at the crop region (Revit shows nothing of it beyond)
+        if mclip and (p.get('layer') in MODEL_LAYERS or p.get('layer') == 'mask') and p.get('cat') != -2000150: e += ' clip-path="url(#cropclip)"'      # model content is cut at the crop region (Revit shows nothing of it beyond)
         if p['t'] == 'line': out.append('<path d="%s" %s%s/>' % (D(p['pts']), stroke(p['style']), e))
         elif p['t'] == 'segs':
             segs_ = p['segs']

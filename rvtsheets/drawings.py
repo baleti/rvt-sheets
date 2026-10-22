@@ -114,7 +114,7 @@ def render(m, kind, eid):
 
 
 # ---- view scene JSON (control API: c2-vctl / c2-annot, CONTROL-API.md)
-SCENE_KEEP = ('t', 'elem', 'layer', 'pts', 'segs', 'loops', 'style', 'fill', 'color', 'text', 'origin', 'x', 'size', 'font', 'bold', 'italic', 'halign', 'valign', 'anchor',
+SCENE_KEEP = ('t', 'elem', 'layer', 'pts', 'pts3', 'segs', 'loops', 'style', 'fill', 'color', 'text', 'origin', 'x', 'size', 'font', 'bold', 'italic', 'halign', 'valign', 'anchor',
               'box', 'order', 'cat', 'elems', 'part', 'paper', 'gs', 'pattern', 'hang', 'host')
 
 

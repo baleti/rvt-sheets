@@ -66,3 +66,11 @@ def test_rounding_tolerance_and_off_switch(monkeypatch):
 
 def test_different_segments_untouched():
     assert len(paths([line([[0, 0], [1, 0]]), line([[0, 0], [2, 0]])])) == 2
+
+
+def test_generic_annotation_fill_is_not_cropped(monkeypatch):
+    # Generic Annotations (cat -2000150) belong to the annotation crop: their fills are not cut at the model crop (Commercial 'Typical Wall Section' info icons)
+    prims = [{'t': 'fill', 'loops': [[[0, 0], [1, 0], [1, 1], [0, 0]]], 'color': [80, 136, 208], 'layer': 'symbolic_fill', 'elem': 5, 'cat': -2000150},
+             {'t': 'fill', 'loops': [[[0, 0], [1, 0], [1, 1], [0, 0]]], 'color': [80, 136, 208], 'layer': 'symbolic_fill', 'elem': 6, 'cat': -2000011}]
+    out = viewsvg.body(prims, 100, lambda u, v: (u, v), mclip=True)
+    assert sum('clip-path' in o for o in out) == 1

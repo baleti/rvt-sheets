@@ -102,7 +102,8 @@ class Datums:
                 if cseg not in (None, INVALID): st = dict(st, dash=res.line(None, cseg, 'proj', eid, annotation=True).get('dash'))
                 for j_ in (1, 3):
                     q_ = cs_[(k_ + j_) % 4]
-                    prims.append({'t': 'line', 'pts': [((cs_[k_] - O) @ Mv.T)[:2].tolist(), ((q_ - O) @ Mv.T)[:2].tolist()], 'style': st, 'elem': eid, 'layer': 'datum', 'part': 'line'})
+                    prims.append({'t': 'line', 'pts': [((cs_[k_] - O) @ Mv.T)[:2].tolist(), ((q_ - O) @ Mv.T)[:2].tolist()], 'style': st, 'elem': eid, 'layer': 'datum', 'part': 'line',
+                                  'pts3': [cs_[k_].tolist(), q_.tolist()]})       # world feet: the viewer can place the level edge in model space (c8-vctl)
                 continue
             # datum line in this view = intersection of the datum plane with the view plane: direction perpendicular to both normals
             dline = np.cross(n, Z)
