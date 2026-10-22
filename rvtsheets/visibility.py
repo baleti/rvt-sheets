@@ -488,6 +488,34 @@ class Visibility:
             return bool(np.all((~use_hi | (mn <= hi + 1e-6)) & (~use_lo | (mx >= lo - 1e-6))))
         return test
 
+    def _straddles(self, v, bb):
+        """world AABB crosses the boundary of the view's crop box (not wholly inside it): only these need the mesh test"""
+        c = v.get('crop') or {}
+        if not c.get('basis'): return False
+        o = np.asarray(c['origin'], float); B = np.asarray(c['basis'], float); b = c['bounds']
+        lo = np.array([b[i][1] for i in range(3)], float); hi = np.array([b[i][0] for i in range(3)], float)
+        L = (np.array([[bb[i][0], bb[j][1], bb[k][2]] for i in (0, 1) for j in (0, 1) for k in (0, 1)]) - o) @ B.T
+        ulo, uhi = self._box_use(c)
+        return not bool(np.all((~ulo | (L >= lo - 1e-6)) & (~uhi | (L <= hi + 1e-6))))
+
+    @staticmethod
+    def _box_use(c):
+        xy = bool(c.get('crop_active')); act = c.get('active') or [[1, 1]] * 3
+        return np.array([xy, xy, True]), np.array([xy, xy, bool(act[2][0])])
+
+    def _mesh_in_box(self, v, eid):
+        """any mesh triangle of the element (AABB in the crop frame) overlaps the crop box; True when the mesh is unavailable"""
+        try:
+            import rvt_elemmesh as E_
+            T = np.asarray(E_.element_mesh(self.dec.f.g, eid).get('tris') or [], float).reshape(-1, 3, 3)
+            if not len(T): return True
+            c = v['crop']; o = np.asarray(c['origin'], float); B = np.asarray(c['basis'], float); b = c['bounds']
+            lo = np.array([b[i][1] for i in range(3)], float); hi = np.array([b[i][0] for i in range(3)], float)
+            L = ((T.reshape(-1, 3) - o) @ B.T).reshape(-1, 3, 3)
+            ulo, uhi = self._box_use(c)
+            return bool(np.any(np.all((~ulo | (L.max(1) >= lo - 1e-6)) & (~uhi | (L.min(1) <= hi + 1e-6)), axis=1)))
+        except Exception: return True
+
     def _level_z(self, eid):
         """a level's view-vertical coordinate (along the view's up axis from the view origin)"""
         r = self.dec.f.rec(eid, 'Level')
@@ -672,6 +700,8 @@ class Visibility:
                     if (v.get('crop') or {}).get('crop_active'): why[eid] = 'coord_elem_cropped'; continue       # Snowdon: the 9 plans with an active crop region do not list it
                     nobox_ = True       # the origin marker is listed in every plan that shows its category whatever the view range (Snowdon: 12 plans above / below z 0 listed)
                 if bb is not None and not nobox_ and not vol(bb) and not (e['cls'] in ('StairsElement', 'StairsRun', 'StairsSupport') and v['kind'] == 'section' and getattr(self, '_loose_vol', None) is not None and os.environ.get('RVT_JOG_STAIRS', '1') == '1' and self._loose_vol(bb)): why[eid] = 'outside_view_volume'; continue
+                if bb is not None and not nobox_ and v['kind'] == 'section' and e['cls'] == 'FamilyInstance' and os.environ.get('RVT_MESH_BOX', '0') == '1' and self._straddles(v, bb) and not self._mesh_in_box(v, eid):
+                    why[eid] = 'mesh_outside_view_volume'; continue       # rotated members whose world box overlaps the section volume while none of their triangles does (Snowdon Sawtooth sections: 4 of 4 omitted framing members had no triangle in the box)
                 if bb is not None and e['cls'] in ('StairsRun', 'StairsElement', 'StairsSupport') and v['kind'] == 'plan' and v.get('range') and v['range'].get('plan_view_type') != 2 and v['range'].get('cut') is not None and os.environ.get('RVT_STAIR_ABOVE_CUT', '1') == '1' and v.get('discipline') != 2 and bb[0][2] > v['range']['cut'] + 1e-3:
                     why[eid] = 'stair_above_cut'; continue      # a stair lying wholly above the cut plane is not listed in the plan (Residential basement: descending stair 0..-1.5 above cut -4)
                 sbx_ = v.get('section_box')

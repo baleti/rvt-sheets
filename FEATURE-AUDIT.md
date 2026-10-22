@@ -7,7 +7,7 @@ Evidence: tools/check_elements.py (element sets vs FilteredElementCollector), to
 | view template (V/G, filters, detail level, phase filter, discipline taken from template) | done (oracle: 2024 + 2026 vg_templates + vg_templates_var: decoded non-controlled set = Revit TPLCTL list for 7 of 7 templates; lists P/R 1.0 (tools/check_tplctl.py); linework vs DXF P .96-.99 R 1.0, tools/vg_dxf_all.sh) | settings decoded + applied; TPLCTL used (rvtsheets/vg/template.py, equals Revit's noncontrolled list); stored view values are the effective ones (6 files) |
 | category visibility (hidden categories, annotation/model/analytical/import flags) | done | element sets P/R 0.95-0.99 |
 | category overrides (weights, colours, patterns, halftone, transparency, cut/surface fill) | done | rosettas e |
-| subcategory overrides | partial | via category parent lookup |
+| subcategory overrides | partial | via category parent lookup (assumes a parent override cascades to subcategories without own override: unverified, scene requested in NEEDS-FROM-ORACLE.md round 4) |
 | element overrides, hidden elements | done / partial | m_explicitlyHiddenElements read; Snowdon L2 dims 595385/6 are not hidden: Revit has no bounding box for them (references to elements outside the view, oracle dimprobe) and lists none; the dimension-reference rule in visibility.py drops them (P .9941 on Snowdon) |
 | view filters (rules, enabled, visibility, overrides) | done | 2026-10-15: inverse rules decoded, 'Family and Type' resolved, filters now also hide annotation + marker elements (Sections/Callouts/Elevations categories); missing-parameter inverse rule = no match |
 | phase / phase filter | done (lists + resolved overrides + drawing: 2024_vg_phases DXF, 18 views: Demo Only P .289 -> .989, Existing views .915 -> 1.000, Show All .963, Demo + New .980) | oracle scene 2024_vg_phases: element phase status = Revit's ElementOnPhaseStatus 213/213; per-filter presentation (ByCategory / Overridden / DontShow) resolved: 'VG custom' view (Existing = Overridden: grey 127 pen 2, no cut fill; Temporary = Overridden blue; New ByCategory black; Demolished not shown) equals Revit's PNG; DXF/image numbers not measured |
@@ -25,7 +25,7 @@ Evidence: tools/check_elements.py (element sets vs FilteredElementCollector), to
 | colour scheme legends | done | alphabetical entries, wrap, title; 'Calculating...' placeholder row not reproduced |
 | property lines, stairs path text | done | property lines inside the primary view range; UP/DN at start/end riser |
 | tags (independent, room, space, area) | partial | symbol graphics + labels + rotation (orientation 1/2); label-visibility rules (family label parameters), leaders missing; 'Structural Framing Tag' frame suppressed (Revit shows bare text) |
-| dimensions | partial | linear done (ticks, witness, text, units 2022+); angular/radial/arc missing; alternate units missing; dimension hide rule unknown |
+| dimensions | partial | linear done (ticks, witness, text, units 2022+); angular/radial/arc missing; alternate units below the primary text drawn (annot.py m_alternateUnits == 2, rst basic 3000 / 9' - 10"); dimension hide rule unknown |
 | spot elevations / slopes | partial | values verified by reading Revit's sheet (5'-0", 7'-7"); Revit draws the text without target/leader here: placement rule unknown |
 | text notes, keynotes | partial | text notes done; keynote tags/legends partial |
 | section / callout / elevation markers | done (plans), partial (sections) | filters + discipline + range + scale + crop rules |
@@ -85,7 +85,7 @@ Snowdon 2024/2026 P .9939 R .9984; Residential P .949 R .983; Commercial P .962 
 ## c6-sheets update (2026-10-19)
 | area | status | notes |
 |---|---|---|
-| filter rule parameters (framing 'z Offset Value') | partial | Snowdon 600158: 364 of 942 framing instances have no decoded value; Revit colours 100+ beams, we match 18 (NOT = 0) / 12 (< -0.5): reader question open (NEEDS-FROM-SHEETS.md tail, tools/filter_probe.py, zoff_probe.py) |
+| filter rule parameters (framing 'z Offset Value') | done (2026-10-20) | reader reads m_cellList m_zOffsets (942 of 942 exact vs Revit's dump); Snowdon 600158 'Structural Framing - Z Offset' matches 165 framing = Revit's 165 non-zero (was 18), 'LessThan 6"' 21 (was 12); parameter absent on 433 of 1375 framing is legitimate (no match) |
 | grids in plans (Snowdon Parapet 2 876061) | done | black dash-dot, bubbles at Revit's ends (the 10-17 review pair was stale); line weight a little lighter than Revit's |
 | section cut of structural framing / columns / foundations (Snowdon Longitudinal 579975) | done (c7, 2026-10-19 shaded section image) | only 5 elements are cut (4 walls + 1 floor); Revit fills cut steel dark red-brown and cut concrete grey; materials carry cut patterns (Steel 1121, Concrete 748) but framing/column solids never reach the cut path (family pieces with non-drawable or hidden graphics styles are kept as occluders only, viewdraw.py pieces['solids'] loop); tools/cutfill_probe.py, prim_probe.py (host1) | (row updated 2026-10-22: cut steel / concrete fills present and aligned vs the Revit PNG; piles below the image extent unfilled)
 | section marker colour | done | head flag fill takes the region type graphic style colour (red in Snowdon), PROGRESS 2026-10-19 c7-sheets |

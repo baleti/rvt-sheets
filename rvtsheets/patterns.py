@@ -99,6 +99,18 @@ def hatch(geom, pattern, scale, view_rot=0.0):
     return out
 
 
+def _real_dashes(lengths, eps):
+    """bool mask over the dash entries (even positions) of a pattern period: False for a zero-length dash whose neighbouring gap is 0 and whose neighbouring dash has length (the dot sits on a drawn line end, where Revit shows nothing)"""
+    n = len(lengths) // 2 + len(lengths) % 2
+    keep = np.ones(n, bool)
+    if os.environ.get('RVT_DOT_ON_DASH', '1') != '1': return keep
+    for i in range(n):
+        if lengths[2 * i] > eps: continue
+        for j, gi in ((i - 1, 2 * i - 1), (i + 1, 2 * i + 1)):
+            if lengths[gi % len(lengths)] <= eps and lengths[(2 * j) % len(lengths)] > eps: keep[i] = False
+    return keep
+
+
 def _dash_endpoints(bases, tcs, R, d, segs, per, k, scale):
     """Build line/period/dash ordered endpoints using the original float additions."""
     lengths = np.abs(segs)
@@ -106,6 +118,8 @@ def _dash_endpoints(bases, tcs, R, d, segs, per, k, scale):
                             lengths[::2], DOT_MM / 304.8 * scale)
     starts = np.floor((tcs - R) / per) * per
     stops = tcs + R
+    keep = _real_dashes(lengths, 1e-6 * k)          # a zero dash touching a drawn dash (Brownsville Soldier: dash 0.83 gap 0 dash 0 gap 0) is no dot
+    dash_lengths = dash_lengths[keep]
     chunks = []
     while len(starts):
         # Include spare periods, then test their actual accumulated starts: a
@@ -119,7 +133,7 @@ def _dash_endpoints(bases, tcs, R, d, segs, per, k, scale):
         np.cumsum(steps, axis=1, out=steps)
         positions = steps[:, :-1].reshape(len(starts), periods, len(segs))
         rows, cycles = np.nonzero(positions[:, :, 0] < stops[:, None])
-        ts = positions[rows, cycles, ::2]
+        ts = positions[rows, cycles, ::2][:, keep]
         p0 = bases[rows, None, :] + ts[:, :, None] * d
         p1 = bases[rows, None, :] + (ts + dash_lengths)[:, :, None] * d
         chunks.append(np.stack((p0, p1), axis=2).reshape(-1, 2, 2))

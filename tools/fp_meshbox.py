@@ -17,6 +17,7 @@ for e in pred:
     T = np.asarray(E.element_mesh(dec.f.g, e).get('tris') or [], float).reshape(-1, 3)
     if not len(T): continue
     L = (T - org) @ Bm.T
-    inside = np.all((L >= lo - 1e-6) & (L <= hi + 1e-6), axis=1).mean()
+    Tr = L.reshape(-1, 3, 3); tmn = Tr.min(1); tmx = Tr.max(1)
+    inside = np.all((tmx >= lo - 1e-6) & (tmn <= hi + 1e-6), axis=1).mean()       # triangle AABB overlaps the crop box (members spanning the box have no vertex inside)
     rows['TP' if e in G else 'FP'].append(round(float(inside), 2))
-for k, l in rows.items(): print(k, len(l), 'frac vertices in crop box: min %.2f mean %.2f' % (min(l), sum(l) / len(l)), sorted(l)[:12])
+for k, l in rows.items(): print(k, len(l), 'frac triangles overlapping the crop box: min %.2f mean %.2f' % (min(l), sum(l) / len(l)), sorted(l)[:12])

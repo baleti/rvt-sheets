@@ -629,6 +629,7 @@ class ViewDrawer:
                 if v['kind'] == 'plan' and self._elevation_swing(c.get('gs')): self.stats['elevation_swing_skipped'] += 1; continue      # door/window 'Elevation Swing' lines show only in elevations/sections (Residential plan 32: Revit DXF has none)
                 if info['cls'] in ('SiteSurface', 'TopographySurface') and v['kind'] in ('section', '3d'): continue   # contour/surface curves are not drawn in elevations (the ground profile comes from the mesh)
                 pts = (np.asarray(c['pts'], float) - O) @ Mv.T
+                if os.environ.get('RVT_CURVE_DBG') in (str(eid), 'cat%d' % cid): print('CURVE', hex(c.get('flags') or 0), c.get('gs'), (res.gs.get(c.get('gs')) or {}).get('cat'), np.round(pts[[0, -1]], 2).tolist(), file=sys.stderr)
                 if plant_c is not None and len(c['pts']) == 2:
                     a_, b_ = np.asarray(c['pts'], float)[:, :2]; ab_ = b_ - a_; L_ = float(np.linalg.norm(ab_))
                     if L_ > 0.5 * plant_c[1]:
