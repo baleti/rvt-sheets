@@ -268,7 +268,7 @@ class ViewDrawer:
             pieces = self._jog_pieces(v) if v and not getattr(self, '_piece', None) else None
             if pieces: return self._draw_jogged(vid, v, pieces, a, k)
             d = self._draw(vid, *a, **k)
-            if v and v.get('kind') == 'plan' and os.environ.get('RVT_LINKS', '0') == '1' and not getattr(self, '_in_link', False):
+            if v and v.get('kind') == 'plan' and os.environ.get('RVT_LINKS', '1') == '1' and not getattr(self, '_in_link', False):
                 try:
                     from .vg.linkdraw import link_prims
                     self._in_link = True

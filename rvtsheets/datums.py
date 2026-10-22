@@ -239,7 +239,12 @@ class Datums:
             vals = {'Name': name, 'Elevation': fmt_elev(float(o[2]), imperial, self.f)}
             ends = []
             # bubble at end 1 (envelope low end, verified against Revit's S101 export); per-view ExtentElem m_endBubbleOverrides bit 0 adds end 2
-            uv0, uv1 = gridhead.order_ends(uv0, uv1, r['class'], v.get('kind'), grid_ext is not None, bool(e), on_x, float(x[2]), os.environ.get('RVT_GRIDNORTH') == '1', os.environ.get('RVT_GRIDXFLIP', '1') == '1')
+            hd_ = None
+            if os.environ.get('RVT_GRIDHEAD_DIR', '1') == '1':
+                n_ = np.cross(x, y); nn_ = float(np.linalg.norm(n_))
+                if nn_ > 1e-9 and abs(n_[2]) / nn_ < 0.1:               # vertical datum plane: head end = surface normal x up (xVec x yVec flips with yVec / xVec -z in 2026 files)
+                    hw_ = np.cross(n_ / nn_, [0.0, 0.0, 1.0]); hd_ = (Mv @ hw_)[:2]
+            uv0, uv1 = gridhead.order_ends(uv0, uv1, r['class'], v.get('kind'), grid_ext is not None, bool(e), on_x, float(x[2]), os.environ.get('RVT_GRIDNORTH') == '1', os.environ.get('RVT_GRIDXFLIP', '1') == '1', hd_)
             if os.environ.get('RVT_GRID_DBG'): print('GRIDDBG', eid, repr(name), 'on_x', on_x, 'ext', {k: (round(x_, 2) if isinstance(x_, float) else x_) for k, x_ in e.items() if k in ('m_freeEnd', 'm_bubbleEnd', 'm_freeEnd3d', 'm_bubbleEnd3d', 'm_endBubbleOverrides')}, 'uv0', np.round(uv0, 2).tolist(), 'uv1', np.round(uv1, 2).tolist(), 'grid_ext', grid_ext is not None, file=sys.stderr)
             ends = [(uv0, uv0 - uv1)]
             if (e.get('m_endBubbleOverrides') or 0) & 1: ends.append((uv1, uv1 - uv0))

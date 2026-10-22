@@ -2,8 +2,8 @@
 A second ViewDrawer runs on the linked document with a copy of the chosen linked view whose frame is re-expressed so that its view coordinates
 coincide with the host view's (X_L = R^T X_H, O_L = R^T (O_H - t)); the model prims are added to the host drawing with prim['link'] = instance id.
 Which linked view: display mode 'by linked view' = the instance's own linked view; 'by host view' (default) = the linked plan view whose cut plane
-is closest to the host's, with the host's view range moved into link coordinates.  Off by default (RVT_LINKS=1): unverified against Revit on
-anything but the oracle links scene (2026_vg_links: host view 303735 / linked view 303745, 303755)."""
+is closest to the host's, with the host's view range moved into link coordinates.  On by default since 2026-10-21 (RVT_LINKS=0 off): verified against Revit's DXF on the oracle links scene (2024_vg_links, 3 views: recall .25 / .33 / .33 -> 1.0, precision .972 unchanged);
+links stored with a relative path are skipped (unloaded in the exports: Snowdon)."""
 import os, re, copy
 import numpy as np
 from . import links as L
@@ -100,6 +100,7 @@ def link_prims(drawer, vid, v, d, depth=0):
     for iid, inst in insts.items():
         st = vl.get(inst['symbol'])
         if not st or not st['visible']: continue
+        if (drawer.f.rec(inst['symbol']) or {'fields': {}})['fields'].get('m_relative'): drawer.stats['link_relative_skipped'] += 1; continue      # relative-path links are not loaded in Revit's exports (every Snowdon link): nothing of them is drawn
         cu = st['instances'].get(iid) or st.get('type_custom')
         path = resolve_path(host_path, types[inst['symbol']]['path'] or types[inst['symbol']]['name']) if host_path else None
         if not path: drawer.stats['link_unresolved'] += 1; continue
