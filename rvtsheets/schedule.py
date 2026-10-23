@@ -90,6 +90,7 @@ class Schedules:
                 'grid_lines': sch.get('m_showGridLines', 1), 'outline': sch.get('m_showOutline', 1), 'fixed': sch.get('m_bFixedHeight'),
                 'height': (segs[0].get('m_height') if segs else None), 'title_h': rowh(0, 1 / 24), 'body_h': rowh(1, 1 / 72),
                 'category': self.f.eid(sch.get('m_categoryId')), 'instance': sch.get('m_bInstanceSchedule', 1),
+                'filters': [(path(x, 'm_fieldId', 'm_id'), (ob(x) or {}).get('m_filterType'), (ob((ob(x) or {}).get('m_value')) or {})) for x in sch.get('m_filterArr') or []],
                 'sort': [(path(s, 'm_fieldId', 'm_id'), (ob(s) or {}).get('m_sortOrder', 0)) for s in sch.get('m_sortFieldArr') or []],
                 'field_ids': fids, 'header_rows': hdr_rows, 'title_size': title_size, 'all_fields': all_fields, 'header_set': {h.get('m_id'): h.get('m_caption') or '' for h in (ob(x) for x in sch.get('m_headerSet') or []) if h},
                 'fonts': {k: self.font(fl.get(k)) for k in ('m_titleTextTypeId', 'm_headerTextTypeId', 'm_bodyTextTypeId')},
@@ -143,12 +144,31 @@ class Schedules:
                     v = self.value(eid, af[fid], p)
                     k = (0, float(v), '') if isinstance(v, (int, float)) and not isinstance(v, bool) else (1, 0.0, str(v or ''))
                     sk.append((k, order))
+            if d.get('filters') and os.environ.get('RVT_SCHED_FILTER', '1') == '1' and not self._passes(eid, d, p): continue
             out.append((eid, sk, [self.cell_text(eid, fd, p) for fd in d['fields']]))
         # schedule sort fields (m_sortFieldArr: field index incl. hidden fields, m_sortOrder 1 = descending), then element order
         out.sort(key=lambda r: r[0])
         for i in reversed(range(max((len(r[1]) for r in out), default=0))):
             out.sort(key=lambda r: r[1][i][0] if i < len(r[1]) else (2, 0.0, ''), reverse=bool(out and i < len(out[0][1]) and out[0][1][i][1]))
         return [r[2] for r in out]
+
+    def _passes(self, eid, d, p):
+        """schedule filters (m_filterArr: field id, internal type = API ScheduleFilterType + 2: 3 not equal, 9 does not contain, ...; value m_str / m_dbl); all must hold.
+        Commercial 'How Do I' (type 3, ''): the row without a topic is not listed (Revit's table is one row shorter)"""
+        fi = d.get('field_ids') or []; af = d.get('all_fields') or []
+        for fid, typ, val in d['filters']:
+            if fid in fi: k = fi.index(fid)
+            else: k = fid if isinstance(fid, int) else -1
+            if not (0 <= k < len(af)): continue
+            raw = self.value(eid, af[k], p); txt = str(self.cell_text(eid, af[k], p) or '')
+            sv = str(((val.get('m_str') or {}) if isinstance(val.get('m_str'), dict) else {'m_str': val.get('m_str')}).get('m_str') or '')
+            a, b = txt.lower(), sv.lower()
+            num = isinstance(raw, (int, float)) and not isinstance(raw, bool); dv = val.get('m_dbl') or 0.0
+            ok = {2: a == b, 3: a != b, 8: b in a, 9: b not in a, 10: a.startswith(b), 11: not a.startswith(b), 12: a.endswith(b), 13: not a.endswith(b)}.get(typ)
+            if typ in (4, 5, 6, 7) and num: ok = {4: raw > dv, 5: raw >= dv, 6: raw < dv, 7: raw <= dv}[typ]
+            if ok is None: continue
+            if not ok: return False
+        return True
 
     def cell_text(self, eid, fd, named):
         v = self.value(eid, fd, named)

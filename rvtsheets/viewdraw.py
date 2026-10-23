@@ -487,6 +487,10 @@ class ViewDrawer:
                 try: prims += self.stairs_path_text(eid, O, Mv, scale, v)
                 except Exception: self.stats['stairs_path_error'] += 1
                 continue
+            if info['cls'] in ('LineLoad', 'AreaLoad') and os.environ.get('RVT_LINELOAD', '1') == '1':
+                try: prims += self.line_load(eid, v, O, Mv, scale, res, info['cat'])
+                except Exception: self.stats['line_load_error'] += 1
+                continue
             if info['cls'] == 'PropertyLineSegment':
                 rg_ = v.get('range') or {}
                 if os.environ.get('RVT_PROPLINE_LIST', '1') == '1' and os.environ.get('RVT_PROPLINE_Z', '1') == '1' and not property_line_candidate(
@@ -620,6 +624,20 @@ class ViewDrawer:
             if info['cls'] in ('Rebar', 'RebarInSystem'):
                 try: curves_ = self.rebar_bars(eid, curves_) or curves_
                 except Exception: self.stats['rebar_error'] += 1
+            if cid == -2001320 and info['cls'] == 'FamilyInstance' and v['kind'] == 'plan' and curves_ and os.environ.get('RVT_BEAM_WIDTH', '1') == '1':
+                # framing whose symbolic lines collapsed to ONE line (the family's width is a parameter the saved symbol does not carry: rst basic 'Level Lower' bar joists, 3 coincident lines
+                # on the axis): Revit draws the two edges, half the header bbox width either side of the axis (joist 0.16 ft: x 41.79 / 41.95 vs our single 41.9; S-BEAM recall .416)
+                try:
+                    allq_ = np.concatenate([np.asarray(c_['pts'], float)[:, :2] for c_ in curves_ if c_.get('pts') is not None and len(c_['pts'])])
+                    ext_ = allq_.max(0) - allq_.min(0); bb_ = self.vis.info.bbox(eid)
+                    if bb_ is not None and float(ext_.max()) > 1.0 and float(ext_.min()) < 0.02:
+                        hs_ = sorted(float(t_) for t_ in (bb_[1] - bb_[0])[:2]); w_ = hs_[0]
+                        if 0.05 <= w_ <= 3.0 and hs_[1] > 1.0:
+                            c0_ = max((c_ for c_ in curves_ if c_.get('pts') is not None and len(c_['pts']) >= 2), key=lambda c_: float(np.ptp(np.asarray(c_['pts'], float)[:, :2], axis=0).max()))
+                            a0_, b0_ = np.asarray(c0_['pts'], float)[0], np.asarray(c0_['pts'], float)[-1]; dd_ = (b0_ - a0_)[:2]; dd_ = dd_ / (np.linalg.norm(dd_) or 1.0); nn_ = np.array([-dd_[1], dd_[0], 0.0])
+                            curves_ = [dict(c0_, pts=[(a0_ + sg_ * nn_ * w_ / 2).tolist(), (b0_ + sg_ * nn_ * w_ / 2).tolist()]) for sg_ in (1.0, -1.0)]
+                            self.stats['beam_width_edges'] += 1
+                except Exception: self.stats['beam_width_error'] += 1
             plant_c = None
             if cid == -2001360 and info['cls'] == 'FamilyInstance' and v['kind'] == 'plan' and os.environ.get('RVT_PLANT', '1') == '1':
                 try:
@@ -1852,6 +1870,44 @@ class ViewDrawer:
 
     def level_elevation(self, v, O):
         return O[2]
+
+    def line_load(self, eid, v, O, Mv, scale, res, cat):
+        """structural line / area load in a plan view (rst basic DXF S-LOAD-*): a vertical force is a circle (r = 1.5875 mm paper) with an inscribed X, repeated every 10 mm of paper
+        along the 3D length of the load line (line load: the host beam's analytical curve; area load: each straight edge of its boundary sketch), ends included
+        (count = round(length / (10 mm * scale))); symbols above the view range top are not drawn (nothing is clipped below the bottom)"""
+        if v['kind'] != 'plan': return []
+        r = self.f.rec(eid); fl = r['fields']
+        fz = fl['m_force_1']['m_xyz']
+        if abs(fz[2]) < 1e-9 or max(abs(fz[0]), abs(fz[1])) > abs(fz[2]): return []
+        curves = []
+        if r['class'] == 'LineLoad':
+            h = self.f.eid(fl['m_oPick']['obj']['m_elemPicks'][0]['m_elemId'])
+            a = self.f.rec(h)['fields']; own = self.f.rec(self.f.eid(a['m_ownerElementId']))
+            curves = [ob_(ob_(own['fields']['m_pCurveDriver'])['m_pCrv'])]
+        else:
+            if (v.get('range') or {}).get('top') is not None and fl['m_planeOrigin'][2] > v['range']['top'] + 1e-3: return []      # the load plane above the view range top (rst basic Level Lower: Revit draws 2 of the 3 area loads)
+            sk = self.f.rec(self.f.eid(fl['m_sketchId']))
+            curves = [ob_(c) for c in sk['fields'].get('m_absorbedCurves') or []]
+        mm = 1 / 304.8
+        rad = 1.5875 * scale * mm; q = rad / math.sqrt(2)
+        st = res.line(None, cat, 'proj', eid)
+        rg_ = v.get('range') if (v.get('range') or {}).get('top') is not None else None
+        out = []
+        for c in curves:
+            if 'm_dirVec' not in c or 'm_endParams' not in c or 'm_origin' not in c: continue
+            orr = np.asarray(c['m_origin'], float); d = np.asarray(c['m_dirVec'], float); t0, t1 = c['m_endParams']
+            L = t1 - t0
+            n = max(1, int(round(L / (10 * scale * mm))))
+            for k in range(n + 1):
+                P = orr + d * (t0 + L * k / n)
+                if rg_ and P[2] > rg_['top'] + 1e-3: continue
+                u, w = ((P - O) @ Mv.T)[:2]
+                out.append({'t': 'line', 'pts': [[u - q, w - q], [u + q, w + q]], 'style': st, 'elem': eid, 'layer': 'projection'})
+                out.append({'t': 'line', 'pts': [[u - q, w + q], [u + q, w - q]], 'style': st, 'elem': eid, 'layer': 'projection'})
+                ring = [[u + rad * math.cos(2 * math.pi * i / 24), w + rad * math.sin(2 * math.pi * i / 24)] for i in range(25)]
+                out.append({'t': 'line', 'pts': ring, 'style': st, 'elem': eid, 'layer': 'projection'})
+        self.stats['line_loads'] += 1
+        return out
 
     def property_line(self, eid, O, Mv, res, v):
         """property line segment (site plans): its GLine / GArc curve in the 'Property Lines' category style (dash-dot pattern, pen 8)"""
