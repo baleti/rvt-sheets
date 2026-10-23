@@ -575,6 +575,7 @@ class Visibility:
             if e['cls'] == 'Level' and (v['kind'] == 'plan' or (v['kind'] == '3d' and (os.environ.get('RVT_3D_DATUMS', '1') != '1' or not self._is22()))): why[eid] = 'level_in_plan_or_3d'; continue
             if v['kind'] == '3d' and e['cls'] in ('Grid', 'RefPlane', 'Level'):
                 if e['cls'] == 'RefPlane' or os.environ.get('RVT_3D_DATUMS', '1') != '1' or not self._is22(): why[eid] = 'datum_in_3d'; continue         # 3D views list grids and levels (Snowdon 'Structure Only' 34), never reference planes
+                if e['cls'] == 'Grid' and (v.get('crop') or {}).get('crop_active') and os.environ.get('RVT_CROP3D_GRIDS', '0') != '1': why[eid] = 'grid_in_cropped_3d'; continue       # Snowdon 2026 'CoverSheet' (cropped orthographic 3D): 0 of its 15 grids listed by Revit, like every cropped 3D view of the oracle files (14 views)
                 if e['cls'] == 'Grid' and (v.get('section_box') or {}).get('on') and os.environ.get('RVT_BOX_GRIDS', '0') != '1': why[eid] = 'grid_in_section_box_view'; continue       # Snowdon: the 6 boxed 3D views list their 2-4 levels, never a grid (grids are 2D-extent datums: their 3D line is outside the box)
                 bb_ = self._datum_bbox(eid)
                 if bb_ is not None and not vol(bb_): why[eid] = 'datum_outside_section_box'; continue

@@ -374,6 +374,7 @@ class ViewDrawer:
         is_rcp = v.get('kind') == 'plan' and (v.get('range') or {}).get('plan_view_type') == 2
         if is_rcp and Z[2] > 0: Z = -Z                                # looking up: depth axis flipped, plan x/y unchanged
         Mv = np.stack([X, Y, Z])                                     # world -> view rows
+        self._up_view = Mv @ np.array([0.0, 0.0, 1.0])
         wc, wf, _ = self.planes(v, O, Z)
         is_section = v['kind'] == 'section' and v.get('class') == 'DBViewSection'
         cut_w = wc
@@ -646,6 +647,8 @@ class ViewDrawer:
                 lay = 'symbolic'
                 if v['kind'] == 'plan' and not anno and info['cls'] == 'FamilyInstance' and cid not in (-2001330, -2001320, -2001300) and cut_w is not None and (c.get('flags') or 0) & 0x80000 and not (c.get('flags') or 0) & 0x2a0 and (pts[:, 2] > cut_w + 1e-6).all():
                     self.stats['family_lines_above_cut'] += 1; continue      # family curves flagged 0x80000 (not 0x20/0x80/0x200) lying above the cut plane (door head / overhead track lines) are not in Revit's plan (Residential 32/36/basement: P +1.4..6 pts, R -0.3..1)
+                if cid == -2000014 and v['kind'] == 'section' and info['cls'] == 'FamilyInstance' and (c.get('flags') or 0) == 0x1088004 and os.environ.get('RVT_WIN_SYM', '1') == '1':
+                    self.stats['window_elev_symbol_skipped'] += 1; continue      # window family lines flagged 0x1088004 (opening bottom / sides + a vertical centre line) are not in Revit's elevations: the sash edges come from the solids (Residential north: the centre line crosses every double-hung window)
                 if is_rcp and not anno and cut_w is not None and (pts[:, 2] > cut_w + 1e-6).all():
                     # family plan symbols below a ceiling plan's cut (furniture, fixtures): only in the underlay, halftone
                     if rcp_under is None: continue
@@ -804,11 +807,15 @@ class ViewDrawer:
             bx = [max(bx[0], cr[0] - mg), max(bx[1], cr[1] - mg), min(bx[2], cr[2] + mg), min(bx[3], cr[3] + mg)]
             if bx[0] >= bx[2] or bx[1] >= bx[3]: bx = [P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max()]
         db = DepthBuffer(bx[0], bx[1], bx[2], bx[3], px)
+        tdb_ = None; tdb_t = 100.0
         noocc_all_ = os.environ.get('RVT_NOOCC') == 'all'; noocc_ = {int(x) for x in os.environ.get('RVT_NOOCC', '').split(',') if x and x != 'all'}
         for c in clipped:
             if noocc_all_ or c[1] in noocc_: continue
             if os.environ.get('RVT_ONLYOCC') and str(c[1]) not in os.environ['RVT_ONLYOCC'].split(','): continue
-            if os.environ.get('RVT_TRANSP_OCC', '1') == '1' and (c[6] or {}).get('transparency'): self.stats['transparent_not_occluder'] += 1; continue      # a surface made transparent by an override does not hide what lies behind it (oracle filters scene A: floor outline under 50 % transparent walls)
+            if os.environ.get('RVT_TRANSP_OCC', '1') == '1' and (c[6] or {}).get('transparency'):
+                if v['kind'] == '3d' and os.environ.get('RVT_TRANSP_FAINT', '0') == '1' and c[1] in (-2000032, -2000035, -2000011, -2001300, -2001320, -2001330):
+                    tdb_ = tdb_ if tdb_ is not None else DepthBuffer(bx[0], bx[1], bx[2], bx[3], px); tdb_.add(c[2]); tdb_t = min(tdb_t, float(c[6]['transparency']))      # lines behind a transparent surface stay visible, faintly (Snowdon CoverSheet: floors at 15 %)
+                self.stats['transparent_not_occluder'] += 1; continue      # a surface made transparent by an override does not hide what lies behind it (oracle filters scene A: floor outline under 50 % transparent walls)
             if c[1] == -2003500 and v['kind'] == 'section': continue        # stacked-wall parents duplicate their child walls (and cover curtain-wall storefronts): not occluders (Commercial east/south elevation DXF R 0.66/0.69 -> 0.80/0.85)
             db.add(self._carve_tris(c[2], carve_boxes[c[0]]) if c[0] in carve_boxes else c[2])
         for T in ([] if os.environ.get('RVT_NOOCC2') else occluders):
@@ -973,6 +980,14 @@ class ViewDrawer:
             else: vis = [(a, b) for a, b in db.visible_parts(E, eps) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]      # end-on edges collapse to points
             if not vis: continue
             st = res.line(gs, cid, 'proj', eid, ov=ov)
+            if tdb_ is not None and not wire_ and cid not in UNOBSCURED_CATS:
+                front = [(a, b) for a, b in tdb_.visible_parts(np.asarray(vis, float), eps) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
+                if sum(np.hypot(*(b[:2] - a[:2])) for a, b in front) < 0.98 * sum(np.hypot(*(b[:2] - a[:2])) for a, b in vis):
+                    al_ = max(min(tdb_t / 100.0, 1.0), 0.05); rgb_ = [int(round(255 - (255 - x_) * al_)) for x_ in list(st.get('rgb') or [0, 0, 0])[:3]]
+                    prims.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis], 'style': dict(st, rgb=rgb_), 'elem': eid, 'layer': 'projection'})
+                    self.stats['transparent_faint'] += 1
+                    vis = front
+                    if not vis: continue
             prims.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis], 'style': st, 'elem': eid, 'layer': 'projection'})
         # surface patterns of the visible faces (brick, shingles, block...): face material -> Material.surface_pattern, hatched on the
         # projected front-facing triangles, kept where the depth test says the face is visible (sample points of the hatch lines)
@@ -980,7 +995,9 @@ class ViewDrawer:
             try:
                 for eid, cid, T2, uvw, fid, gs, ov in clipped:
                     if ov.get('_frs') is not None: self.surface_hatch(eid, cid, uvw, ov['_frs'], db, eps, scale, prims, ov)
-            except Exception: self.stats['surface_error'] += 1
+            except Exception:
+                self.stats['surface_error'] += 1
+                if os.environ.get('RVT_DBG_SURF'): import traceback; traceback.print_exc()
         if v['kind'] in ('section', '3d') and os.environ.get('RVT_SOLID_FILL', '1') == '1':
             try:                                                        # solid surface fills of view / filter overrides (Snowdon 'Structure Only': columns by level, framing by z offset): flat colour on the visible front faces, under the linework
                 groups = []
@@ -1716,6 +1733,8 @@ class ViewDrawer:
         import mapbox_earcut as earcut
         out = []; keep = np.ones(len(T), bool)
         for lo, hi in bxs:
+            if os.environ.get('RVT_CARVE_SEQ', '1') == '1' and out:       # the pieces left by the previous openings are cut by this one too (a wall face with several windows lost every opening but the first: Residential north windows' lower sashes hidden)
+                T = np.concatenate([T[keep]] + out); keep = np.ones(len(T), bool); out = []
             tmin = T[:, :, :2].min(1); tmax = T[:, :, :2].max(1); wm = T[:, :, 2].mean(1)
             cand = np.where(keep & (tmax[:, 0] > lo[0]) & (tmin[:, 0] < hi[0]) & (tmax[:, 1] > lo[1]) & (tmin[:, 1] < hi[1]) & (wm > lo[2] - 0.08) & (wm < hi[2] + 0.08))[0]
             rect = sbox(lo[0], lo[1], hi[0], hi[1])
@@ -2050,11 +2069,22 @@ class ViewDrawer:
             pid_ = ov.get('surf_fg_pattern') if ov.get('surf_fg_pattern') not in (None, -1) else sp.get('id')
             pat = self.doc['fill_patterns'].get(pid_) if pid_ is not None else None
             if not pat or pat.get('solid'): continue
-            polys = [patterns.region([uvw[i][:, :2].tolist() + [uvw[i][0, :2].tolist()]]) for i in idx]
             from shapely.ops import unary_union
-            reg = unary_union([p for p in polys if p is not None and p.area > 1e-6])
-            if reg.is_empty: continue
-            segs = patterns.hatch(reg, pat, scale)
+            segs = []
+            for jdx, M_ in self._face_planes(uvw, idx, n):
+                polys = [patterns.region([uvw[i][:, :2].tolist() + [uvw[i][0, :2].tolist()]]) for i in jdx]
+                reg = unary_union([p for p in polys if p is not None and p.area > 1e-6])
+                if reg.is_empty: continue
+                if M_ is None: segs += patterns.hatch(reg, pat, scale)
+                else:
+                    from shapely.affinity import affine_transform
+                    Mi = np.linalg.inv(M_); co_ = [Mi[0, 0], Mi[0, 1], Mi[1, 0], Mi[1, 1], 0.0, 0.0]; clip0_ = patterns.CLIP
+                    try:
+                        if clip0_ is not None: patterns.CLIP = affine_transform(clip0_, co_)         # the view clip lives in view coordinates, the hatch in face coordinates
+                        sg = patterns.hatch(affine_transform(reg, co_), pat, scale)
+                    finally: patterns.CLIP = clip0_
+                    if sg: segs += (np.asarray(sg, float) @ M_.T).tolist()
+            if not segs: continue
             if not segs or len(segs) > 80000: continue
             # depth of each hatch segment: nearest face plane under its midpoint is approximated by the buffer itself -> keep if the
             # buffer depth at the midpoint belongs to this element (|w - zb| small): sample w from the element's own triangles
@@ -2070,6 +2100,28 @@ class ViewDrawer:
             if os.environ.get('RVT_DBG_SURF'): print('SURF', eid, 'segs', len(segs), 'ok', int(ok.sum()), 'vis', len(vis), 'cut_w', cw_, 'w range', float(np.nanmin(w)), float(np.nanmax(w)))
             col = ov.get('surf_fg_color') if isinstance(ov.get('surf_fg_color'), list) else (sp.get('color') or [0, 0, 0])
             if vis: prims.append({'t': 'segs', 'segs': [[a[:2].tolist(), b[:2].tolist()] for a, b in vis], 'style': {'w': 0.1, 'rgb': col, 'dash': None}, 'elem': eid, 'layer': 'surface_fill'})
+
+    def _face_planes(self, uvw, idx, n):
+        """front faces of one material grouped by plane: [(triangle indices, M)] where M maps the face's own (horizontal, up-slope) axes to view (u, v): surface patterns are laid in the face plane
+        and projected, so a sloped roof's courses are foreshortened by sin(pitch) (Residential north elevation: Revit's shingle rows 0.229 ft vs 0.504 ft unprojected = sin 26.6 deg);
+        M None = face parallel to the view plane (or horizontal / edge-on: identity)"""
+        up = getattr(self, '_up_view', None)
+        if up is None or os.environ.get('RVT_SURF_SLOPE', '1') != '1': return [(idx, None)]
+        nn = n[idx] / np.maximum(np.linalg.norm(n[idx], axis=1), 1e-12)[:, None]
+        groups = collections.defaultdict(list)
+        for k_, (i, nu) in enumerate(zip(idx, nn)): groups[tuple(np.round(nu, 2))].append(k_)
+        if len(groups) > 12: return [(idx, None)]
+        out = []
+        for key, ks in groups.items():
+            jdx = [idx[k_] for k_ in ks]
+            nu = nn[ks].mean(0); nu /= max(np.linalg.norm(nu), 1e-12)
+            a1 = np.cross(up, nu); ln = np.linalg.norm(a1)
+            if ln < 0.2: out.append((jdx, None)); continue
+            a1 /= ln; a2 = np.cross(nu, a1)
+            M = np.array([[a1[0], a2[0]], [a1[1], a2[1]]])
+            if abs(np.linalg.det(M)) < 0.12 or np.allclose(M, np.eye(2), atol=1e-3): out.append((jdx, None)); continue
+            out.append((jdx, M))
+        return out
 
     @staticmethod
     def _depth_at(tris, pts):
