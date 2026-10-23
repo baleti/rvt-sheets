@@ -25,7 +25,7 @@ Evidence: tools/check_elements.py (element sets vs FilteredElementCollector), to
 | colour scheme legends | done | alphabetical entries, wrap, title; 'Calculating...' placeholder row not reproduced |
 | property lines, stairs path text | done | property lines inside the primary view range; UP/DN at start/end riser |
 | tags (independent, room, space, area) | partial | symbol graphics + labels + rotation (orientation 1/2); label-visibility rules (family label parameters), leaders missing; 'Structural Framing Tag' frame suppressed (Revit shows bare text) |
-| dimensions | partial | linear done (ticks, witness, text, units 2022+); angular/radial/arc missing; alternate units below the primary text drawn (annot.py m_alternateUnits == 2, rst basic 3000 / 9' - 10"); dimension hide rule unknown |
+| dimensions | partial | linear done (ticks, witness, text, units 2022+); angular done (annot.angular_dimension); RadialDim records exist (Commercial 17, MEP 105) but all have owner view -1 and Revit lists none of them in any view (Commercial 19: 0 of 17 in o['viewelems']): group-definition prototypes, nothing to draw (checked 2026-10-23, tools/radial_views.py); alternate units below the primary text drawn (annot.py m_alternateUnits == 2, rst basic 3000 / 9' - 10"); dimension hide rule unknown |
 | spot elevations / slopes | partial | values verified by reading Revit's sheet (5'-0", 7'-7"); Revit draws the text without target/leader here: placement rule unknown |
 | text notes, keynotes | partial | text notes done; keynote tags/legends partial |
 | section / callout / elevation markers | done (plans), partial (sections) | filters + discipline + range + scale + crop rules |

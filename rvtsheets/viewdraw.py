@@ -56,6 +56,7 @@ def _plane_section(T, n, d):
     return segs
 
 
+COLMESH_CATS = {-2000100}          # architectural columns
 OCCLUDER_CATS = {-2000011, -2000032, -2000035, -2000038}          # walls, floors, roofs, ceilings
 
 
@@ -645,8 +646,8 @@ class ViewDrawer:
                 if is_section and v['kind'] == 'section' and cut_w is not None and pts[:, 2].min() > cut_w + 1e-6 and not (cid == -2002000 and info['cls'] == 'CurveElem'): self.stats['curves_before_cut'] += 1; continue      # symbol lines wholly in front of the section plane (planting 18 ft before the building section)      # family symbol lines (planting) behind the far clip are not drawn
                 if cut_w is not None and not is_section and (pts[:, 2] > cut_w + 1e-6).all() and False: continue
                 lay = 'symbolic'
-                if v['kind'] == 'plan' and not anno and info['cls'] == 'FamilyInstance' and cid not in (-2001330, -2001320, -2001300) and cut_w is not None and (c.get('flags') or 0) & 0x80000 and not (c.get('flags') or 0) & 0x2a0 and (pts[:, 2] > cut_w + 1e-6).all():
-                    self.stats['family_lines_above_cut'] += 1; continue      # family curves flagged 0x80000 (not 0x20/0x80/0x200) lying above the cut plane (door head / overhead track lines) are not in Revit's plan (Residential 32/36/basement: P +1.4..6 pts, R -0.3..1)
+                if v['kind'] == 'plan' and not anno and info['cls'] == 'FamilyInstance' and cid not in (-2001330, -2001320, -2001300) and not (cid == -2001360 and os.environ.get('RVT_PLANT_ABOVE', '1') == '1') and cut_w is not None and (c.get('flags') or 0) & 0x80000 and not (c.get('flags') or 0) & 0x2a0 and (pts[:, 2] > cut_w + 1e-6).all():
+                    self.stats['family_lines_above_cut'] += 1; continue      # (planting is exempt: an RPC tree taller than the cut height still shows its plan ring, Residential attic 9948; RVT_PLANT_ABOVE=0 off) family curves flagged 0x80000 (not 0x20/0x80/0x200) lying above the cut plane (door head / overhead track lines) are not in Revit's plan (Residential 32/36/basement: P +1.4..6 pts, R -0.3..1)
                 if cid == -2000014 and v['kind'] == 'section' and info['cls'] == 'FamilyInstance' and (c.get('flags') or 0) == 0x1088004 and os.environ.get('RVT_WIN_SYM', '1') == '1':
                     self.stats['window_elev_symbol_skipped'] += 1; continue      # window family lines flagged 0x1088004 (opening bottom / sides + a vertical centre line) are not in Revit's elevations: the sash edges come from the solids (Residential north: the centre line crosses every double-hung window)
                 if is_rcp and not anno and cut_w is not None and (pts[:, 2] > cut_w + 1e-6).all():
@@ -728,6 +729,18 @@ class ViewDrawer:
                                     if os.environ.get('RVT_SOLID_DBG'): print('MESHFIX', eid, 'solid', a_.min(0).round(1).tolist(), a_.max(0).round(1).tolist(), 'header', np.asarray(hb_).round(1).tolist(), 'mesh', tr_.reshape(-1, 3).min(0).round(1).tolist(), tr_.reshape(-1, 3).max(0).round(1).tolist(), file=sys.stderr)
                                     tris, fid = tr_, np.arange(len(tr_)); meshfixed_.add(eid); self.stats['wall_meshfix'] += 1
                             except Exception: self.stats['wall_meshfix_error'] += 1
+                if info['cls'] == 'FamilyInstance' and cid in COLMESH_CATS and os.environ.get('RVT_COLMESH', '1') == '1':
+                    # architectural columns / posts whose saved solid is only a stub of the header box (Residential deck posts: 0.4 ft of 7.9 ft; height is family-parameter driven): the reader's element mesh has the real post
+                    hb_ = self.vis.info.bbox(eid)
+                    if hb_ is not None and eid not in meshfixed_:
+                        a_ = np.asarray(tris, float).reshape(-1, 3); hz_ = float(hb_[1][2] - hb_[0][2]); sz_ = float(a_[:, 2].max() - a_[:, 2].min())
+                        if hz_ > 1.0 and sz_ < hz_ / 4.0:
+                            try:
+                                import rvt_elemmesh as E_
+                                tr_ = np.asarray(E_.element_mesh(self.f.g, eid).get('tris') or [], float).reshape(-1, 3, 3); mb_ = tr_.reshape(-1, 3)
+                                if len(tr_) and (mb_.min(0) >= np.asarray(hb_[0], float) - 0.6).all() and (mb_.max(0) <= np.asarray(hb_[1], float) + 0.6).all() and float(mb_[:, 2].max() - mb_[:, 2].min()) > 2.0 * sz_:
+                                    tris, fid = tr_, np.arange(len(tr_)); meshfixed_.add(eid); self.stats['column_meshfix'] += 1
+                            except Exception: self.stats['column_meshfix_error'] += 1
                 uvw = (tris - O) @ Mv.T
                 if s.get('cutnode') and cut_w is not None and v['kind'] == 'plan' and os.environ.get('RVT_CUTNODE', '1') == '1':
                     z0_, z1_ = float(uvw[:, :, 2].min()), float(uvw[:, :, 2].max())
@@ -974,10 +987,12 @@ class ViewDrawer:
                     if len(Es): E = np.concatenate([E, Es]) if len(E) else Es
                 except Exception: self.stats['railing_sil_error'] += 1
             if cut_w is not None: E = E[~((np.abs(E[:, 0, 2] - cut_w) < 1e-6) & (np.abs(E[:, 1, 2] - cut_w) < 1e-6))]       # edges ON the cut plane belong to the cut outline
+            if os.environ.get('RVT_EDGE_DBG') in (str(eid), 'cat%d' % cid): print('EDGES', eid, cid, gs, len(T2), len(E), np.round(T2.reshape(-1, 3).min(0), 2).tolist(), np.round(T2.reshape(-1, 3).max(0), 2).tolist(), file=sys.stderr)       # debug: per-solid edge count before the hidden-line test
             if cid in UNOBSCURED_CATS or (cid == -2001300 and v['kind'] == 'plan' and (v.get('range') or {}).get('bottom') is not None and (self.vis.info.bbox(eid) is not None) and self.vis.info.bbox(eid)[1][2] >= v['range']['bottom'] - 1e-6 and self.vis.info.bbox(eid)[1][2] >= (v['range'].get('cut') or 0) - 12.0):                 # rebar: drawn through its host (Revit 'view unobscured' in the sample views); foundation slabs inside a plan's primary range show through the slab above them (Snowdon Parking pile caps / strip footings)
                 vis = [(a, b) for a, b in E if np.hypot(*(b[:2] - a[:2])) > px * 0.5]
             elif wire_: vis = [(a, b) for a, b in E if np.hypot(*(b[:2] - a[:2])) > px * 0.5]      # wireframe display: nothing hides an edge
             else: vis = [(a, b) for a, b in db.visible_parts(E, eps) if np.hypot(*(b[:2] - a[:2])) > px * 0.5]      # end-on edges collapse to points
+            if os.environ.get('RVT_EDGE_DBG') in (str(eid), 'cat%d' % cid): print('VIS', eid, len(vis), file=sys.stderr)
             if not vis: continue
             st = res.line(gs, cid, 'proj', eid, ov=ov)
             if tdb_ is not None and not wire_ and cid not in UNOBSCURED_CATS:
@@ -1177,7 +1192,7 @@ class ViewDrawer:
         out = []; clipped = []
         for eid, cid, uvw, fid, gs, ov in under:
             T = _clip_tris_halfspace(uvw, np.array([0, 0, 1.0]), uw[1])
-            T = _clip_tris_halfspace(T, np.array([0, 0, -1.0]), -uw[0]) if len(T) else T
+            T = _clip_tris_halfspace(T, np.array([0, 0, -1.0]), -(uw[0] - float(os.environ.get('RVT_UNDER_TOL', '0.01')))) if len(T) else T      # top faces lying exactly on the underlay's lower plane (floors at the underlay level, Residential attic) stay
             if len(T): clipped.append((eid, cid, T, gs, ov))
         if not clipped: return out
         P = np.concatenate([c[2].reshape(-1, 3) for c in clipped])

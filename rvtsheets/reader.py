@@ -113,7 +113,9 @@ class File:
         if self._g is None:
             try:
                 import os, rvt_fast
-                os.environ.setdefault('RVT_FAST_REC_MEMO', '1')       # decoded symbol records kept per Doc (read-only contract; Structural render 98.6 -> 78.8 s)
+                # decoded symbol records + tessellations kept per Doc (read-only contract; Structural render 98.6 -> 78.8 s). Files above RVT_MEMO_MAX_MB (default 70, the demo corpus tops out at 60)
+                big = os.path.getsize(self.fn) > float(os.environ.get('RVT_MEMO_MAX_MB', '70')) * 1e6
+                os.environ.setdefault('RVT_FAST_REC_MEMO', '' if big else '1')
                 self._g = rvt_fast.Doc(self.fn)             # subclass of the reference Doc, records from Rust buffers
             except Exception:
                 import rvt_elemmesh
