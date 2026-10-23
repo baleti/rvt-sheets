@@ -94,7 +94,7 @@ def our_segments(fn, vid):
                     if gg.geom_type == 'LineString' and not gg.is_empty: out.append((L2, np.asarray(gg.coords)))
             polys = out
             continue
-        if L in HATCH_LAYERS and os.environ.get('CMP_HATCH') != '1': continue                 # Revit's DXF holds fill patterns as HATCH entities (not compared): leave our hatch lines out too
+        if L in HATCH_LAYERS and not os.environ.get('CMP_HATCH'): continue                 # Revit's DXF holds fill patterns as HATCH entities (not compared): leave our hatch lines out too
         if p['t'] == 'line': polys.append((L, np.asarray(p['pts'], float)[:, :2]))
         elif p['t'] in ('segs',): polys += [(L, np.asarray(s, float)[:, :2]) for s in p['segs']]
         elif p['t'] == 'cut': polys += [(L, np.asarray(s, float)[:, :2]) for s in p['segs']]

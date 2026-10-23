@@ -57,6 +57,7 @@ def _plane_section(T, n, d):
 
 
 COLMESH_CATS = {-2000100}          # architectural columns
+OCC_NOPLANE = os.environ.get('RVT_OCC_NOPLANE', '1') == '1'
 OCCLUDER_CATS = {-2000011, -2000032, -2000035, -2000038}          # walls, floors, roofs, ceilings
 
 
@@ -664,6 +665,8 @@ class ViewDrawer:
                 if is_section and v['kind'] == 'section' and cut_w is not None and pts[:, 2].min() > cut_w + 1e-6 and not (cid == -2002000 and info['cls'] == 'CurveElem'): self.stats['curves_before_cut'] += 1; continue      # symbol lines wholly in front of the section plane (planting 18 ft before the building section)      # family symbol lines (planting) behind the far clip are not drawn
                 if cut_w is not None and not is_section and (pts[:, 2] > cut_w + 1e-6).all() and False: continue
                 lay = 'symbolic'
+                if os.environ.get('RVT_NOFLAG200', '1') == '1' and cid not in (-2001330, -2001320, -2001300) and v['kind'] == 'section' and not anno and info['cls'] == 'FamilyInstance' and (c.get('flags') or 0) == 0x1088004 and len(pts) == 2:
+                    self.stats['family_frame_lines'] += 1; continue      # experiment: straight family lines flagged 0x1088004 (no 0x200) in elevations (Commercial Restroom Elevation A: the toilet's 8 frame lines Revit does not draw)
                 if v['kind'] == 'plan' and not anno and info['cls'] == 'FamilyInstance' and cid not in (-2001330, -2001320, -2001300) and not (cid == -2001360 and os.environ.get('RVT_PLANT_ABOVE', '1') == '1') and cut_w is not None and (c.get('flags') or 0) & 0x80000 and not (c.get('flags') or 0) & 0x2a0 and (pts[:, 2] > cut_w + 1e-6).all():
                     self.stats['family_lines_above_cut'] += 1; continue      # (planting is exempt: an RPC tree taller than the cut height still shows its plan ring, Residential attic 9948; RVT_PLANT_ABOVE=0 off) family curves flagged 0x80000 (not 0x20/0x80/0x200) lying above the cut plane (door head / overhead track lines) are not in Revit's plan (Residential 32/36/basement: P +1.4..6 pts, R -0.3..1)
                 if cid == -2000014 and v['kind'] == 'section' and info['cls'] == 'FamilyInstance' and (c.get('flags') or 0) == 0x1088004 and os.environ.get('RVT_WIN_SYM', '1') == '1':
@@ -726,6 +729,9 @@ class ViewDrawer:
                     self.stats['hidden_internal_solids'] += 1
                     if cid in OCCLUDER_CATS:
                         T = self._tess(s)
+                        if T is not None and len(T[0]) <= 2 and cid == -2000011 and OCC_NOPLANE and scale >= 48:
+                            # a two-triangle sheet is a wall layer interface plane over the whole wall extent, without the openings of the wall body (Commercial East 29154: it hid the recessed storefront behind the canopy wall)
+                            self.stats['planar_occluder_skipped'] += 1; continue
                         if T is not None and len(T[0]): occluders.append((T[0] - O) @ Mv.T); occ_owner.append(eid)
                     continue
                 T = self._tess(s)
@@ -779,6 +785,22 @@ class ViewDrawer:
                         fid_ = np.asarray(m_.get('fid') if m_.get('fid') is not None and len(m_.get('fid')) == len(tr_) else np.arange(len(tr_)))
                         solids.append((eid, cid, (tr_ - O) @ Mv.T, fid_, gs_, ov)); self.stats['railing_mesh'] += 1
                 except Exception: self.stats['railing_mesh_error'] += 1
+            if info['cls'] == 'FamilyInstance' and v['kind'] == 'section' and scale >= 24 and os.environ.get('RVT_FAM_MESHFIX', '1') == '1':
+                # elevations / sections: a family whose saved solids reach less than 60 % of the element's height (Residential 'wood post' columns: cut-condition geometry variants leave a 0.4 ft top block of an 8 ft post) takes the reader's element mesh
+                try:
+                    own_ = [x for x in solids if x[0] == eid]
+                    hb_ = self.vis.info.bbox(eid)
+                    if own_ and hb_ is not None:
+                        a_ = np.concatenate([x[2].reshape(-1, 3) for x in own_]); h_ = float(np.asarray(hb_[1], float)[2] - np.asarray(hb_[0], float)[2])
+                        import rvt_elemmesh as E_
+                        m_ = E_.element_mesh(self.f.g, eid); tr_ = np.asarray(m_.get('tris') or [], float).reshape(-1, 3, 3)
+                        hw_ = float(a_[:, 1].max() - a_[:, 1].min()) if len(a_) else 0.0   # view coordinates: u right, v up, w depth
+                        if len(tr_) and h_ > 1.0 and hw_ < 0.6 * h_:
+                            mb_ = tr_.reshape(-1, 3)
+                            if (mb_.min(0) >= np.asarray(hb_[0], float) - 0.6).all() and (mb_.max(0) <= np.asarray(hb_[1], float) + 0.6).all():
+                                solids = [x for x in solids if x[0] != eid]
+                                solids.append((eid, cid, (tr_ - O) @ Mv.T, np.arange(len(tr_)), own_[0][4], own_[0][5])); self.stats['family_meshfix'] += 1
+                except Exception: self.stats['family_meshfix_error'] += 1
         if datum_ids:
             from .datums import Datums
             from .sheet import SheetComposer
