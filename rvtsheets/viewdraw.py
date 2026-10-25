@@ -874,10 +874,14 @@ class ViewDrawer:
             if noocc_all_ or c[1] in noocc_: continue
             if os.environ.get('RVT_ONLYOCC') and str(c[1]) not in os.environ['RVT_ONLYOCC'].split(','): continue
             if os.environ.get('RVT_TRANSP_OCC', '1') == '1' and (c[6] or {}).get('transparency'):
-                if v['kind'] == '3d' and os.environ.get('RVT_TRANSP_FAINT', '0') == '1' and c[1] in (-2000032, -2000035, -2000011, -2001300, -2001320, -2001330):
-                    tdb_ = tdb_ if tdb_ is not None else DepthBuffer(bx[0], bx[1], bx[2], bx[3], px); tdb_.add(c[2]); tdb_t = min(tdb_t, float(c[6]['transparency']))      # lines behind a transparent surface stay visible, faintly (Snowdon CoverSheet: floors at 15 %)
-                self.stats['transparent_not_occluder'] += 1; continue      # a surface made transparent by an override does not hide what lies behind it (oracle filters scene A: floor outline under 50 % transparent walls)
+                hlr_ = ((v.get('display') or {}).get('m_model') or {}).get('m_surfaces') == 2      # hidden-line display
+                if v['kind'] == '3d' and c[1] in (-2000032, -2000035, -2000011, -2001300, -2001320, -2001330) and os.environ.get('RVT_TRANSP_FAINT', '1' if hlr_ else '0') == '1':
+                    tdb_ = tdb_ if tdb_ is not None else DepthBuffer(bx[0], bx[1], bx[2], bx[3], px); tdb_.add(c[2]); tdb_t = min(tdb_t, float(c[6]['transparency']))      # lines behind a transparent surface stay visible, faintly (Snowdon CoverSheet 3D vs Revit's PNG: floors at 15 % show the joists as light grey zigzag; hidden-line 3D views default on)
+                    self.stats['transparent_not_occluder'] += 1; continue
+                if not (hlr_ and v['kind'] == '3d' and os.environ.get('RVT_TRANSP_HLR', '1') == '1'):      # 3D only: in plans the rule cost Snowdon L2-L5 / R2 P .001-.002, L5 R .007
+                    self.stats['transparent_not_occluder'] += 1; continue      # a surface made transparent by an override does not hide what lies behind it (oracle filters scene A: floor outline under 50 % transparent walls); in hidden-line 3D views it still hides (Snowdon CoverSheet vs Revit PNG)
             if c[1] == -2003500 and v['kind'] == 'section': continue        # stacked-wall parents duplicate their child walls (and cover curtain-wall storefronts): not occluders (Commercial east/south elevation DXF R 0.66/0.69 -> 0.80/0.85)
+            self.stats['occluder_cat %s' % c[1]] += 1
             db.add(self._carve_tris(c[2], carve_boxes[c[0]]) if c[0] in carve_boxes else c[2])
         for T in ([] if os.environ.get('RVT_NOOCC2') else occluders):
             if cut_w is not None: T = _clip_tris_halfspace(T, np.array([0, 0, 1.0]), cut_w)
@@ -1931,8 +1935,11 @@ class ViewDrawer:
         curves = []
         if r['class'] == 'LineLoad':
             h = self.f.eid(fl['m_oPick']['obj']['m_elemPicks'][0]['m_elemId'])
-            a = self.f.rec(h)['fields']; own = self.f.rec(self.f.eid(a['m_ownerElementId']))
-            curves = [ob_(ob_(own['fields']['m_pCurveDriver'])['m_pCrv'])]
+            a = self.f.rec(h)['fields']
+            if 'm_oCurve' in a: curves = [ob_(a['m_oCurve'])]          # 2023+: the pick names the AnalyticalMember, its curve is m_oCurve
+            else:
+                own = self.f.rec(self.f.eid(a['m_ownerElementId']))
+                curves = [ob_(ob_(own['fields']['m_pCurveDriver'])['m_pCrv'])]
         else:
             if (v.get('range') or {}).get('top') is not None and fl['m_planeOrigin'][2] > v['range']['top'] + 1e-3: return []      # the load plane above the view range top (rst basic Level Lower: Revit draws 2 of the 3 area loads)
             sk = self.f.rec(self.f.eid(fl['m_sketchId']))
