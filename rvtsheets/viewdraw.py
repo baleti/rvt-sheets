@@ -3,7 +3,7 @@
 Pipeline per element: visibility -> saved graphics walked for this view (scene.Walker) -> solids tessellated (reader rvt_mesh) ->
 clipped to the view depth range -> cut regions at the cut plane + projected feature edges with hidden-line removal (hlr.DepthBuffer)
 -> symbolic 2D curves projected -> styles resolved (style.Resolver)."""
-import math, collections, time, os, sys
+import re, math, collections, time, os, sys
 import numpy as np
 from .reader import INVALID, ob, ob as ob_, path, wref
 IN = 1 / 12.0
@@ -427,6 +427,8 @@ class ViewDrawer:
             if info['cls'] in skip_classes or info['cat'] in skip_cats: continue
             if info['cls'] == 'VolumeOfInterest' and os.environ.get('RVT_SCOPEBOX', '1') == '1': self.stats['scope_box_skipped'] += 1; continue      # scope boxes: not in Revit's element lists (Snowdon East / Parking: FP) nor in its DXF
             if info['cls'] in ('Rebar', 'RebarInSystem', 'AreaReinforcement', 'PathReinforcement') and v['kind'] == 'section' and v.get('view_type') == -1 and os.environ.get('RVT_ELEV_REBAR', '0') != '1': self.stats['rebar_in_elevation_skipped'] += 1; continue      # elevations (view type -1): Revit's DXFs of the Snowdon East / West / North / South carry no rebar, sections and plans do
+            if info['cls'] in ('Rebar', 'RebarInSystem') and v['kind'] == 'plan' and not is_rcp and v.get('range') and os.environ.get('RVT_REBAR_CUT', '1') == '1' and not self._rebar_plan_visible(eid, v):
+                self.stats['rebar_below_cut_skipped'] += 1; continue      # hidden-line plans (m_surfaces != 1) draw a bar set only where it reaches the cut plane or its cells list the view ('View Visibility States'); sets wholly below the cut have no ink (rst basic Foundation 511142 / Level 2 / Ref Beam system, Snowdon L4 / L5 / L1_43_High)
             if info['cls'] == 'JoistSystem': self.stats['joist_system_skipped'] += 1; continue          # the system's boundary / layout sketch (cyan dashes) is not drawn by Revit (rst basic Level 1, Snowdon L2)
             if ev.get('filters') and info['cls'] in ANNO_FILTER_CLASSES and info['cat'] != INVALID:
                 # view filters hide annotation elements too (Snowdon L2: 'Views - Sheets' = NOT Family and Type contains '_Working' hides every section marker)
@@ -614,12 +616,14 @@ class ViewDrawer:
                                 if q.get(kk_): q[kk_] = [a_ * k_ for a_ in q[kk_]]
                 prims.append(q)
             under_occ = None
+            wiregate_ = os.environ.get('RVT_OCC_WIREGATE', '1') == '1'
+            wire_ = wiregate_ and ((v.get('display') or {}).get('m_model') or {}).get('m_surfaces') == 1      # wireframe plans show every line (no occlusion by floors); hidden-line plans hide framing under floors (Snowdon L5 vs L2 / L3: m_surfaces 2 vs 1, hiding the floors in Revit brings L5's joists back)
             if v['kind'] == 'plan' and v.get('range') and info['owner'] == INVALID and not is_rcp:
                 rg = v['range']; zlo_ = min(x for x in (rg.get('depth'), rg.get('bottom')) if x is not None); bb_ = self.vis.info.bbox(eid)
                 if bb_ is not None and rg.get('top') is not None and bb_[1][2] < zlo_ - 1e-6 and not anno:
                     under_occ = self._underlay_occluder(v, O, Mv, elems, bb_[1][2])
                 elif (bb_ is not None and rg.get('top') is not None and not anno and cid == -2001320 and v.get('discipline') != 2 and rg.get('cut') is not None
-                      and bb_[1][2] < rg['cut'] - 0.01 and os.environ.get('RVT_FRAME_OCC', '1') == '1' and not (os.environ.get('RVT_OCC_BOTTOM', '1') == '1' and rg.get('bottom') is not None and bb_[0][2] <= rg['bottom'] + float(os.environ.get('RVT_OCC_BOT_TOL', '0.2')))):      # beams at / crossing the view range's bottom plane stay visible (Snowdon L2 / L3: recall .35 / .25 -> .86 / .75)
+                      and bb_[1][2] < rg['cut'] - 0.01 and os.environ.get('RVT_FRAME_OCC', '1') == '1' and not wire_ and not (not wiregate_ and os.environ.get('RVT_OCC_BOTTOM', '1') == '1' and rg.get('bottom') is not None and bb_[0][2] <= rg['bottom'] + float(os.environ.get('RVT_OCC_BOT_TOL', '0.2')))):      # beams at / crossing the view range's bottom plane stay visible (Snowdon L2 / L3: recall .35 / .25 -> .86 / .75)
                     under_occ = self._underlay_occluder(v, O, Mv, elems, bb_[1][2])      # framing under a floor in a non-structural plan: the floor hides its symbolic lines (Snowdon L4 / L5: Revit's DXF has none)
             curves_ = pieces['curves']
             if info['cls'] in ('Rebar', 'RebarInSystem'):
@@ -1809,6 +1813,25 @@ class ViewDrawer:
                     tt = np.zeros((len(idx), 3, 3)); tt[:, :, :2] = verts[idx]; tt[:, :, 2] = float(t[:, 2].mean())
                     out.append(tt)
         return np.concatenate([T[keep]] + out) if out else T[keep]
+
+    def _rebar_plan_visible(self, eid, v):
+        rg = v['range']; bb = self.vis.info.bbox(eid)
+        if bb is None or rg.get('cut') is None: return True
+        if bb[1][2] >= rg['cut'] - 1e-6: return True
+        if ((v.get('display') or {}).get('m_model') or {}).get('m_surfaces') == 1: return True      # wireframe plans show every bar (rst basic Level Lower), hidden-line plans hide the sets under the cut behind the concrete
+        c = self.__dict__.setdefault('_rebar_views', {})
+        if eid not in c:
+            ids = set()
+            try:
+                cl = (self.f.rec(eid) or {'fields': {}})['fields'].get('m_cellList')
+                cl = cl.get('obj') if isinstance(cl, dict) and 'obj' in cl else cl
+                for cell in (cl or {}).get('m_cells') or []:
+                    cell = cell.get('obj') if isinstance(cell, dict) and 'obj' in cell else cell
+                    for k in ('m_detailViewIds', 'm_showSolidViewIds'):
+                        ids.update(int(x) for x in re.findall(r'EID\((\d+)\)', str((cell or {}).get(k) or [])))
+            except Exception: ids = None
+            c[eid] = ids
+        return c[eid] is None or int(v['id']) in c[eid]
 
     def rebar_bars(self, eid, curves):
         """every bar of a Rebar set / area-path reinforcement bar set as its centre-line polylines (reader: rvt_rebar.rebar_centerlines; the saved graphics of

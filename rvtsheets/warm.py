@@ -127,32 +127,35 @@ def prune_old(cache, keep=2):
     for _, p in sorted(old, reverse=True)[keep:]: shutil.rmtree(p, ignore_errors=True)
 
 
-# ---- host1
-def warm_host1(files, a):
+# ---- host1 / host2
+H2PY = '/home/user/h2/sp:/home/user/h2/sp2:/home/user/h2/sp3'     # host2 site dirs (numpy, shapely, ezdxf, numba wheels)
+def warm_host1(files, a, host='host1'):
     """run warm on host1 (h1run), wait, pull the cache directories back, merge READY.json"""
     from rvtsheets.cache import Cache, ROOT, mark_ready
     for f in files:                                   # host1 has the corpus; copy other files to the same path
-        if subprocess.run(['ssh', 'host1', 'test -f %s' % shq(f)]).returncode:
-            subprocess.run(['ssh', 'host1', 'mkdir -p %s' % shq(os.path.dirname(f))], check=True)
-            subprocess.run(['rsync', '-a', f, 'host1:' + f], check=True)
+        if subprocess.run(['ssh', host, 'test -f %s' % shq(f)]).returncode:
+            subprocess.run(['ssh', host, 'mkdir -p %s' % shq(os.path.dirname(f))], check=True)
+            subprocess.run(['rsync', '-a', f, host + ':' + f], check=True)
     name = 'warm-%d' % os.getpid()
-    cmd = [H1RUN, 'run', name, '--dir', REPO, '--', 'python', '-m', 'rvtsheets.warm', '--mem', a.mem, '--port', str(a.port)] \
+    runner = H1RUN if host == 'host1' else H1RUN.replace('h1run', 'h2run')
+    pre = ['env', 'PYTHONPATH=' + H2PY] if host == 'host2' else []
+    cmd = [runner, 'run', name, '--dir', REPO, '--'] + pre + ['python', '-m', 'rvtsheets.warm', '--mem', a.mem, '--port', str(a.port)] \
         + (['--workers', str(a.workers)] if a.workers else []) + (['--refresh'] if a.refresh else []) + files
     r = subprocess.run(cmd)
     if r.returncode: sys.exit('h1run could not start the job (exit %d)' % r.returncode)
     seen = 0
     while True:
         time.sleep(5)
-        log = subprocess.run(['ssh', 'host1', 'cat ~/offload/%s.log' % name], capture_output=True, text=True).stdout.splitlines()
+        log = subprocess.run(['ssh', host, 'cat ~/offload/%s.log' % name], capture_output=True, text=True).stdout.splitlines()
         for l in log[seen:]: print('host1: ' + l, flush=True)
         seen = len(log)
-        st = subprocess.run(['ssh', 'host1', 'systemctl --user is-active h1-%s' % name], capture_output=True, text=True).stdout.strip()
+        st = subprocess.run(['ssh', host, 'systemctl --user is-active %s-%s' % (host.replace('host', 'h'), name)], capture_output=True, text=True).stdout.strip()
         if st not in ('active', 'activating'): break
     ok = True
     for f in files:
         c = Cache(f)
         rel = os.path.relpath(c.dir, os.path.expanduser('~'))
-        if subprocess.run([H1RUN, 'pull', rel]).returncode: print('could not pull %s' % rel); ok = False; continue
+        if subprocess.run([runner, 'pull', rel]).returncode: print('could not pull %s' % rel); ok = False; continue
         try: s = c.doc(); fl = json.loads(c.read('failed.json'))
         except Exception: print('%s: not warmed on host1 (see the log above)' % f); ok = False; continue
         mark_ready(c, s, 0, a.port, failed=len(fl)); prune_old(c)
@@ -173,14 +176,14 @@ def in_scope():
 def main():
     ap = argparse.ArgumentParser(prog='rvt-sheets warm', description=__doc__.split('\n')[0])
     ap.add_argument('files', nargs='+'); ap.add_argument('--workers', type=int); ap.add_argument('--mem', default='3G')
-    ap.add_argument('--host1', action='store_true'); ap.add_argument('--port', type=int, default=8810)
+    ap.add_argument('--host1', action='store_true'); ap.add_argument('--host2', action='store_true'); ap.add_argument('--port', type=int, default=8810)
     ap.add_argument('--refresh', action='store_true'); a = ap.parse_args()
     files = [os.path.abspath(f) for f in a.files]
     for f in files:
         if not os.path.exists(f): sys.exit('no such file: %s' % f)
     sys.path.insert(0, REPO)
-    if a.host1:
-        ok = warm_host1(files, a)
+    if a.host1 or a.host2:
+        ok = warm_host1(files, a, 'host2' if a.host2 else 'host1')
         print_summary(files)
         sys.exit(0 if ok else 1)
     mem = parse_mem(a.mem)
