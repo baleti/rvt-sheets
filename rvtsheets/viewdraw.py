@@ -625,6 +625,10 @@ class ViewDrawer:
                 elif (bb_ is not None and rg.get('top') is not None and not anno and cid == -2001320 and v.get('discipline') != 2 and rg.get('cut') is not None
                       and bb_[1][2] < rg['cut'] - 0.01 and os.environ.get('RVT_FRAME_OCC', '1') == '1' and not wire_ and not (not wiregate_ and os.environ.get('RVT_OCC_BOTTOM', '1') == '1' and rg.get('bottom') is not None and bb_[0][2] <= rg['bottom'] + float(os.environ.get('RVT_OCC_BOT_TOL', '0.2')))):      # beams at / crossing the view range's bottom plane stay visible (Snowdon L2 / L3: recall .35 / .25 -> .86 / .75)
                     under_occ = self._underlay_occluder(v, O, Mv, elems, bb_[1][2])      # framing under a floor in a non-structural plan: the floor hides its symbolic lines (Snowdon L4 / L5: Revit's DXF has none)
+            if (cid == -2001320 and v['kind'] == 'plan' and v.get('range') and not is_rcp and not anno and not wire_ and os.environ.get('RVT_FRAME_BELOWBOT', '1') == '1'
+                    and (v['range'].get('bottom') is not None and abs(v['range']['bottom']) < 1e8) and self.vis.info.bbox(eid) is not None
+                    and self.vis.info.bbox(eid)[1][2] < v['range']['bottom'] - 1e-6 and v['range'].get('top') is not None):
+                self.stats['frame_below_bottom_skipped'] += 1; continue      # hidden-line plans: framing wholly below the view range's bottom plane is not drawn (rst basic Roof Level: 40 rafters / purlins at z 20-25 ft under bottom 25.6, 0-4% of their ink in Revit's DXF)
             curves_ = pieces['curves']
             if info['cls'] in ('Rebar', 'RebarInSystem'):
                 try: curves_ = self.rebar_bars(eid, curves_) or curves_
