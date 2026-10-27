@@ -7,7 +7,7 @@ gives a new directory (old ones can be deleted freely; warm prunes them). The re
 tables) is recorded in meta.json but is NOT part of the key: the reader is edited many times a day by another session and a demo cache must
 survive that; `rvt-sheets warm --refresh` redraws with the current reader.
 ~/.cache/rvt-sheets/READY.json lists prepared files (warm)."""
-import os, json, glob, hashlib, time, subprocess, shutil
+import os, sys, json, glob, hashlib, time, subprocess, shutil
 
 ROOT = os.environ.get('RVT_SHEETS_CACHE', os.path.expanduser('~/.cache/rvt-sheets'))
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,7 +40,7 @@ def file_hash(path):
     """content sha1, memoised per (path, size, mtime) in ROOT/filehash.json"""
     os.makedirs(ROOT, exist_ok=True)
     idx_fn = os.path.join(ROOT, 'filehash.json')
-    try: idx = json.load(open(idx_fn))
+    try: idx = json.load(open(idx_fn, encoding='utf-8'))
     except Exception: idx = {}
     st = os.stat(path); k = '%s|%d|%d' % (os.path.abspath(path), st.st_size, int(st.st_mtime))
     if k in idx: return idx[k]
@@ -48,8 +48,18 @@ def file_hash(path):
     with open(path, 'rb') as fh:
         for b in iter(lambda: fh.read(1 << 22), b''): h.update(b)
     idx[k] = h.hexdigest()
-    tmp = idx_fn + '.%d' % os.getpid(); json.dump(idx, open(tmp, 'w')); os.replace(tmp, idx_fn)
+    tmp = idx_fn + '.%d' % os.getpid(); json.dump(idx, open(tmp, 'w', encoding='utf-8')); replace_retry(tmp, idx_fn)
     return idx[k]
+
+
+def replace_retry(src, dst, tries=12):
+    """os.replace; on Windows retry with backoff while antivirus/indexer/another process holds dst (PermissionError)"""
+    d = 0.02
+    for i in range(tries):
+        try: return os.replace(src, dst)
+        except PermissionError:
+            if i == tries - 1 or sys.platform != 'win32': raise
+            time.sleep(d); d = min(d * 2, 0.5)
 
 
 class Cache:
@@ -64,12 +74,13 @@ class Cache:
 
     def fn(self, name): return os.path.join(self.dir, name)
     def has(self, name): return os.path.exists(self.fn(name))
-    def read(self, name, mode='r'): return open(self.fn(name), mode).read()
+    def read(self, name, mode='r'):
+        with open(self.fn(name), mode, **({} if 'b' in mode else {'encoding': 'utf-8', 'newline': ''})) as fh: return fh.read()
 
     def write(self, name, data):
         tmp = self.fn(name) + '.%d.tmp' % os.getpid()
-        with open(tmp, 'wb' if isinstance(data, bytes) else 'w') as fh: fh.write(data)
-        os.replace(tmp, self.fn(name))
+        with open(tmp, 'wb') if isinstance(data, bytes) else open(tmp, 'w', encoding='utf-8', newline='') as fh: fh.write(data)
+        replace_retry(tmp, self.fn(name))
 
     def doc(self):
         try: return json.loads(self.read('doc.json'))
@@ -82,7 +93,7 @@ class Cache:
         if not os.path.exists(src) or not shutil.which('rsvg-convert'): return None
         try:
             subprocess.run(['rsvg-convert', '-w', str(width), '-b', 'white', src, '-o', self.fn(dst) + '.tmp'], check=True, timeout=120, capture_output=True)
-            os.replace(self.fn(dst) + '.tmp', self.fn(dst)); return self.fn(dst)
+            replace_retry(self.fn(dst) + '.tmp', self.fn(dst)); return self.fn(dst)
         except Exception: return None
 
 
@@ -91,12 +102,12 @@ def best_complete(path, file_sha=None):
     (complete.json) or, for caches warmed before that marker existed, READY.json lists the key with no failed drawing. Lets the server open
     at once after a code or reader change instead of rendering on the demo machine (c2-viewer request, HOOKS.md 2026-10-15)."""
     path = os.path.abspath(path); sha = file_sha or file_hash(path)
-    try: ready = json.load(open(os.path.join(ROOT, 'READY.json'))).get(path) or {}
+    try: ready = json.load(open(os.path.join(ROOT, 'READY.json'), encoding='utf-8')).get(path) or {}
     except Exception: ready = {}
     best = None
     for d in os.listdir(ROOT) if os.path.isdir(ROOT) else []:
         p = os.path.join(ROOT, d)
-        try: meta = json.load(open(os.path.join(p, 'meta.json')))
+        try: meta = json.load(open(os.path.join(p, 'meta.json'), encoding='utf-8'))
         except Exception: continue
         if meta.get('path') != path or (meta.get('parts') or {}).get('file') != sha or not os.path.exists(os.path.join(p, 'doc.json')): continue
         c = os.path.join(p, 'complete.json')
@@ -110,10 +121,10 @@ def best_complete(path, file_sha=None):
 def mark_ready(cache, summary, seconds, port=8810, failed=0):
     cache.write('complete.json', json.dumps({'failed': failed, 'prepared': time.strftime('%Y-%m-%d %H:%M:%S'), 'parts': cache.parts}))
     fn = os.path.join(ROOT, 'READY.json')
-    try: ready = json.load(open(fn))
+    try: ready = json.load(open(fn, encoding='utf-8'))
     except Exception: ready = {}
     ready[cache.path] = {'key': cache.key, 'parts': cache.parts, 'sheets': len(summary['sheets']), 'views': len(summary['views']),
                          'failed': failed, 'warm_seconds': round(seconds, 1), 'prepared': time.strftime('%Y-%m-%d %H:%M:%S'),
                          'demo': '%s %s --sheets' % (os.path.expanduser('~/src/rvt-viewer/bin/rvt-view'), cache.path),
                          'standalone': '%s serve %s --port %d' % (os.path.join(os.path.dirname(HERE), 'rvt-sheets'), cache.path, port)}
-    tmp = fn + '.%d' % os.getpid(); json.dump(ready, open(tmp, 'w'), indent=1); os.replace(tmp, fn)
+    tmp = fn + '.%d' % os.getpid(); json.dump(ready, open(tmp, 'w', encoding='utf-8'), indent=1); replace_retry(tmp, fn)

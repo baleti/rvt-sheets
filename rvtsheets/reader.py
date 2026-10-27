@@ -143,4 +143,4 @@ class File:
 @functools.lru_cache(None)
 def names(kind):
     """category_names / param_names (derived from Revit VM dumps by the reader session): str(id) -> name"""
-    return json.load(open(os.path.join(READER_DIR, kind + '_names.json')))
+    return json.load(open(os.path.join(READER_DIR, kind + '_names.json'), encoding='utf-8'))

@@ -121,7 +121,7 @@ def prune_old(cache, keep=2):
     for d in os.listdir(ROOT):
         p = os.path.join(ROOT, d)
         if d == cache.key or not os.path.isdir(p): continue
-        try: meta = json.load(open(os.path.join(p, 'meta.json')))
+        try: meta = json.load(open(os.path.join(p, 'meta.json'), encoding='utf-8'))
         except Exception: continue
         if meta.get('path') == cache.path: old.append((os.path.getmtime(p), p))
     for _, p in sorted(old, reverse=True)[keep:]: shutil.rmtree(p, ignore_errors=True)
@@ -213,7 +213,7 @@ def main():
 
 def print_summary(files):
     from rvtsheets.cache import ROOT
-    try: ready = json.load(open(os.path.join(ROOT, 'READY.json')))
+    try: ready = json.load(open(os.path.join(ROOT, 'READY.json'), encoding='utf-8'))
     except Exception: return
     print('READY (%s):' % os.path.join(ROOT, 'READY.json'))
     for f in files:

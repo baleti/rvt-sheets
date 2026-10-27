@@ -164,12 +164,19 @@ def _font(name, bold):
         try:
             import subprocess
             from PIL import ImageFont
-            out = subprocess.run(['fc-match', '-f', '%{file}|%{family}', '%s:%s' % (name, 'bold' if bold else 'regular')], capture_output=True, text=True, timeout=5).stdout
-            path, fam = out.split('|', 1)
+            import shutil
+            if shutil.which('fc-match'):
+                out = subprocess.run(['fc-match', '-f', '%{file}|%{family}', '%s:%s' % (name, 'bold' if bold else 'regular')], capture_output=True, text=True, timeout=5).stdout
+                path, fam = out.split('|', 1)
+            else:      # Windows / macOS: no fontconfig, look in the system font folders (rvtplat.fonts)
+                try: from rvtplat import fonts as _pf
+                except ImportError:
+                    sys.path.insert(0, os.path.join(os.path.expanduser('~'), 'src', 'rvtplat')); from rvtplat import fonts as _pf
+                path, fam = _pf.find(name, bold)
             f = ImageFont.truetype(path, 200)
             sub = _SUBST.get(name.lower())
             if sub and name.lower() not in fam.lower() and os.environ.get('RVT_FONT_SUBST', '1') == '1':      # fontconfig fell back to something else: use the measured substitute
-                p2 = subprocess.run(['fc-match', '-f', '%{file}', '%s:%s' % (sub[0], sub[1])], capture_output=True, text=True, timeout=5).stdout
+                p2 = subprocess.run(['fc-match', '-f', '%{file}', '%s:%s' % (sub[0], sub[1])], capture_output=True, text=True, timeout=5).stdout if shutil.which('fc-match') else _pf.find(sub[0], sub[1] == 'bold')[0]
                 f = _ScaledFont(ImageFont.truetype(p2, 200), sub[2])
         except Exception: f = None
         _FONTS[k] = f
