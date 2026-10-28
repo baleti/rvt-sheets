@@ -10,7 +10,10 @@ _FONT = {}
 def _font(bold=False):
     if bold not in _FONT:
         from fontTools.ttLib import TTFont
-        f = subprocess.run(['fc-match', '-f', '%{file}', 'Arial:bold' if bold else 'Arial'], capture_output=True, text=True).stdout.strip()
+        f = ''
+        if shutil.which('fc-match'): f = subprocess.run(['fc-match', '-f', '%{file}', 'Arial:bold' if bold else 'Arial'], capture_output=True, text=True).stdout.strip()
+        if not f:
+            from . import _plat; f = _plat.fonts().find('Arial', bold=bold) or ''
         _FONT[bold] = TTFont(f)
     return _FONT[bold]
 
@@ -50,9 +53,33 @@ def flatten_scaled_text(svg):
     return _TEXT_SCALED.sub(rep, svg)
 
 
+def _svgs_to_pdf_browser(svg_files, out_pdf):
+    """no rsvg-convert (Windows / macOS): one vector PDF per sheet through headless Edge/Chrome, merged with pypdf when there are several"""
+    from . import _plat
+    R = _plat.render()
+    if not R.browser.find(): raise RuntimeError('rsvg-convert not installed and no Chromium-family browser found (set RVT_BROWSER)')
+    tdir = tempfile.mkdtemp(prefix='svgpdf'); parts = []
+    try:
+        for i, f in enumerate(svg_files):
+            t = open(f, encoding='utf-8').read(); g = flatten_scaled_text(t)
+            if g != t: f = os.path.join(tdir, '%d.svg' % i); open(f, 'w', encoding='utf-8').write(g)
+            parts.append(R.svg_to_pdf(f, os.path.join(tdir, '%d.pdf' % i)))
+        if len(parts) == 1: data = open(parts[0], 'rb').read()
+        else:
+            try: from pypdf import PdfWriter, PdfReader
+            except ImportError: raise RuntimeError('several sheets without rsvg-convert need pypdf (pip install pypdf)')
+            w = PdfWriter()
+            for q in parts:
+                for pg in PdfReader(q).pages: w.add_page(pg)
+            import io; b = io.BytesIO(); w.write(b); data = b.getvalue()
+        _plat.fsio().atomic_write(out_pdf, data)
+    finally: shutil.rmtree(tdir, ignore_errors=True)
+    return out_pdf
+
+
 def svgs_to_pdf(svg_files, out_pdf):
     """several SVG files -> one multi-page PDF (each page at the SVG's own width/height)"""
-    if not shutil.which('rsvg-convert'): raise RuntimeError('rsvg-convert not installed')
+    if not shutil.which('rsvg-convert'): return _svgs_to_pdf_browser(svg_files, out_pdf)
     tmp = out_pdf + '.%d.tmp' % os.getpid()
     tdir = tempfile.mkdtemp(prefix='svgpdf'); files = []
     try:

@@ -90,7 +90,12 @@ class Cache:
         """PNG thumbnail of a cached SVG (rsvg-convert); None when unavailable"""
         src = self.fn('%s_%d.svg' % (kind, eid)); dst = 'thumb_%s_%d.png' % (kind, eid)
         if self.has(dst): return self.fn(dst)
-        if not os.path.exists(src) or not shutil.which('rsvg-convert'): return None
+        if not os.path.exists(src): return None
+        if not shutil.which('rsvg-convert'):                       # Windows / macOS: headless Edge/Chrome (rvtplat.render)
+            try:
+                from . import _plat; _plat.render().svg_to_png(src, self.fn(dst) + '.tmp.png', width=width)
+                replace_retry(self.fn(dst) + '.tmp.png', self.fn(dst)); return self.fn(dst)
+            except Exception: return None
         try:
             subprocess.run(['rsvg-convert', '-w', str(width), '-b', 'white', src, '-o', self.fn(dst) + '.tmp'], check=True, timeout=120, capture_output=True)
             replace_retry(self.fn(dst) + '.tmp', self.fn(dst)); return self.fn(dst)
